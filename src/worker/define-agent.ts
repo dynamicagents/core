@@ -36,8 +36,11 @@ import {
  *   fetch: createA2AWorker<Env>({ manifest: hostManifest, agents: [reactive] })
  * };
  *
- * // the agent's Workflow entrypoint
- * await runHandleTask(event.payload, step, {
+ * // the agent's Workflow entrypoint. `return`, not a bare `await`: the platform
+ * // records what `run()` returns as the instance's `output`, and that verdict is
+ * // the only thing distinguishing a failed task from a successful one on a
+ * // record where both are `complete` with every step `ok`.
+ * return await runHandleTask(event.payload, step, {
  *   resolveAgent: (identity) => reactive.resolveAgent(this.env, identity),
  *   …
  * });

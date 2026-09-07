@@ -91,6 +91,18 @@ export interface HandleTaskParams {
  * projection, deliberately — an outcome, a kind, two counts. Never a reply: the
  * 1 MiB cap that keeps every `step.do` return here small applies to this too,
  * and the reply is already durable in the Task the gatekeeper was sent.
+ *
+ * **`turns` can undercount, and the cause is older than this record.** A round
+ * that already persisted its outcome and whose `turn:<round>` step then re-runs
+ * uncached — the crash window between the Durable Object's write and the step's
+ * own result being recorded — recovers from the durable rows without inferring,
+ * and reports `turns: 0` for work a model genuinely did. That is
+ * {@link RoundAgentBase.runTaskTurn}'s existing behaviour and it already feeds
+ * `turnsUsed`, so the same undercount reaches the `mode` decision; the count
+ * here inherits it rather than introducing it. Reading it as a floor is safe,
+ * reading it as an exact ledger is not, and closing the gap means persisting a
+ * round's spend beside its outcome — a change to the durability model, not to
+ * this projection.
  */
 export type TaskVerdict =
   /** A round answered the user. The ordinary ending. */
@@ -233,6 +245,13 @@ type ResolveAgent = () => AgentStub;
  * what a round *spends* is `TurnBudget`, and what bounds the Task is
  * `mainAgentLimits` — both of which are checked whatever this says.
  */
+/** A fault's text, cut to {@link MAX_VERDICT_ERROR_CHARS} and marked if it was. */
+function truncate(error: string): string {
+  return error.length <= MAX_VERDICT_ERROR_CHARS
+    ? error
+    : `${error.slice(0, MAX_VERDICT_ERROR_CHARS)}… [truncated]`;
+}
+
 function turnStep(config: CoreConfig): WorkflowStepConfig {
   return {
     ...CHUNK_STEP,
@@ -278,7 +297,7 @@ export async function runHandleTask(
     // called this function and only one had written that `catch`; the other three
     // carried the 2026-08-19 failure silently. A guard nobody can forget is worth
     // more than a helper everybody must remember.
-    await deliverAbandonedTask(step, cause, {
+    const delivered = await deliverAbandonedTask(step, cause, {
       push: {
         taskId: p.taskId,
         contextId: p.contextId,
@@ -298,10 +317,18 @@ export async function runHandleTask(
       },
       label: deps.label
     });
-    // Reached only when the recovery *delivered*. When it could not, it rethrows
-    // the original cause and the instance errors — which is the honest record
-    // there, and the one thing this return must not paper over.
-    return { outcome: "abandoned", error: String(cause) };
+    // Reached only when the recovery ran to completion. When it could not, it
+    // rethrows the original cause and the instance errors — which is the honest
+    // record there, and the one thing this return must not paper over.
+    //
+    // `delivered` is false when the guarded write refused, and that is a
+    // different story with the same shape: the caller canceled while the retries
+    // burned, so nothing was abandoned to anyone. Reporting `abandoned` there
+    // would describe a failure the user never saw, which is the class of defect
+    // this whole verdict exists to end.
+    return delivered
+      ? { outcome: "abandoned", error: truncate(String(cause)) }
+      : { outcome: "canceled", rounds: 0, turns: 0 };
   }
 }
 
@@ -323,6 +350,19 @@ export async function runHandleTask(
  * whole allowance leaves the fallback a single step no matter what was decided
  * here.
  */
+/**
+ * The most of an arbitrary fault's text a {@link TaskVerdict} will carry.
+ *
+ * `cause` is whatever was thrown, and a provider or a tool can throw an error
+ * whose message is a whole response body. The verdict is the Workflow
+ * instance's `output` and that has a 1 MiB ceiling — so an unbounded diagnostic
+ * here would fail a run *while serializing its record of having recovered*,
+ * turning the one path that exists to avoid a silent failure into one. The log
+ * line above it is unbounded and stays that way: a log that is too long is still
+ * a log.
+ */
+const MAX_VERDICT_ERROR_CHARS = 2_000;
+
 const MIN_OPEN_ROUND_TURNS = 2;
 
 /**
@@ -533,15 +573,22 @@ async function orchestrate(
         kind: turn.kind,
         error: turn.error
       });
-      await deliver(p, step, agent, null, deps, {
+      const told = await deliver(p, step, agent, null, deps, {
         kind: turn.kind,
         detail: turn.error
       });
-      return { outcome: "failed", kind: turn.kind, rounds, turns: turnsUsed };
+      // A cancellation that landed while the round was failing: the guarded
+      // write refused, so the user was never told about this failure and the
+      // record must not claim they were.
+      return told
+        ? { outcome: "failed", kind: turn.kind, rounds, turns: turnsUsed }
+        : { outcome: "canceled", rounds, turns: turnsUsed };
     }
     if (turn.status === "replied") {
-      await deliver(p, step, agent, turn.reply, deps);
-      return { outcome: "replied", rounds, turns: turnsUsed };
+      const told = await deliver(p, step, agent, turn.reply, deps);
+      return told
+        ? { outcome: "replied", rounds, turns: turnsUsed }
+        : { outcome: "canceled", rounds, turns: turnsUsed };
     }
 
     // Delegated: run this round's Subtasks, then loop and let the model decide
@@ -576,12 +623,14 @@ async function orchestrate(
   console.error(`[${tag}] round budget exhausted without a reply`, {
     taskId: p.taskId
   });
-  await deliver(p, step, agent, null, deps);
-  return {
-    outcome: "budget-exhausted",
-    rounds: limits.maxTurns + 1,
-    turns: turnsUsed
-  };
+  const told = await deliver(p, step, agent, null, deps);
+  return told
+    ? {
+        outcome: "budget-exhausted",
+        rounds: limits.maxTurns + 1,
+        turns: turnsUsed
+      }
+    : { outcome: "canceled", rounds: limits.maxTurns + 1, turns: turnsUsed };
 }
 
 /**
@@ -741,14 +790,14 @@ async function deliver(
   reply: string | null,
   deps: HandleTaskDeps,
   failure?: { kind: RoundFailureKind; detail: string }
-): Promise<void> {
+): Promise<boolean> {
   // Resolved outside the step body so a replay cannot take a different branch
   // than the write it is replaying.
   const failedText =
     (failure && deps.failureCopy?.(failure.kind, failure.detail)) ||
     deps.policy.copy.taskFailed;
 
-  await deliverTerminalTask(step, {
+  return await deliverTerminalTask(step, {
     push: {
       taskId: p.taskId,
       contextId: p.contextId,

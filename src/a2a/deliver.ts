@@ -88,17 +88,27 @@ export class TaskAlreadyTerminalError extends Error {
  * whose turn is a single inference ends it the same way, and importing this from
  * `/round` would put the whole delegation engine in a bundle that must not carry
  * it. Everything it calls already lives here.
+ *
+ * Returns whether it delivered: `false` is that cancellation, and it is the only
+ * way a caller can tell "this turn ended and the user was told" from "this turn
+ * ended and the user had already stopped listening". A caller with nothing to
+ * record may ignore it, as every caller did before there was anything to record.
  */
 export async function deliverTerminalTask(
   step: WorkflowStep,
   options: DeliverTerminalOptions
-): Promise<void> {
+): Promise<boolean> {
   const at = options.stepPrefix ?? "";
   const task = await step.do(`${at}complete`, async () => {
     const terminal = options.terminal();
     return (await options.saveTask(terminal)) ? terminal : null;
   });
-  if (!task) return;
+  // The guarded write refused, which on this path means one thing: the caller
+  // canceled while this turn was working, and the Task is already terminal as
+  // `canceled`. Nothing was persisted and nothing will be posted — so this
+  // reports that it delivered nothing, rather than leaving every caller to infer
+  // it from a `void` that looks identical to success.
+  if (!task) return false;
 
   // Caught, not left to propagate: the terminal Task is already durably saved,
   // so a sweep that still fails once the step's own retries are exhausted must
@@ -132,6 +142,7 @@ export async function deliverTerminalTask(
   } catch (err) {
     throw new TaskAlreadyTerminalError(err);
   }
+  return true;
 }
 
 /**
@@ -190,7 +201,9 @@ export interface AbandonedTaskOptions {
  * **It resolves after a successful delivery — it does not rethrow.** Rethrowing
  * would reproduce the very "hung Worker" record this exists to remove, and the
  * instance genuinely has finished its job: the Task is terminal and the gatekeeper
- * has been told.
+ * has been told. It resolves `false` when the guarded write refused, which means
+ * the caller canceled while the retries were burning: nothing was abandoned to
+ * the user, because the user had already gone.
  *
  * **It rethrows the *original* `cause` when the delivery itself fails.**
  * Swallowing there would mark the instance successful while the user got
@@ -222,7 +235,7 @@ export async function deliverAbandonedTask(
   step: WorkflowStep,
   cause: unknown,
   options: AbandonedTaskOptions
-): Promise<void> {
+): Promise<boolean> {
   // Nothing was abandoned: the ordinary delivery already persisted a terminal
   // Task and only its callback failed. Rethrow the fault that actually
   // happened, so the instance still errors exactly as it did before any
@@ -244,7 +257,7 @@ export async function deliverAbandonedTask(
   });
 
   try {
-    await deliverTerminalTask(step, {
+    return await deliverTerminalTask(step, {
       push: options.push,
       signingKey: options.signingKey,
       saveTask: options.saveTask,

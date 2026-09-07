@@ -202,7 +202,10 @@ describe("what a round carries out of itself", () => {
 
     expect(outputs(observed)[0]).toContain("line one");
     expect(outputs(observed)[0]).toMatch(/truncated/);
-    expect(outputs(observed)[0].length).toBeLessThan(5_000);
+    // At or under the cap, marker included. A bound every shortened result
+    // overshoots by the length of its own marker is not a bound — and it is
+    // multiplied by every result in every carried round.
+    expect(outputs(observed)[0].length).toBeLessThanOrEqual(4_000);
   });
 
   /**
@@ -219,6 +222,7 @@ describe("what a round carries out of itself", () => {
     ]);
 
     expect(outputs(observed)[0]).toContain("fatal: authentication failed");
+    expect(outputs(observed)[0].length).toBeLessThanOrEqual(4_000);
     const part = (observed[1] as { content: { output: { type: string } }[] })
       .content[0];
     expect(part.output.type).toBe("error-text");

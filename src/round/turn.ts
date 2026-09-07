@@ -503,18 +503,7 @@ interface RejectedCall {
  * which is what the fallback slot exists for.
  */
 type Attempt =
-  | {
-      ok: true;
-      decision: TurnDecision;
-      /**
-       * The work-tool exchanges this attempt produced, already filtered and
-       * bounded. Only a winning attempt's are kept: a slot that failed and a
-       * repair that was rejected both reasoned from calls the round did not end
-       * on, and carrying those would hand the next round a history its own
-       * ending never followed from.
-       */
-      observations: ModelMessage[];
-    }
+  | { ok: true; decision: TurnDecision }
   | { ok: false; error: unknown; rejected?: RejectedCall };
 
 /**
@@ -544,7 +533,24 @@ async function attempt(
   control: ControlTool[],
   model: () => LanguageModel,
   instructions: string,
-  messages: ModelMessage[]
+  messages: ModelMessage[],
+  /**
+   * The **round's** record of what it saw, appended to as this attempt works.
+   *
+   * Owned by the round rather than the attempt, and that is the whole of it: a
+   * tool call is a thing that *happened*, and it does not un-happen because the
+   * attempt that made it went on to run out of steps or emit a `delegate` the
+   * round refused. A primary that cloned a repository and then failed has
+   * genuinely cloned it — so a fallback's successful round that carried only its
+   * own calls would hand the next round a history missing the very work already
+   * done, and the next round would do it again. Which is this feature's own
+   * failure mode, reintroduced one level down.
+   *
+   * The invalid *ending* still goes: `captureObservations` drops any message
+   * reaching for a control tool, so a rejected `delegate` never survives while
+   * the work in front of it does.
+   */
+  seen: ModelMessage[]
 ): Promise<Attempt> {
   const final = args.mode === "final";
   // One step per attempt for a `final` round: it exists to produce the answer, and
@@ -576,12 +582,6 @@ async function attempt(
         FINAL_REPLY_TOOL_NAME
       ])
     : undefined;
-
-  // What this attempt actually sees, accumulated as it works. Collected from
-  // `onStepEnd` rather than `result.steps` for the same reason the budget is:
-  // the messages of a step that ran are worth keeping even when the call around
-  // them later throws, and the `catch` below has no `result` to read.
-  const seen: ModelMessage[] = [];
 
   try {
     const result = await generateText({
@@ -641,14 +641,7 @@ async function attempt(
       let subject: unknown = reached.inputs[0];
       try {
         subject = reached.control.select(reached.inputs);
-        return {
-          ok: true,
-          decision: reached.control.parse(subject),
-          observations: captureObservations(seen, {
-            round: args.round,
-            controlNames: control.map((c) => c.name)
-          })
-        };
+        return { ok: true, decision: reached.control.parse(subject) };
       } catch (error) {
         // The model ended the round but the call cannot be used. Repairable: it is
         // handed this error and asked again, rather than costing the whole slot.
@@ -848,6 +841,11 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
   const diagnostics: string[] = [];
   const errors: unknown[] = [];
 
+  // Everything this round observed, across every slot and every repair. See the
+  // `seen` parameter of `attempt` for why it is the round's and not an
+  // attempt's — a call that ran is a call that ran, whichever attempt made it.
+  const seen: ModelMessage[] = [];
+
   for (const slot of ["primary", "fallback"] as const) {
     const modelId =
       slot === "primary" ? models.primaryId() : models.fallbackId();
@@ -862,7 +860,14 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
       // Both slots draw on the one `args.budget`, which each attempt reads on entry
       // and charges as it works. A fallback attempt is spend, not a free retry —
       // and so is a repair.
-      const outcome = await attempt(args, control, model, system, slotMessages);
+      const outcome = await attempt(
+        args,
+        control,
+        model,
+        system,
+        slotMessages,
+        seen
+      );
 
       if (!outcome.ok) {
         // Before anything else, and before the fallback slot exists as an
@@ -962,7 +967,10 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
         status: "delegated",
         reply: stored,
         drafts: outcome.decision.drafts,
-        observations: outcome.observations
+        observations: captureObservations(seen, {
+          round,
+          controlNames: control.map((c) => c.name)
+        })
       };
     }
   }

@@ -700,6 +700,41 @@ describe("what a round carries to the next one", () => {
     expect(observed).not.toContain("Launching");
   });
 
+  /**
+   * A tool call is a thing that happened, and it does not un-happen because the
+   * attempt that made it went on to fail.
+   *
+   * The concrete case: a primary clones the repository, then runs out of steps
+   * without reaching an ending. The fallback delegates successfully. If the round
+   * carried only the winning attempt's calls, the next round would inherit no
+   * record of a clone that genuinely ran — and would clone again. That is this
+   * feature's own failure mode, reintroduced one level down.
+   */
+  it("keeps work a failed attempt completed before it failed", async () => {
+    const primary = mockModel(
+      {
+        toolCall: {
+          toolName: "repo_clone",
+          input: { url: "https://github.com/o/r" }
+        }
+      },
+      // Narration, not an ending: the attempt dies with `round produced no
+      // decision` and the slot moves on to the fallback.
+      { text: "I cloned it and I am thinking about what to do next" }
+    );
+    const fallback = mockModel(delegated("on it"));
+
+    const outcome = await runTurn(
+      args({ tools: workTools, models: pair(primary, fallback) })
+    );
+
+    expect(outcome.status).toBe("delegated");
+    const observed = JSON.stringify(
+      outcome.status === "delegated" ? outcome.observations : []
+    );
+    expect(observed).toContain("reused the existing checkout");
+  });
+
   /** A round that answered has ended the task. There is no later round to tell. */
   it("reports none from a round that replied", async () => {
     const outcome = await runTurn(

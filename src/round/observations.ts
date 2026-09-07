@@ -118,9 +118,19 @@ function bound(output: ToolResultPart["output"]): ToolResultPart["output"] {
   return { type: "text", value: DROPPED_TOOL_OUTPUT };
 }
 
-/** The head of a text payload, marked so the model knows the rest was there. */
+/**
+ * The head of a text payload, marked so the model knows the rest was there.
+ *
+ * The marker is charged against the cap rather than appended past it. A bound
+ * every shortened result overshoots by the length of its own marker is not a
+ * bound — and this one is multiplied by every result in every carried round,
+ * which is the arithmetic {@link MAX_OBSERVATION_CHARS} exists to keep honest.
+ */
 function shorten(text: string): string {
-  return text.slice(0, MAX_OBSERVATION_OUTPUT_CHARS) + TRUNCATION_MARKER;
+  return (
+    text.slice(0, MAX_OBSERVATION_OUTPUT_CHARS - TRUNCATION_MARKER.length) +
+    TRUNCATION_MARKER
+  );
 }
 
 /** Rough serialized size of a whole message, for {@link MAX_OBSERVATION_CHARS}. */

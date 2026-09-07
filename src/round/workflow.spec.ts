@@ -193,6 +193,44 @@ describe("a task canceled while the model is working", () => {
     // this one did not.
     expect(ran).not.toContain("sweep");
   });
+
+  /**
+   * And the record says so. A reply the guarded write refused is a reply nobody
+   * received, so calling the run `replied` would describe an outcome the user
+   * never saw — the same class of defect as a failed task recording itself as a
+   * clean `complete`.
+   */
+  it("reports the cancellation, not the reply nobody got", async () => {
+    const { stub } = fakeAgent({ saveTask: false });
+    const { step } = fakeStep({
+      cached: { "turn:0": { status: "replied", reply: "the answer", turns: 1 } }
+    });
+
+    await expect(runHandleTask(params(), step, deps(stub))).resolves.toEqual({
+      outcome: "canceled",
+      rounds: 1,
+      turns: 1
+    });
+  });
+
+  it("reports the cancellation over a failure nobody got either", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { stub } = fakeAgent({ saveTask: false });
+    const { step } = fakeStep({
+      cached: {
+        "turn:0": {
+          status: "failed",
+          kind: "exhausted",
+          error: "model exploded",
+          turns: 1
+        }
+      }
+    });
+
+    await expect(
+      runHandleTask(params(), step, deps(stub))
+    ).resolves.toMatchObject({ outcome: "canceled" });
+  });
 });
 
 describe("the ordinary path", () => {
@@ -958,6 +996,33 @@ describe("the verdict a finished run returns", () => {
     });
   });
 
+  /**
+   * `cause` is whatever was thrown, and the verdict is the instance's `output`,
+   * which has a 1 MiB ceiling. An unbounded diagnostic would fail a run while
+   * serializing its record of having recovered — the one path written to stop a
+   * silent failure, made into one.
+   */
+  it("caps a fault whose message is a whole response body", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const stub = {
+      async markWorking(): Promise<never> {
+        throw new Error("x".repeat(500_000));
+      },
+      async saveTask() {
+        return true;
+      },
+      async sweepTaskChildren() {}
+    };
+    const { step } = fakeStep({ cached: { "abandoned:notify": undefined } });
+
+    const verdict = await runHandleTask(params(), step, deps(stub));
+
+    expect(verdict.outcome).toBe("abandoned");
+    const { error } = verdict as { error: string };
+    expect(error.length).toBeLessThan(3_000);
+    expect(error).toMatch(/truncated/);
+  });
+
   it("reports a task canceled before the first round as having run none", async () => {
     const { stub } = fakeAgent({ markWorking: "canceled" });
     const { step } = fakeStep();
@@ -1145,10 +1210,13 @@ describe("a task abandoned after its retries are exhausted", () => {
       cached: { "abandoned:notify": undefined }
     });
 
-    await runHandleTask(params(), step, deps(stub));
+    const verdict = await runHandleTask(params(), step, deps(stub));
 
     expect(ran).toContain("abandoned:complete");
     expect(ran).not.toContain("abandoned:notify");
+    // Nothing was abandoned *to anyone*: the user had already stopped listening.
+    // `abandoned` here would report a failure that was never delivered.
+    expect(verdict).toMatchObject({ outcome: "canceled" });
   });
 
   /**
