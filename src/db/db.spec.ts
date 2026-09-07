@@ -10,6 +10,7 @@ import { buildCompletedTask, buildFailedTask } from "../a2a/notify.js";
 import type { PluginStore } from "./db.js";
 import type { TaskListQuery } from "./models/tasks.js";
 import type { SubtaskDraft } from "../subtasks/types.js";
+import type { ModelMessage } from "ai";
 
 /**
  * The durable layer, exercised inside a real Durable Object.
@@ -392,6 +393,122 @@ describe("subtasks", () => {
         db.subtasks.complete(row.id, [{ kind: "text", text: "   " }])
       ).toThrow(/non-empty text part/);
     });
+  });
+});
+
+/**
+ * What each round saw, kept for the rounds after it.
+ *
+ * The read is where the round window is applied, and the write is an upsert
+ * because `turn:<round>` is a durable step that can re-run. Both are properties
+ * of SQLite semantics rather than of the model layer, so they are exercised in a
+ * real Durable Object like everything else here.
+ */
+describe("round observations", () => {
+  const said = (text: string): ModelMessage[] => [
+    {
+      role: "assistant",
+      content: [
+        {
+          type: "tool-call",
+          toolCallId: "obs_r0_0",
+          toolName: "sb_ls",
+          input: {}
+        }
+      ]
+    },
+    {
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          toolCallId: "obs_r0_0",
+          toolName: "sb_ls",
+          output: { type: "text", value: text }
+        }
+      ]
+    }
+  ];
+
+  const firstOutput = (round: { messages: ModelMessage[] }): string => {
+    const message = round.messages[1];
+    if (message.role !== "tool") return "";
+    const part = message.content[0];
+    return part.type === "tool-result" && part.output.type === "text"
+      ? part.output.value
+      : "";
+  };
+
+  it("round-trips a round's exchanges", async () => {
+    const found = await withDb("obs-roundtrip", (db) => {
+      db.observations.put("t1", 0, said("reused the existing checkout"));
+      return db.observations.list("t1");
+    });
+
+    expect(found).toHaveLength(1);
+    expect(found[0].round).toBe(0);
+    expect(firstOutput(found[0])).toBe("reused the existing checkout");
+  });
+
+  /**
+   * The round is a durable step, so it can re-run after a crash, re-infer, and
+   * produce a different but equally valid account of the same round. The row is
+   * that round's current account — not a log of every attempt at it, which would
+   * show a later round the same round twice.
+   */
+  it("replaces a round's row rather than appending a second", async () => {
+    const found = await withDb("obs-upsert", (db) => {
+      db.observations.put("t1", 0, said("first attempt"));
+      db.observations.put("t1", 0, said("the retry"));
+      return db.observations.list("t1");
+    });
+
+    expect(found).toHaveLength(1);
+    expect(firstOutput(found[0])).toBe("the retry");
+  });
+
+  it("reads back only the window's rounds, oldest first", async () => {
+    const found = await withDb("obs-window", (db) => {
+      for (const round of [0, 1, 2, 3]) {
+        db.observations.put("t1", round, said(`round ${round}`));
+      }
+      return db.observations.recent("t1", 4, 2);
+    });
+
+    expect(found.map((r) => r.round)).toEqual([2, 3]);
+  });
+
+  /** The round asking is not one of the rounds it reads. */
+  it("never reads the round doing the asking, or any after it", async () => {
+    const found = await withDb("obs-before", (db) => {
+      for (const round of [0, 1, 2]) {
+        db.observations.put("t1", round, said(`round ${round}`));
+      }
+      return db.observations.recent("t1", 1, 99);
+    });
+
+    expect(found.map((r) => r.round)).toEqual([0]);
+  });
+
+  /** Zero is the opt-out, and it costs no query at all. */
+  it("reads nothing at a window of zero", async () => {
+    const found = await withDb("obs-zero", (db) => {
+      db.observations.put("t1", 0, said("something"));
+      return db.observations.recent("t1", 1, 0);
+    });
+
+    expect(found).toEqual([]);
+  });
+
+  it("keeps one task's rounds out of another's", async () => {
+    const found = await withDb("obs-scope", (db) => {
+      db.observations.put("t1", 0, said("mine"));
+      db.observations.put("t2", 0, said("theirs"));
+      return db.observations.recent("t1", 1, 4);
+    });
+
+    expect(found).toHaveLength(1);
+    expect(firstOutput(found[0])).toBe("mine");
   });
 });
 

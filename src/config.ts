@@ -178,6 +178,27 @@ export interface CoreConfig {
    */
   toolOutputWindow: number;
   /**
+   * How many **earlier rounds** of a task keep the work-tool exchanges they made,
+   * for the rounds that follow to read.
+   *
+   * A round is one `generateText` call, so the calls it makes and the results
+   * they return end with it: what survives into the Session is the round's
+   * *ending* — the acknowledgment the user saw. Carry nothing and each round
+   * inherits its predecessors' claims and none of their evidence, which is a loop
+   * that reinforces itself. A task on 2026-09-05 delegated thirteen times, and
+   * every one of those rounds re-made an SSH clone URL that had already been
+   * refused, because the refusal was a tool result and tool results were dropped.
+   *
+   * Two is enough for that: the wall a round just hit is the wall it is about to
+   * hit again. Raising it buys a longer memory of what has already been tried, at
+   * tokens that compete directly with `session.compactAfterTokens` — and the
+   * carried rounds are elided against each other
+   * (see {@link CoreConfig.toolOutputWindow}), so the cost grows slower than the
+   * count. Zero opts out entirely: no rows are read and the round renders exactly
+   * as it did before any of this existed.
+   */
+  roundObservationWindow: number;
+  /**
    * Upper bound on subtasks per **round** — a core invariant: a delegating round
    * emits `1..maxSubtasks` subtasks, which is also what bounds its fan-out (they
    * all run concurrently, with no other concurrency cap).
@@ -228,6 +249,7 @@ export const DEFAULT_CORE_CONFIG: CoreConfigBaseline = {
   mainAgentLimits: { maxTurns: 20, maxWallMs: 60 * 60_000 },
   subagentLimits: { maxTurns: 20, maxWallMs: 30 * 60_000 },
   toolOutputWindow: 4,
+  roundObservationWindow: 2,
   maxSubtasks: 8,
   session: {
     memoryMaxTokens: 1200,
@@ -284,6 +306,10 @@ export function resolveConfig(overrides: CoreConfigOverrides): CoreConfig {
     },
     toolOutputWindow:
       overrides.toolOutputWindow ?? DEFAULT_CORE_CONFIG.toolOutputWindow,
+    // `??`, not `||`: zero is a real choice here and means carry nothing.
+    roundObservationWindow:
+      overrides.roundObservationWindow ??
+      DEFAULT_CORE_CONFIG.roundObservationWindow,
     maxSubtasks: overrides.maxSubtasks ?? DEFAULT_CORE_CONFIG.maxSubtasks,
     session: { ...DEFAULT_CORE_CONFIG.session, ...overrides.session }
   };
@@ -328,6 +354,20 @@ export function resolveConfig(overrides: CoreConfigOverrides): CoreConfig {
   positive(config.toolOutputWindow, "toolOutputWindow");
   positive(config.maxSubtasks, "maxSubtasks");
   positive(config.model.maxOutputTokens, "model.maxOutputTokens");
+
+  // Zero is legal here too, and means the same as it does above: carry nothing,
+  // and a round renders exactly as it did before observations existed. So this is
+  // not `positive` — but it *is* an integer count of rounds, and a fractional one
+  // would silently read a different number of rows than it named.
+  if (
+    !Number.isInteger(config.roundObservationWindow) ||
+    config.roundObservationWindow < 0
+  ) {
+    throw new ConfigError(
+      `roundObservationWindow must be a non-negative integer, got ` +
+        `${config.roundObservationWindow} — 0 carries nothing between rounds`
+    );
+  }
 
   // Zero is legal (it opts out), so this is not `positive`. The ceiling is the
   // step timeout: retries happen inside `step.do("turn:<round>")`, and the AI

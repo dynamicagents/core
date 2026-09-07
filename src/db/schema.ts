@@ -3,11 +3,12 @@ import {
   text,
   integer,
   index,
+  primaryKey,
   uniqueIndex
 } from "drizzle-orm/sqlite-core";
 
 /**
- * Core's two tables. Both live in the caller's agent DO SQLite
+ * Core's three tables. All live in the caller's agent DO SQLite
  * (`this.ctx.storage`), so a row is unreachable from any other caller by
  * construction.
  *
@@ -101,5 +102,37 @@ export const subtasks = sqliteTable(
     index("idx_subtasks_task_round").on(table.taskId, table.round),
     index("idx_subtasks_status").on(table.status),
     index("idx_subtasks_created_at").on(table.createdAt)
+  ]
+);
+
+/**
+ * What each round saw: the work-tool calls it made and what came back.
+ *
+ * One row per `(task_id, round)`, holding the round's exchanges as the AI SDK's
+ * `ModelMessage[]` in JSON. Written by the delegating path of a round and read
+ * by the rounds after it, which restore the calls as the pairs they were — the
+ * same reconstruction `subtasks` already backs for the `delegate` call itself.
+ *
+ * Durable rather than in-memory because the reader is a *different* Workflow
+ * step, often minutes later, and a Durable Object can be evicted or reset
+ * between two rounds of one task. Rows rather than Session messages because
+ * history is text-only and stays that way.
+ *
+ * A composite primary key, so a re-run of `turn:<round>` overwrites its own row
+ * instead of appending a second copy of a round that happened once.
+ */
+export const roundObservations = sqliteTable(
+  "round_observations",
+  {
+    taskId: text("task_id").notNull(),
+    /** Main-agent round that made these calls (0-based). */
+    round: integer("round").notNull(),
+    /** JSON `ModelMessage[]` — already paired, re-identified and bounded. */
+    messagesJson: text("messages_json").notNull(),
+    createdAt: integer("created_at").notNull()
+  },
+  (table) => [
+    primaryKey({ columns: [table.taskId, table.round] }),
+    index("idx_round_observations_created_at").on(table.createdAt)
   ]
 );
