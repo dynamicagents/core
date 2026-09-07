@@ -1,6 +1,23 @@
 import type { AgentLimits } from "../config.js";
 
 /**
+ * Why a round was handed no tools but the answer.
+ *
+ * A ceiling and a wall end a round the same way and read to the user completely
+ * differently, so {@link file://./turn.ts RoundMode} says what the round may *do*
+ * and this says *why* — the same split {@link file://./turn.ts RunTurnOutcome}
+ * makes between a status and its kind.
+ *
+ * - `budget` — the Task spent its turns or its wall clock. The original reason,
+ *   and what a caller that names none is taken to mean.
+ * - `no-progress` — several rounds in a row delegated work that came back failing
+ *   the identical way. The budget is intact and the work is going nowhere, so a
+ *   round told its budget was spent would be told something false, and would tell
+ *   the user so in turn.
+ */
+export type FinalRoundReason = "budget" | "no-progress";
+
+/**
  * Everything about a round loop that is **yours**, not core's.
  *
  * The round loop in this subpath is mechanism: concurrent subtask execution,
@@ -16,7 +33,7 @@ import type { AgentLimits } from "../config.js";
  * ```ts
  * export const policy: RoundPolicy = {
  *   roundContract: ({ typeKeys, maxSubtasks }) => `…`,
- *   finalRoundNote: (limits) => `…`,
+ *   finalRoundNote: (limits, reason) => `…`,
  *   copy: {
  *     taskFailed: "Sorry — something went wrong handling that request.",
  *     recoveredReply: "Working on your request.",
@@ -71,11 +88,17 @@ export interface RoundPolicy {
   }): string;
 
   /**
-   * Appended when the task has spent its budget. That round is handed no work
-   * tools and no `delegate`, so this explains a constraint the model can already
-   * see rather than imposing one.
+   * Appended when a round is forced to answer. That round is handed no work tools
+   * and no `delegate`, so this explains a constraint the model can already see
+   * rather than imposing one.
+   *
+   * Called once per {@link FinalRoundReason} when the instructions are built, so
+   * both arms exist before either is needed. An implementation that ignores the
+   * reason still satisfies this and gets one note for both — accurate about the
+   * constraint, wrong about the cause, which is the whole argument for writing
+   * the second arm.
    */
-  finalRoundNote(limits: AgentLimits): string;
+  finalRoundNote(limits: AgentLimits, reason: FinalRoundReason): string;
 
   /** The strings a user can actually read. */
   copy: {

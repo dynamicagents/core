@@ -12,7 +12,7 @@ import type { GatekeeperIdentity } from "../a2a/verify.js";
 import type { RoundFailureKind } from "../agent/inference.js";
 import type { SubtaskId } from "../subtasks/types.js";
 import type { RoundAgentBase } from "./agent.js";
-import type { RoundPolicy } from "./policy.js";
+import type { FinalRoundReason, RoundPolicy } from "./policy.js";
 import type { RoundMode } from "./turn.js";
 
 /**
@@ -33,10 +33,13 @@ import type { RoundMode } from "./turn.js";
  *    lives here, in the loop, not inside a round.
  * 3. **Deliver** — persist the terminal Task, then POST a signed callback.
  *
- * The main agent is never forced either way. A round that has run out of budget —
- * `mainAgentLimits`, in turns or in wall clock — is handed no tools but the
- * answer, so it has to give one; every other round chooses. That is the whole
- * reason this is a loop, and the whole termination argument.
+ * The main agent is never forced either way. A round the loop has stopped — out of
+ * budget (`mainAgentLimits`, in turns or in wall clock) or out of progress
+ * ({@link NO_PROGRESS_ROUNDS}) — is handed no tools but the answer, so it has to
+ * give one; every other round chooses. That is the whole reason this is a loop,
+ * and the whole termination argument. Both stops end in the model's own words:
+ * the failure copy is for a round that could not answer, never for one the loop
+ * decided to end.
  *
  * Why a Workflow (not a DO alarm or `waitUntil`): `step.do(...)` gives durable,
  * independently-retried steps that survive isolate eviction, and a future
@@ -254,6 +257,48 @@ export async function runHandleTask(
 }
 
 /**
+ * Turns an `open` round needs before it is worth opening: one to spend on a work
+ * tool, one to reach the control call that ends the round.
+ *
+ * A round is bounded by a step count and ends **only** on a control call, so a
+ * round handed a single turn dies on that counter the moment it looks anything
+ * up — no ending, no answer, and the fallback slot's one-step floor fails the
+ * same way behind it. Not hypothetical: it is how a task spent the 60th call of
+ * its 60-turn budget on a `repo_clone`, failed with `round produced no
+ * decision`, and delivered the generic failure copy — having walked straight
+ * past the forced-answer path that exists for exactly this ceiling.
+ *
+ * So the last turn is reserved for the answer rather than offered to a round
+ * that cannot use it. {@link file://./turn.ts turn.ts} holds the same rule per
+ * *attempt*, which is the half this one cannot reach: a primary that burns the
+ * whole allowance leaves the fallback a single step no matter what was decided
+ * here.
+ */
+const MIN_OPEN_ROUND_TURNS = 2;
+
+/**
+ * Rounds that may fail identically in a row before the loop stops delegating.
+ *
+ * The third bound on a Task, and the only one that measures *progress* rather
+ * than spend. `maxTurns` and `maxWallMs` bound what a Task may consume, and a
+ * Task consuming its budget on the same failing delegation over and over is
+ * inside both of them the whole way: the run this exists for delegated the same
+ * subtask thirteen times over twelve minutes — thirteen near-identical messages
+ * to the user, each one claiming work was underway — against a three-hour wall
+ * clock it never came close to, and ended on the turn budget by accident.
+ *
+ * "Identical" is meant strictly, and that is what keeps this from stopping work
+ * that was going somewhere: every branch of the round failed, and the failures
+ * match the previous round's line for line. A round that completed anything, or
+ * that failed a different way, resets the count — a model reacting to a new error
+ * is a model still working the problem.
+ *
+ * Three rather than two because a wall can be intermittent and the second look is
+ * cheap; four rounds is still an early, honest stop rather than a budget spent.
+ */
+const NO_PROGRESS_ROUNDS = 3;
+
+/**
  * The orchestration proper — every ordinary outcome ends inside here, and
  * anything that escapes is what {@link runHandleTask} turns into a delivered
  * failure.
@@ -298,6 +343,13 @@ async function orchestrate(
   // below stays deterministic.
   let turnsUsed = 0;
 
+  // The other input to `mode`: how many rounds in a row came back failing the
+  // identical way, and what they said. Accumulated from cached step returns for
+  // the same reason `turnsUsed` is — a replay that reconstructed a different
+  // count would hand a round a different mode than the one it ran under.
+  let repeated = 0;
+  let lastFailures = "";
+
   // The Task's own start, in a step so replays read the original instant rather
   // than restarting the clock — otherwise a Workflow that retried its way through
   // the night would never observe the deadline it had long since passed.
@@ -326,18 +378,47 @@ async function orchestrate(
 
     // Out of turns or out of time ⇒ this round gets no tools at all and must
     // answer. Not a failure mode: it is how a ceiling returns the work instead of
-    // dropping it.
-    const mode: RoundMode =
-      turnsUsed >= limits.maxTurns || overdue ? "final" : "open";
+    // dropping it. "Out of turns" is one turn early on purpose — see
+    // {@link MIN_OPEN_ROUND_TURNS}.
+    const turnsRemaining = limits.maxTurns - turnsUsed;
+    const spent = turnsRemaining < MIN_OPEN_ROUND_TURNS || overdue;
+    // …and so does a Task that is getting nowhere. Nothing is spent here: what
+    // has run out is the evidence that another round would do anything
+    // different. See {@link NO_PROGRESS_ROUNDS}.
+    const stalled = repeated >= NO_PROGRESS_ROUNDS;
+    const mode: RoundMode = spent || stalled ? "final" : "open";
+    // Both reasons produce the same round and read to the user completely
+    // differently, so the round is told which it is. A budget that ran out while
+    // the work was also failing is reported as the budget: it is the harder
+    // ceiling and the one that will still be there next round.
+    const finalReason: FinalRoundReason | undefined =
+      mode === "open" ? undefined : spent ? "budget" : "no-progress";
     if (mode === "final") {
-      // Worth its own line: from the outside, a round the budget ended is
-      // indistinguishable from a model that simply chose to answer.
-      console.warn("[handle-task] task budget spent, forcing an answer", {
-        taskId: p.taskId,
-        round,
-        turnsUsed,
-        overdue
-      });
+      // Worth its own line either way: from the outside, a round that was forced
+      // is indistinguishable from a model that simply chose to answer.
+      if (spent) {
+        console.warn("[handle-task] task budget spent, forcing an answer", {
+          taskId: p.taskId,
+          round,
+          turnsUsed,
+          turnsRemaining,
+          overdue
+        });
+      } else {
+        // The line whose absence made an incident take telemetry archaeology.
+        // It carries the wall itself, because "which wall" is the first thing
+        // anyone reading this will want and the Subtask rows are the only other
+        // place it exists.
+        console.warn(
+          "[handle-task] no progress across rounds, forcing an answer",
+          {
+            taskId: p.taskId,
+            round,
+            repeated,
+            failures: lastFailures
+          }
+        );
+      }
     }
 
     // The main agent decides. `runTaskTurn` persists whatever the round produced
@@ -360,7 +441,8 @@ async function orchestrate(
           identity: p.identity,
           round,
           mode,
-          turnsRemaining: limits.maxTurns - turnsUsed,
+          finalReason,
+          turnsRemaining,
           push
         });
         if (result.status === "replied")
@@ -410,6 +492,19 @@ async function orchestrate(
     // again.
     const executed = await executeSubtasks(p, step, agent, round, push);
     if (executed === "canceled") return;
+
+    // What that round actually achieved — the loop's only progress measure, and
+    // empty for any round that completed something. Read in a step of its own for
+    // the reason the clock is: it feeds `mode`, so a replay has to reconstruct
+    // the identical answer rather than re-deriving one from rows that have since
+    // moved on.
+    const failures = await step.do(`failures:${round}`, () =>
+      agent().roundFailures(p.taskId, round)
+    );
+    const fingerprint = failures.join("\n");
+    if (fingerprint === "") repeated = 0;
+    else repeated = fingerprint === lastFailures ? repeated + 1 : 1;
+    lastFailures = fingerprint;
   }
 
   // Unreachable: a `final` round is handed only `final_reply`, so it either

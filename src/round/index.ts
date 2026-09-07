@@ -14,11 +14,14 @@
  *
  * **Core still ships no prompt copy.** Everything the model and the user read
  * comes from the {@link RoundPolicy} an agent supplies: the round contract, the
- * budget-spent note, and the three user-facing strings. That is the line — core
+ * forced-answer notes, and the three user-facing strings. That is the line — core
  * owns the machine, you own the words.
  */
 
-export type { RoundPolicy } from "./policy.js";
+// `FinalRoundReason` rides with the policy: it is the second argument of
+// `finalRoundNote`, and a host writing that note should not have to guess the
+// union its own words are selected by.
+export type { FinalRoundReason, RoundPolicy } from "./policy.js";
 
 export { RoundAgentBase } from "./agent.js";
 

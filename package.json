@@ -1,6 +1,6 @@
 {
   "name": "@dynamicagents/core",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Shared, mandatory foundation for Dynamic Agents on Cloudflare Workers: zero-trust A2A, durable task lifecycle, delegation and subagent runtime, test harness.",
   "keywords": [
     "a2a",

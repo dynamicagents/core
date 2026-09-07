@@ -44,7 +44,7 @@ import {
   type ReferenceCatalogEntry
 } from "../subtasks/catalog.js";
 import type { CompositionBranch, SubtaskDraft } from "../subtasks/types.js";
-import type { RoundPolicy } from "./policy.js";
+import type { FinalRoundReason, RoundPolicy } from "./policy.js";
 
 /**
  * One **round** of the main agent: a single inference over the agent's continuous
@@ -107,8 +107,16 @@ import type { RoundPolicy } from "./policy.js";
 export interface TurnInstructions {
   /** Contract + per-type delegation guidance. Appended to soul + caller context. */
   open: string;
-  /** Further appended when the budget is spent. */
-  final: string;
+  /**
+   * The same, plus the note for a round that was forced to answer — one per
+   * {@link FinalRoundReason}, because a round stopped by a wall and a round
+   * stopped by a ceiling are told different things.
+   *
+   * A `Record` rather than a lookup, so a reason added to the union fails the
+   * build here, where the words are, instead of silently falling back to the
+   * wrong ones at runtime.
+   */
+  final: Record<FinalRoundReason, string>;
 }
 
 /**
@@ -134,7 +142,13 @@ export function buildTurnInstructions(
   const open =
     policy.roundContract({ typeKeys: types.keys, maxSubtasks }) +
     (guidance ? `\n\n${guidance}` : "");
-  return { open, final: open + policy.finalRoundNote(limits) };
+  return {
+    open,
+    final: {
+      budget: open + policy.finalRoundNote(limits, "budget"),
+      "no-progress": open + policy.finalRoundNote(limits, "no-progress")
+    }
+  };
 }
 
 /** Join one branch's parts into its text block. */
@@ -313,18 +327,20 @@ export function joinSuccessfulBranches(
 }
 
 /**
- * How much rope this round gets, decided by the Workflow from the Task's spent
- * budget.
+ * How much rope this round gets, decided by the Workflow.
  *
  * - `open` — the normal round: `delegate`, `final_reply`, and every work tool.
  *   It may spend whatever is left of the turn budget.
- * - `final` — the Task has spent its turns or its wall clock. **No work tools and
- *   no `delegate`**: the only thing on the table is the answer. This is not a
- *   punishment but the shape of the ceiling — a budget that ends in a forced
- *   answer returns the work, where one that simply stopped would discard it.
- *   Costs one turn, or two if the primary model fails and the fallback has to
- *   produce the answer instead; a fallback with no step to spend could not answer
- *   at all.
+ * - `final` — the round has to answer. **No work tools and no `delegate`**: the
+ *   only thing on the table is the answer. This is not a punishment but the shape
+ *   of a ceiling — one that ends in a forced answer returns the work, where one
+ *   that simply stopped would discard it. Costs one turn, or two if the primary
+ *   model fails and the fallback has to produce the answer instead; a fallback
+ *   with no step to spend could not answer at all.
+ *
+ * The Workflow forces the second for more than one reason — a spent budget, and a
+ * run of rounds that got nowhere — and the round is told which, because they read
+ * to the user completely differently. See {@link FinalRoundReason}.
  */
 export type RoundMode = "open" | "final";
 
@@ -339,6 +355,13 @@ export interface RunTurnArgs {
   text: string;
   /** What this round may do — see {@link RoundMode}. */
   mode: RoundMode;
+  /**
+   * Why a `final` round is final, which decides only which note it is given.
+   * Absent means `budget` — the reason core had until a no-progress guard existed,
+   * and the only one a caller who names none can mean. Ignored on an `open` round,
+   * which has no note.
+   */
+  finalReason?: FinalRoundReason;
   /**
    * The Task's unspent turns, and the tally this round writes back into them.
    * Mutated in place as the model works, so the primary and the fallback draw on
@@ -449,11 +472,6 @@ async function attempt(
   messages: ModelMessage[]
 ): Promise<Attempt> {
   const final = args.mode === "final";
-  // A `final` round is handed nothing to work with, only the way out. Leaving the
-  // work tools on would invite it to spend a budget it has already spent — and
-  // the composing round has every branch result in its messages already, so the
-  // thing it needs is not a lookup but an ending.
-  const workTools: ToolSet = final ? {} : args.tools;
   // One step per attempt for a `final` round: it exists to produce the answer, and
   // that answer is deliberately spent *beyond* the budget rather than out of it.
   //
@@ -463,6 +481,20 @@ async function attempt(
   const stepBudget = final
     ? 1
     : stepAllowance(args.budget.allowance, args.budget.spent);
+  // A `final` round is handed nothing to work with, only the way out. Leaving the
+  // work tools on would invite it to spend a budget it has already spent — and
+  // the composing round has every branch result in its messages already, so the
+  // thing it needs is not a lookup but an ending.
+  //
+  // **And so is any attempt down to its last step**, whatever the round's mode.
+  // The loop halts on the step count as readily as on a control call, so an
+  // attempt with one step to spend either spends it on an ending or produces
+  // none at all — and a work tool is the invitation to do the latter. That is not
+  // a hypothetical either: `stepAllowance`'s floor hands the fallback exactly one
+  // step whenever the primary drained the allowance, and a fallback that answered
+  // a `repo_clone` with it is how a recoverable round became a failed task.
+  // `delegate` and `final_reply` stay on either way — they *are* endings.
+  const workTools: ToolSet = final || stepBudget <= 1 ? {} : args.tools;
   const content = args.onContent
     ? buildIntermediateContentHandler(args.onContent, [
         DELEGATE_TOOL_NAME,
@@ -702,7 +734,9 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
   const system =
     (await session.refreshSystemPrompt()) +
     systemSuffix +
-    (args.mode === "final" ? args.instructions.final : args.instructions.open);
+    (args.mode === "final"
+      ? args.instructions.final[args.finalReason ?? "budget"]
+      : args.instructions.open);
 
   // This round's endings, built with the catalog a `delegate` is checked against.
   const control = controlTools({

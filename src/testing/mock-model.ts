@@ -137,6 +137,48 @@ export function countingModel(...steps: MockStep[]): {
   };
 }
 
+/** What one call was asked with: the tools it was offered and what it was told. */
+export interface ModelCall {
+  tools: string[];
+  system: string;
+}
+
+/**
+ * {@link mockModel}, plus what each call was actually asked with.
+ *
+ * Both halves are decisions the *round* makes and the model merely reacts to, so
+ * both are invisible to any assertion on the outcome: a round that withheld its
+ * work tools and one that left them on end in whatever the script says, and a
+ * round handed the wrong note still answers. Yet each is the entire content of a
+ * rule — that a round which has to answer is handed nothing but the answer, that
+ * neither is an attempt down to its last step, and that a forced round is told
+ * the true reason it was forced rather than a plausible one.
+ *
+ * One entry per call, so a spec can tell the primary's view from the fallback's.
+ */
+export function inspectingModel(...steps: MockStep[]): {
+  model: MockLanguageModelV3;
+  asked: () => ModelCall[];
+} {
+  const asked: ModelCall[] = [];
+  let i = 0;
+  return {
+    model: new MockLanguageModelV3({
+      doGenerate: async (options) => {
+        asked.push({
+          tools: (options.tools ?? []).map((t) => t.name),
+          system: options.prompt
+            .filter((m) => m.role === "system")
+            .map((m) => m.content)
+            .join("\n")
+        });
+        return stepResult(steps[Math.min(i++, steps.length - 1)]);
+      }
+    }),
+    asked: () => asked
+  };
+}
+
 /**
  * A model that fails the first `failures` calls with a retryable `APICallError`,
  * then behaves like {@link mockModel}.

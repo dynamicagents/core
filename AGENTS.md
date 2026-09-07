@@ -160,9 +160,10 @@ produce a `completed` callback.
 
 What is genuinely per-agent is now explicit and mandatory:
 
-- **`RoundPolicy`** — the round contract, the budget-spent note, and the three
-  user-facing strings. Nothing has a default. A lent-out round contract is exactly
-  the house prompt copy `validateRecipe` already refuses for a subagent soul.
+- **`RoundPolicy`** — the round contract, a note per reason a round can be forced
+  to answer, and the three user-facing strings. Nothing has a default. A lent-out
+  round contract is exactly the house prompt copy `validateRecipe` already refuses
+  for a subagent soul.
 - **The loop itself, if you want a different one.** `/round` is opt-in and its own
   subpath. An agent whose turn is a single inference extends `DynamicAgent` from
   `/host`, writes its own loop, and carries none of the delegation machinery.
