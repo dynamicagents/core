@@ -30,7 +30,7 @@ import type {
 } from "../subtasks/types.js";
 import { DynamicAgent } from "../host/agent.js";
 import type { SubagentClass } from "./subagent.js";
-import type { RoundPolicy } from "./policy.js";
+import type { FinalRoundReason, RoundPolicy } from "./policy.js";
 import {
   buildTurnInstructions,
   runTurn,
@@ -67,6 +67,17 @@ import {
  * result gets that without a branch anywhere in this file. That inversion is what
  * lets one class body serve every delegating agent.
  */
+/**
+ * How much of a failed branch's message the loop compares two rounds on.
+ *
+ * Two reasons pointing the same way: the comparison crosses a Workflow step
+ * return, which is capped, and a wall whose first three hundred characters repeat
+ * is the same wall even when a trailing duration or id does not. Volatility at
+ * the *start* of a message makes the comparison miss instead — which is the safe
+ * direction, since the loop's other two ceilings still hold.
+ */
+const FAILURE_EXCERPT_CHARS = 300;
+
 export abstract class RoundAgentBase<
   TEnv extends Cloudflare.Env & AiEnv & A2ASecretsEnv = Cloudflare.Env &
     AiEnv &
@@ -77,7 +88,7 @@ export abstract class RoundAgentBase<
   // --- the two extra seams a delegating agent fills ------------------------
 
   /**
-   * The words: the round contract, the budget-spent note, and the strings a user
+   * The words: the round contract, the forced-answer notes, and the strings a user
    * reads. Core ships none of them — see {@link RoundPolicy}.
    */
   protected abstract roundPolicy(): RoundPolicy;
@@ -152,6 +163,8 @@ export abstract class RoundAgentBase<
     identity: GatekeeperIdentity;
     round: number;
     mode: RoundMode;
+    /** Why a `final` round is final. See {@link FinalRoundReason}. */
+    finalReason?: FinalRoundReason;
     /** What the Task has left. Bounds this round. */
     turnsRemaining: number;
     push?: TurnPushContext;
@@ -195,11 +208,12 @@ export abstract class RoundAgentBase<
       identity: GatekeeperIdentity;
       round: number;
       mode: RoundMode;
+      finalReason?: FinalRoundReason;
       push?: TurnPushContext;
     },
     budget: TurnBudget
   ): Promise<TurnVerdict> {
-    const { taskId, text, identity, round, mode, push } = input;
+    const { taskId, text, identity, round, mode, finalReason, push } = input;
     const session = this.getSession(identity);
     const policy = this.roundPolicy();
     const channel = push ? this.push(push) : undefined;
@@ -235,6 +249,7 @@ export abstract class RoundAgentBase<
       round,
       text,
       mode,
+      finalReason,
       budget,
       systemSuffix: this.callerContext(identity),
       tools: await this.mainAgentTools(session),
@@ -329,6 +344,31 @@ export abstract class RoundAgentBase<
       .filter((s) => s.status === "pending" || s.status === "running")
       .map((s) => s.id);
     return { canceled: false, ids };
+  }
+
+  /**
+   * How one delegating round turned out, as the loop compares it against the
+   * round before: one `type: error` line per branch, in ordinal order.
+   *
+   * **Empty unless every branch failed**, which is what makes this a no-progress
+   * measure rather than a failure count. A round that completed anything moved
+   * the Task forward whatever else went wrong beside it, and stopping a Task that
+   * is producing work is worse than the loop it would prevent.
+   *
+   * Errors, not ids or prompts: the same wall reached twice is the signal, and a
+   * Subtask's id differs every round by construction. The text is a facet's own
+   * sentence about what it hit — already model-visible through
+   * `delegateCallOutput` — so nothing here is disclosed that the round did not
+   * already read. It is only ever compared; the words the user sees are the
+   * model's. Bounded per line: see {@link FAILURE_EXCERPT_CHARS}.
+   */
+  async roundFailures(taskId: string, round: number): Promise<string[]> {
+    const rows = this.db.subtasks.listRound(taskId, round);
+    if (rows.length === 0) return [];
+    if (!rows.every((s) => s.status === "failed")) return [];
+    return rows.map(
+      (s) => `${s.type}: ${(s.error ?? "").slice(0, FAILURE_EXCERPT_CHARS)}`
+    );
   }
 
   /** Parent cancellation: cancel every still-pending Subtask. Returns the count. */

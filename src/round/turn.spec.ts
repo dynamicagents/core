@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
+import { tool } from "ai";
 import { z } from "zod";
+import { FINAL_REPLY_TOOL_NAME } from "../agent/final-reply.js";
+import { DELEGATE_TOOL_NAME } from "../subtasks/delegate.js";
 import { makeSubtaskTypes } from "../subtasks/index.js";
 import { newTurnBudget } from "../agent/index.js";
 import type { ModelPair } from "../agent/index.js";
@@ -10,6 +13,7 @@ import {
   countingModel,
   finalReply,
   mockModel,
+  inspectingModel,
   rateLimitedModel,
   throwingModel
 } from "../testing/mock-model.js";
@@ -83,7 +87,15 @@ const policy: RoundPolicy = {
 You may delegate up to ${maxSubtasks} subtasks, each of type ${typeKeys
     .map((k) => `"${k}"`)
     .join(", ")}, or answer with final_reply.`,
-  finalRoundNote: (limits) => `
+  finalRoundNote: (limits, reason) =>
+    reason === "no-progress"
+      ? `
+
+# The work is not getting anywhere
+
+Every recent attempt came back failing the same way. Call final_reply now, say
+plainly what could not be done, and give the user the rest.`
+      : `
 
 # Your budget is spent
 
@@ -145,26 +157,41 @@ describe("the round contract", () => {
   });
 
   it("tells a budget-spent round it has no way out but answering", () => {
-    expect(instructions.final).toContain("Your budget is spent");
-    expect(instructions.final).toContain("final_reply");
+    expect(instructions.final.budget).toContain("Your budget is spent");
+    expect(instructions.final.budget).toContain("final_reply");
     // Names the budget as a fact rather than as a withheld capability — a model
     // told "you cannot delegate" tries to route around it.
-    expect(instructions.final).toContain("20 turns");
+    expect(instructions.final.budget).toContain("20 turns");
   });
 
-  it("keeps the final round a superset of the open one", () => {
+  it("tells a stalled round the truth instead of the budget's words", () => {
+    // The whole reason the reason exists. This round has turns left; what it has
+    // run out of is progress, and a model told its budget was spent would pass
+    // that on to the user as the explanation for a task that failed for an
+    // entirely different reason.
+    const note = instructions.final["no-progress"];
+    expect(note).toContain("not getting anywhere");
+    expect(note).toContain("final_reply");
+    expect(note).not.toContain("Your budget is spent");
+  });
+
+  it("keeps every final round a superset of the open one", () => {
     // `final` is `open + note`, so the model still has the contract it needs to
     // call `final_reply` correctly. A `final` that replaced the contract would
     // leave the round with an instruction and no schema.
-    expect(instructions.final.startsWith(instructions.open)).toBe(true);
+    for (const note of Object.values(instructions.final)) {
+      expect(note.startsWith(instructions.open)).toBe(true);
+    }
   });
 
   it("separates the note from the contract it is appended to", () => {
     // Core adds nothing between these two independently-owned sections — see
     // `RoundPolicy`. This asserts the documented contract holds for a policy
     // that follows it, so the doc and the composition cannot drift apart.
-    const seam = instructions.final.slice(instructions.open.length);
-    expect(seam.startsWith("\n\n")).toBe(true);
+    for (const note of Object.values(instructions.final)) {
+      const seam = note.slice(instructions.open.length);
+      expect(seam.startsWith("\n\n")).toBe(true);
+    }
   });
 });
 
@@ -420,6 +447,115 @@ describe("runTurn", () => {
       status: "failed",
       kind: "unknown-credential"
     });
+  });
+});
+
+/**
+ * What an attempt is handed — the tools it may call and the note it is given —
+ * neither of which any assertion on the outcome can see.
+ *
+ * The tool rules have one shape and one reason: an attempt ends only on a control
+ * call, and the tool loop halts on the step count just as readily, so an attempt
+ * that cannot afford a tool call *and* an ending must not be offered the tool. A
+ * round with one turn left that spends it on a lookup is a round that produced no
+ * decision — the failure that ended a task in production on the 60th call of a
+ * 60-turn budget, on both slots, for this reason alone.
+ *
+ * The note is the other half of a forced round: it is the model's only account of
+ * why it has nothing but the answer, and therefore the user's.
+ */
+describe("what an attempt is handed", () => {
+  const tools = {
+    probe: tool({
+      description: "look something up",
+      inputSchema: z.object({}),
+      execute: async () => "looked it up"
+    })
+  };
+
+  it("withholds the work tools from a budget-spent round", async () => {
+    const model = inspectingModel(finalReply("what I have"));
+
+    await runTurn(args({ mode: "final", tools, models: pair(model.model) }));
+
+    // Only the answer: no work tool, and no `delegate` either — a round with no
+    // budget cannot hand out work it has nothing left to compose.
+    expect(model.asked()[0].tools).toEqual([FINAL_REPLY_TOOL_NAME]);
+  });
+
+  it("tells a stalled round why it is answering", async () => {
+    // The reason has to survive the whole path — Workflow to RPC to `runTurn` to
+    // the note — because every step of it produces a round that answers, and only
+    // the words say whether the user is told the truth about why.
+    const model = inspectingModel(finalReply("what I have"));
+
+    await runTurn(
+      args({
+        mode: "final",
+        finalReason: "no-progress",
+        models: pair(model.model)
+      })
+    );
+
+    expect(model.asked()[0].system).toContain("not getting anywhere");
+    expect(model.asked()[0].system).not.toContain("Your budget is spent");
+  });
+
+  it("treats a final round that names no reason as a spent budget", async () => {
+    // The only reason core had before the guard existed, so a caller that names
+    // none can mean nothing else — and an `undefined` that silently selected the
+    // wrong note would be worse than a missing one.
+    const model = inspectingModel(finalReply("what I have"));
+
+    await runTurn(args({ mode: "final", models: pair(model.model) }));
+
+    expect(model.asked()[0].system).toContain("Your budget is spent");
+  });
+
+  it("withholds them from an open round down to its last step", async () => {
+    const model = inspectingModel(finalReply("answered from what I had"));
+
+    const outcome = await runTurn(
+      args({ budget: newTurnBudget(1), tools, models: pair(model.model) })
+    );
+
+    expect(outcome).toEqual({
+      status: "replied",
+      reply: "answered from what I had"
+    });
+    expect(model.asked()[0].tools).not.toContain("probe");
+    // The endings stay on. Withholding those would leave the round no legal way
+    // to end at all, which is the opposite of the fix.
+    expect(model.asked()[0].tools).toEqual(
+      expect.arrayContaining([FINAL_REPLY_TOOL_NAME, DELEGATE_TOOL_NAME])
+    );
+  });
+
+  it("leaves the fallback's floor step an ending it can reach", async () => {
+    // The production shape, and the half a `mode` decision cannot reach: the
+    // primary spends the entire allowance on work tools and never ends, so
+    // `stepAllowance`'s one-step floor is all the fallback gets. Handed the work
+    // tools with it, the fallback spends that step the same way and the round
+    // dies having asked two models a question neither could answer in one step.
+    const primary = inspectingModel({ toolCall: { toolName: "probe" } });
+    const fallback = inspectingModel(finalReply("the fallback answered"));
+
+    const outcome = await runTurn(
+      args({
+        budget: newTurnBudget(3),
+        tools,
+        models: pair(primary.model, fallback.model)
+      })
+    );
+
+    expect(outcome).toEqual({
+      status: "replied",
+      reply: "the fallback answered"
+    });
+    // The primary had room to work and used it; the fallback had one step, and
+    // nothing to spend it on but the ending.
+    expect(primary.asked()[0].tools).toContain("probe");
+    expect(fallback.asked()[0].tools).not.toContain("probe");
   });
 });
 

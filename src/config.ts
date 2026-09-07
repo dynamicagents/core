@@ -111,6 +111,13 @@ export interface AgentLimits {
   /**
    * Tool-loop steps, summed across every round *and* across the
    * primary→fallback attempt within a round — a fallback attempt is real spend.
+   *
+   * As `mainAgentLimits`, the **last** of these is reserved: the round loop stops
+   * opening working rounds one turn early and spends what is left on the forced
+   * answer, because a round with a single step can only spend it on a tool call
+   * or on an ending, and cannot be relied on to pick the ending. So a delegating
+   * task needs at least two here to delegate at all. A subagent's budget has no
+   * such reservation — its runner ends in a report rather than in a round.
    */
   maxTurns: number;
   /**

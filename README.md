@@ -210,9 +210,26 @@ export class MyAgent extends RoundAgentBase<Env> {
 
 Core ships the machine and none of the words. `RoundPolicy` is every string the
 loop emits — the round contract the model is held to, the note appended when the
-budget is spent, and the three user-facing messages. Nothing has a default: a
-lent-out round contract is exactly the house prompt copy this package refuses to
-have.
+loop forces a round to answer, and the three user-facing messages. Nothing has a
+default: a lent-out round contract is exactly the house prompt copy this package
+refuses to have.
+
+The loop forces an answer for more than one reason, so `finalRoundNote` is handed
+the one that applies:
+
+```ts
+finalRoundNote: (limits, reason) =>
+  reason === "no-progress"
+    ? "\n\n# This keeps coming back the same way\n…"
+    : `\n\n# Your budget is spent\n…${limits.maxTurns} turns…`;
+```
+
+`budget` is the Task's turns or wall clock running out. `no-progress` is several
+rounds in a row whose every subtask failed with the identical message: the budget
+is intact, and a round told otherwise passes that on to the user as the
+explanation for what went wrong. An implementation that ignores the argument
+still satisfies the interface and gets one note for both — accurate about the
+constraint, wrong about the cause.
 
 ---
 

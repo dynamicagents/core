@@ -44,6 +44,8 @@ export {
   finalReply,
   throwingModel,
   countingModel,
+  inspectingModel,
+  type ModelCall,
   rateLimitedModel,
   type MockStep
 } from "./mock-model.js";

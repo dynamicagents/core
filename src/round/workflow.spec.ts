@@ -5,6 +5,8 @@ import { resolveConfig } from "../config.js";
 import { TEST_MODELS } from "../testing/fixtures.js";
 import { runHandleTask, type HandleTaskDeps } from "./workflow.js";
 import type { RoundPolicy } from "./policy.js";
+import type { FinalRoundReason } from "./policy.js";
+import type { RoundMode } from "./turn.js";
 
 /**
  * The durable orchestration: cancellation ordering, replay determinism, and the
@@ -103,6 +105,12 @@ function fakeAgent(options: FakeAgentOptions = {}) {
     async cancelPendingSubtasks() {
       calls.push("cancelPendingSubtasks");
       return 0;
+    },
+    // A round that failed nothing: the progress guard has nothing to count, which
+    // is what every spec outside `no progress across rounds` wants.
+    async roundFailures() {
+      calls.push("roundFailures");
+      return [];
     }
   };
   return { stub, calls };
@@ -248,6 +256,90 @@ describe("the ordinary path", () => {
   });
 });
 
+/**
+ * The budget's last turn, which is reserved rather than spent.
+ *
+ * A round ends **only** on a control call, and the tool loop halts on the step
+ * count just as readily — so a round handed a single turn ends only if the model
+ * happens to reach for an ending first, and produces no decision if it reaches
+ * for a work tool. That is not a budget being enforced, it is a round that cannot
+ * succeed, and it failed a production task on the 60th call of a 60-turn budget:
+ * `mode` was `open` because 59 < 60, the model called `repo_clone`, and both
+ * slots died with `round produced no decision`.
+ *
+ * `mode` is the loop's own decision and the RPC is the only place it is visible,
+ * which is why these specs read it off a recording agent rather than off the
+ * outcome.
+ */
+describe("the last turn of the budget", () => {
+  /** Records what each round was allowed to do, then answers. */
+  function modeRecordingAgent() {
+    const modes: RoundMode[] = [];
+    const { stub } = fakeAgent();
+    return {
+      modes,
+      stub: {
+        ...stub,
+        async runTaskTurn(input: { mode: RoundMode }) {
+          modes.push(input.mode);
+          return { status: "replied", reply: "the answer", turns: 1 };
+        },
+        // Round 0's cached verdict carries the spend; nothing is left to execute,
+        // so the loop reaches the round these specs are about.
+        async scanSubtasks() {
+          return { canceled: false, ids: [] };
+        }
+      }
+    };
+  }
+
+  const spentOn = (turns: number) =>
+    fakeStep({
+      cached: {
+        "turn:0": { status: "delegated", turns },
+        notify: undefined
+      }
+    });
+
+  const budgetOf = (stub: unknown, maxTurns: number): HandleTaskDeps => ({
+    ...deps(stub),
+    config: resolveConfig({ model: TEST_MODELS, mainAgentLimits: { maxTurns } })
+  });
+
+  it("opens no round that cannot end", async () => {
+    // Two turns of three are gone, so round 1 could spend exactly one step. It is
+    // handed the answer instead of a budget it cannot use.
+    const { modes, stub } = modeRecordingAgent();
+    const { step } = spentOn(2);
+
+    await runHandleTask(params(), step, budgetOf(stub, 3));
+
+    expect(modes).toEqual(["final"]);
+  });
+
+  it("still opens a round with two turns to spend", async () => {
+    // The other side of the boundary, and why this is not "stop a round early":
+    // two turns is a lookup and an ending, which is an ordinary working round.
+    const { modes, stub } = modeRecordingAgent();
+    const { step } = spentOn(1);
+
+    await runHandleTask(params(), step, budgetOf(stub, 3));
+
+    expect(modes).toEqual(["open"]);
+  });
+
+  it("reserves the last turn at the incident's own arithmetic", async () => {
+    // 59 turns spent of `maxTurns: 60` — the exact state round 13 entered, and
+    // the one the old `turnsUsed >= maxTurns` test called `open`.
+    const { modes, stub } = modeRecordingAgent();
+    const { step } = spentOn(59);
+
+    await runHandleTask(params(), step, budgetOf(stub, 60));
+
+    expect(modes).toEqual(["final"]);
+  });
+});
+
 describe("a Durable Object replaced under a running workflow", () => {
   /**
    * The incident these specs exist for.
@@ -358,6 +450,10 @@ describe("a Durable Object replaced under a running workflow", () => {
       },
       async sweepTaskChildren() {
         calls.push("sweepTaskChildren");
+      },
+      async roundFailures() {
+        calls.push("roundFailures");
+        return [];
       }
     };
     return { stub, calls };
@@ -465,10 +561,192 @@ describe("a Durable Object replaced under a running workflow", () => {
       }
     });
 
-    // working, turn:0, scan:0, execute:8, complete, sweep.
+    // working, turn:0, scan:0, execute:8, failures:0, complete, sweep.
     // `turn:1` and `notify` are served from cache; `started` and the two
     // `deadline:<round>` steps never touch the DO.
-    expect(resolved).toBe(6);
+    expect(resolved).toBe(7);
+  });
+});
+
+/**
+ * The third bound on a Task, and the only one that measures progress.
+ *
+ * `maxTurns` and `maxWallMs` bound what a Task may *spend*, and a Task spending
+ * it all on the same failing delegation is inside both of them the whole way. The
+ * run this exists for delegated one subtask thirteen times over twelve minutes,
+ * each branch failing with a byte-identical sentence, each round telling the user
+ * work was underway — against a three-hour wall clock it never approached. What
+ * ends it is not a smaller budget but a different question: did the last round
+ * achieve anything the one before it did not.
+ *
+ * The stop is deliberately the *existing* forced-answer path, so the user gets
+ * the model's own account of what went wrong rather than the failure copy.
+ */
+describe("a task that stops getting anywhere", () => {
+  /**
+   * An agent that delegates on every `open` round and answers when the loop makes
+   * it, recording what each round was allowed to do and why.
+   *
+   * `failures` scripts what each round's branches came back with — the loop's
+   * only window onto progress, and the whole input to the guard.
+   */
+  function stallingAgent(failures: (round: number) => string[]) {
+    const rounds: { mode: RoundMode; finalReason?: FinalRoundReason }[] = [];
+    const saved: unknown[] = [];
+    let subtaskId = 0;
+    const stub = {
+      async markWorking() {
+        return "ok";
+      },
+      async runTaskTurn(input: {
+        mode: RoundMode;
+        finalReason?: FinalRoundReason;
+      }) {
+        rounds.push({ mode: input.mode, finalReason: input.finalReason });
+        return input.mode === "final"
+          ? {
+              status: "replied",
+              reply: "I could not get this to run",
+              turns: 1
+            }
+          : { status: "delegated", reply: "on it", turns: 1 };
+      },
+      async scanSubtasks() {
+        // A fresh id per round, as SQLite would assign: `execute:<id>` is a
+        // durable step name and two rounds must not share one.
+        subtaskId += 1;
+        return { canceled: false, ids: [subtaskId] };
+      },
+      async executeSubtaskChunk() {
+        return { done: true, status: "failed", progress: [] };
+      },
+      async roundFailures(_taskId: string, round: number) {
+        return failures(round);
+      },
+      async saveTask(task: unknown) {
+        saved.push(task);
+        return true;
+      },
+      async sweepTaskChildren() {},
+      async cancelPendingSubtasks() {
+        return 0;
+      },
+      async failSubtask() {}
+    };
+    return { rounds, saved, stub };
+  }
+
+  const WALL = ["general: there is no checkout in this workspace yet"];
+
+  const budgetOf = (stub: unknown, maxTurns: number): HandleTaskDeps => ({
+    ...deps(stub),
+    config: resolveConfig({ model: TEST_MODELS, mainAgentLimits: { maxTurns } })
+  });
+
+  it("stops delegating once three rounds have failed identically", async () => {
+    const { rounds, saved, stub } = stallingAgent(() => WALL);
+    const { step } = fakeStep({ cached: { notify: undefined } });
+
+    await runHandleTask(params(), step, deps(stub));
+
+    // Three strikes, then the answer — with 16 turns of budget still unspent,
+    // which is exactly the point: nothing here ran out.
+    expect(rounds.map((r) => r.mode)).toEqual([
+      "open",
+      "open",
+      "open",
+      "final"
+    ]);
+    expect(rounds.at(-1)?.finalReason).toBe("no-progress");
+    // And the user reads the model's own account, not the failure copy. A guard
+    // that stopped the loop by failing the Task would have fixed the loop and
+    // kept the part the user actually saw.
+    expect(JSON.stringify(saved[0])).toContain("I could not get this to run");
+    expect(JSON.stringify(saved[0])).not.toContain(policy.copy.taskFailed);
+  });
+
+  it("keeps delegating while the failures differ", async () => {
+    // The half that keeps this a progress measure rather than a failure count: a
+    // model reacting to a *new* error is a model still working the problem, and
+    // stopping it would be the guard doing harm. Every round here fails; none
+    // fails the same way, so what ends the Task is the budget, four rounds later
+    // than the guard would have.
+    const { rounds, stub } = stallingAgent((round) => [
+      `general: attempt ${round} hit something new`
+    ]);
+    const { step } = fakeStep({ cached: { notify: undefined } });
+
+    await runHandleTask(params(), step, budgetOf(stub, 8));
+
+    expect(rounds.filter((r) => r.mode === "open")).toHaveLength(7);
+    expect(rounds.at(-1)).toEqual({ mode: "final", finalReason: "budget" });
+  });
+
+  it("does not read two different failure lists as the same one", async () => {
+    // A branch's failure is a facet's own sentence, newlines and all. Joined on
+    // one, a single branch that failed with two lines is indistinguishable from
+    // two branches that failed with one each — so a Task alternating between
+    // those two shapes would be stopped as a repeat of itself, having reported
+    // something different every round. The lists here are never equal; only
+    // their concatenation is.
+    const { rounds, stub } = stallingAgent((round) =>
+      round % 2 === 0
+        ? ["general: boom\ngeneral: bang"]
+        : ["general: boom", "general: bang"]
+    );
+    const { step } = fakeStep({ cached: { notify: undefined } });
+
+    await runHandleTask(params(), step, budgetOf(stub, 8));
+
+    expect(rounds.filter((r) => r.mode === "open")).toHaveLength(7);
+    expect(rounds.at(-1)).toEqual({ mode: "final", finalReason: "budget" });
+  });
+
+  it("resets the count on a round that completed something", async () => {
+    // `roundFailures` is empty for any round that completed anything, so this is
+    // the same wall interrupted by one productive round. Without the reset the
+    // Task would stop on round 3 having just made progress.
+    const { rounds, stub } = stallingAgent((round) =>
+      round === 1 ? [] : WALL
+    );
+    const { step } = fakeStep({ cached: { notify: undefined } });
+
+    await runHandleTask(params(), step, deps(stub));
+
+    expect(rounds.map((r) => r.mode)).toEqual([
+      "open",
+      "open",
+      "open",
+      "open",
+      "open",
+      "final"
+    ]);
+    expect(rounds.at(-1)?.finalReason).toBe("no-progress");
+  });
+
+  it("counts from the durable step returns, not from a fresh read", async () => {
+    // `mode` is a step input, so every value feeding it has to survive a replay.
+    // The agent here reports no failures at all while the cached steps report the
+    // wall three times: a loop reading the live rows would never stop, and one
+    // reconstructing from its own recorded steps stops on round 3, as the run it
+    // is replaying did.
+    const { rounds, stub } = stallingAgent(() => []);
+    const { step, ran } = fakeStep({
+      cached: {
+        "failures:0": WALL,
+        "failures:1": WALL,
+        "failures:2": WALL,
+        notify: undefined
+      }
+    });
+
+    await runHandleTask(params(), step, deps(stub));
+
+    expect(ran).toContain("failures:0");
+    expect(rounds.at(-1)).toEqual({
+      mode: "final",
+      finalReason: "no-progress"
+    });
   });
 });
 
