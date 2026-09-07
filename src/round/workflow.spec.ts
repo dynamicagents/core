@@ -875,6 +875,204 @@ function abandoningAgent(saveTask?: () => Promise<boolean>) {
   };
 }
 
+/**
+ * What the instance record says once the run is over.
+ *
+ * A turn that ends badly is a value, not a throw, so every step is `ok` and the
+ * instance is `complete` — and a task whose every branch failed used to be
+ * indistinguishable from one that went perfectly. That is what made the
+ * 2026-09-05 incident cost a day of AI-Gateway archaeology: `wf claude-coder
+ * turn-2tt667e2qlvda0ahuti` reported `success: true, error: null` over 59 `ok`
+ * steps while the user was reading a failure message.
+ *
+ * The verdict is the return value because that is the one channel the platform
+ * records for a run that finished: it lands on `InstanceStatus.output`.
+ */
+describe("the verdict a finished run returns", () => {
+  it("tells a failed task apart from a successful one", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const ok = fakeStep({
+      cached: {
+        "turn:0": { status: "replied", reply: "the answer", turns: 1 },
+        notify: undefined
+      }
+    });
+    const bad = fakeStep({
+      cached: {
+        "turn:0": {
+          status: "failed",
+          kind: "exhausted",
+          error: "model exploded",
+          turns: 1
+        },
+        notify: undefined
+      }
+    });
+
+    const replied = await runHandleTask(
+      params(),
+      ok.step,
+      deps(fakeAgent().stub)
+    );
+    const failed = await runHandleTask(
+      params(),
+      bad.step,
+      deps(fakeAgent().stub)
+    );
+
+    expect(replied).toEqual({ outcome: "replied", rounds: 1, turns: 1 });
+    expect(failed).toEqual({
+      outcome: "failed",
+      kind: "exhausted",
+      rounds: 1,
+      turns: 1
+    });
+  });
+
+  /**
+   * The kind rides out for the same reason `failureCopy` receives one: an
+   * exhausted ladder is a thing that happened to one request, and a rejected
+   * credential is a thing an operator has to go and fix. A record that flattens
+   * them tells nobody which.
+   */
+  it("carries the kind a credential failure ended on", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { step } = fakeStep({
+      cached: {
+        "turn:0": {
+          status: "failed",
+          kind: "gateway-credential",
+          error: "401 Unauthorized",
+          turns: 1
+        },
+        notify: undefined
+      }
+    });
+
+    const verdict = await runHandleTask(params(), step, deps(fakeAgent().stub));
+
+    expect(verdict).toMatchObject({
+      outcome: "failed",
+      kind: "gateway-credential"
+    });
+  });
+
+  it("reports a task canceled before the first round as having run none", async () => {
+    const { stub } = fakeAgent({ markWorking: "canceled" });
+    const { step } = fakeStep();
+
+    await expect(runHandleTask(params(), step, deps(stub))).resolves.toEqual({
+      outcome: "canceled",
+      rounds: 0,
+      turns: 0
+    });
+  });
+
+  /**
+   * The counts are the cheap half and the useful one: "thirteen rounds, sixty
+   * turns" is the shape of the incident, readable off the record without opening
+   * a single gateway log.
+   */
+  it("counts the rounds a task ran and the turns they spent", async () => {
+    const stub = {
+      async markWorking() {
+        return "ok";
+      },
+      async runTaskTurn(input: { round: number }) {
+        return input.round === 0
+          ? { status: "delegated", reply: "on it", turns: 3 }
+          : { status: "replied", reply: "the answer", turns: 2 };
+      },
+      async scanSubtasks() {
+        return { canceled: false, ids: [1] };
+      },
+      async executeSubtaskChunk() {
+        return { done: true, status: "completed", progress: [] };
+      },
+      async roundFailures() {
+        return [];
+      },
+      async saveTask() {
+        return true;
+      },
+      async sweepTaskChildren() {},
+      async cancelPendingSubtasks() {
+        return 0;
+      },
+      async failSubtask() {}
+    };
+    const { step } = fakeStep({ cached: { notify: undefined } });
+
+    await expect(runHandleTask(params(), step, deps(stub))).resolves.toEqual({
+      outcome: "replied",
+      rounds: 2,
+      turns: 5
+    });
+  });
+});
+
+/**
+ * Whose loop it is, on every line — not only the abandoned one.
+ *
+ * The starter deploys five workflows onto one Worker and therefore one log
+ * stream. `[handle-task]` was hard-coded, so a `claude-coder` failure was logged
+ * under the name of a different agent: the tag does not filter, and it points at
+ * the wrong place while it fails to.
+ */
+describe("the loop's log lines", () => {
+  it("names the agent on a round failure", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { step } = fakeStep({
+      cached: {
+        "turn:0": {
+          status: "failed",
+          kind: "exhausted",
+          error: "model exploded",
+          turns: 1
+        },
+        notify: undefined
+      }
+    });
+
+    await runHandleTask(params(), step, {
+      ...deps(fakeAgent().stub),
+      label: "claude-coder"
+    });
+
+    expect(error).toHaveBeenCalledWith(
+      "[claude-coder] round failed",
+      expect.objectContaining({ taskId: "task-1", kind: "exhausted" })
+    );
+  });
+
+  /**
+   * A host that names nothing still logs something greppable. The fallback is
+   * the old literal, so nothing that already parses these lines breaks.
+   */
+  it("falls back to the loop's own name when no label is given", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { step } = fakeStep({
+      cached: {
+        "turn:0": {
+          status: "failed",
+          kind: "exhausted",
+          error: "model exploded",
+          turns: 1
+        },
+        notify: undefined
+      }
+    });
+
+    await runHandleTask(params(), step, deps(fakeAgent().stub));
+
+    expect(error).toHaveBeenCalledWith(
+      "[handle-task] round failed",
+      expect.anything()
+    );
+  });
+});
+
 describe("a task abandoned after its retries are exhausted", () => {
   it("delivers a failed Task carrying the policy's copy", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
@@ -903,9 +1101,12 @@ describe("a task abandoned after its retries are exhausted", () => {
     const { stub } = abandoningAgent();
     const { step } = fakeStep({ cached: { "abandoned:notify": undefined } });
 
-    await expect(
-      runHandleTask(params(), step, deps(stub))
-    ).resolves.toBeUndefined();
+    // Resolving is the whole claim; the verdict is how the instance record still
+    // says what happened, since a resolved run is a `complete` one.
+    await expect(runHandleTask(params(), step, deps(stub))).resolves.toEqual({
+      outcome: "abandoned",
+      error: "Error: the provider refused every attempt"
+    });
   });
 
   /**

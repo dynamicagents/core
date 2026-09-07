@@ -30,7 +30,8 @@ export { RecipeSubagentHost, type SubagentClass } from "./subagent.js";
 export {
   runHandleTask,
   type HandleTaskDeps,
-  type HandleTaskParams
+  type HandleTaskParams,
+  type TaskVerdict
 } from "./workflow.js";
 
 // Re-exported here, not only from `/agent`: `RoundFailureKind` is the argument
