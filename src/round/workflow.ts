@@ -501,8 +501,14 @@ async function orchestrate(
     const failures = await step.do(`failures:${round}`, () =>
       agent().roundFailures(p.taskId, round)
     );
-    const fingerprint = failures.join("\n");
-    if (fingerprint === "") repeated = 0;
+    // Encoded, not joined. A branch's failure is a facet's own sentence and may
+    // well contain a newline, so a separator that can appear *inside* an element
+    // does not uniquely describe the list: one branch failing with "a\nb" and two
+    // failing with "a" and "b" would share a fingerprint and count as a repeat of
+    // each other. Emptiness is read off the array for the same reason — never
+    // off the encoding.
+    const fingerprint = failures.length === 0 ? "" : JSON.stringify(failures);
+    if (failures.length === 0) repeated = 0;
     else repeated = fingerprint === lastFailures ? repeated + 1 : 1;
     lastFailures = fingerprint;
   }

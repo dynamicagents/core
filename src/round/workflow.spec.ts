@@ -682,6 +682,26 @@ describe("a task that stops getting anywhere", () => {
     expect(rounds.at(-1)).toEqual({ mode: "final", finalReason: "budget" });
   });
 
+  it("does not read two different failure lists as the same one", async () => {
+    // A branch's failure is a facet's own sentence, newlines and all. Joined on
+    // one, a single branch that failed with two lines is indistinguishable from
+    // two branches that failed with one each — so a Task alternating between
+    // those two shapes would be stopped as a repeat of itself, having reported
+    // something different every round. The lists here are never equal; only
+    // their concatenation is.
+    const { rounds, stub } = stallingAgent((round) =>
+      round % 2 === 0
+        ? ["general: boom\ngeneral: bang"]
+        : ["general: boom", "general: bang"]
+    );
+    const { step } = fakeStep({ cached: { notify: undefined } });
+
+    await runHandleTask(params(), step, budgetOf(stub, 8));
+
+    expect(rounds.filter((r) => r.mode === "open")).toHaveLength(7);
+    expect(rounds.at(-1)).toEqual({ mode: "final", finalReason: "budget" });
+  });
+
   it("resets the count on a round that completed something", async () => {
     // `roundFailures` is empty for any round that completed anything, so this is
     // the same wall interrupted by one productive round. Without the reset the
