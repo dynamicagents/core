@@ -29,7 +29,7 @@ import { parseGatekeeperOrigins, type A2ASecretsEnv } from "../env.js";
 import type { MountedAgent } from "./define-agent.js";
 
 /**
- * The A2A Worker: the zero-trust, no-shared-secrets edge every Dynamic Agents agent
+ * The A2A Worker: the zero-trust, no-shared-secrets edge every Dynamic Agent
  * puts in front of its Durable Object.
  *
  * Trust flows entirely on domains and asymmetric (Ed25519) signatures over

@@ -1,5 +1,5 @@
 /**
- * `@dynamicagents/core` — the mandatory foundation for a Dynamic Agents agent.
+ * `@dynamicagents/core` — the mandatory foundation for a Dynamic Agent.
  *
  * This root entry carries only what nearly every consumer touches: the plugin
  * contract, the config shape, the runtime factory, and the platform facts.

@@ -30,7 +30,7 @@ import { workersAIModels } from "../agent/workers-ai/index.js";
 import type { PluginHost } from "./plugin-host.js";
 
 /**
- * The Durable Object body every Dynamic Agents agent has, whatever loop it runs.
+ * The Durable Object body every Dynamic Agent has, whatever loop it runs.
  *
  * ## Why this is core's and not the app's
  *

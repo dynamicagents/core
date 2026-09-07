@@ -1,6 +1,6 @@
 # AGENTS.md — working in `@dynamicagents/core`
 
-This package is the mandatory floor under every Dynamic Agents agent. It is
+This package is the mandatory floor under every Dynamic Agent. It is
 consumed by [`plugins`](https://github.com/dynamicagents/plugins) (optional,
 composable capabilities) and
 [`starter`](https://github.com/dynamicagents/starter) (the app that composes
