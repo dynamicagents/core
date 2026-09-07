@@ -15,6 +15,13 @@
       "when": 1786871925215,
       "tag": "0001_drop_depends_on",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1788817590937,
+      "tag": "0002_round_observations",
+      "breakpoints": true
     }
   ]
 }

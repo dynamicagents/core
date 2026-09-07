@@ -113,6 +113,19 @@ in-flight run's checkpoint. Note that recipe limits are hashed **as declared, no
 as merged** — that is deliberate, so moving a baseline default in a patch release
 cannot strand in-flight runs.
 
+### The migration journal
+
+`src/db/schema.ts` holds core's three tables and **only** core's — the journal is
+a flat integer sequence over one shared `__drizzle_migrations` table, and two
+independently-versioned packages writing to it will collide. A plugin owns its
+tables through `PluginStore`.
+
+Changing the schema means `npm run db:generate`, which runs `drizzle-kit generate`
+and then rebuilds `src/db/migrations/index.ts` from the `.sql` files. That index is
+generated — never hand-edit it. Rename the generated `.sql` to say what it does and
+fix its `tag` in `meta/_journal.json` before rebuilding, so the journal reads as
+intent rather than as drizzle's word generator.
+
 ---
 
 ## The platform bounds

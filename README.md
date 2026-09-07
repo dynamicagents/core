@@ -231,6 +231,37 @@ explanation for what went wrong. An implementation that ignores the argument
 still satisfies the interface and gets one note for both — accurate about the
 constraint, wrong about the cause.
 
+#### What a round remembers
+
+A round is one `generateText` call, so the work tools it uses and the results
+they return live inside it. What reaches the Session is the round's _ending_ —
+the acknowledgment the user read. Left there, every round inherits its
+predecessors' claims and none of their evidence, and a loop that cannot see what
+it already tried repeats it: one deployed task delegated thirteen times over
+twelve minutes and re-made the same rejected clone URL in every round, because
+the rejection was a tool result and tool results did not survive a round.
+
+So a delegating round's work-tool exchanges are persisted alongside its Subtask
+rows and restored for the rounds after it, as the call-and-result pairs they
+actually were — the same reconstruction the `delegate` call itself already gets.
+`roundObservationWindow` is how many earlier rounds a round can still see, and
+the carried rounds are elided against one another, so a tool called three times
+costs roughly one result rather than three:
+
+```ts
+resolveConfig({
+  model: MODELS,
+  // Two is enough for the case this exists for: the wall a round just hit is the
+  // wall it is about to hit again. Zero opts out entirely.
+  roundObservationWindow: 2,
+  toolOutputWindow: 4
+});
+```
+
+The rows are core's third table, they are never written into the Session — history
+stays text-only — and they age out on the same 30-day clock as the rest of a
+Task's state.
+
 ---
 
 ## Exports
@@ -248,7 +279,7 @@ not drag in the A2A adapter, and the test harness cannot reach a production bund
 | `@dynamicagents/core/round`        | the delegating round loop: `RoundAgentBase`, `runHandleTask`, `runTurn`      |
 | `@dynamicagents/core/subtasks`     | delegation types, decomposition, the `delegate` tool                         |
 | `@dynamicagents/core/subagent`     | `RecipeSubagentBase`, resumable runs, fingerprinting, workspace              |
-| `@dynamicagents/core/db`           | `AgentDB`, `notify_tasks` + `subtasks` schema, migrations, `PluginStore`     |
+| `@dynamicagents/core/db`           | `AgentDB`, the three-table schema, migrations, `PluginStore`                 |
 | `@dynamicagents/core/testing`      | VCR, `FakeSession`, `mockModel`, DO helpers, JWK fixtures — _workerd realm_  |
 | `@dynamicagents/core/testing/node` | the VCR recorder + cassette store — _Node realm, never import from a spec_   |
 | `@dynamicagents/core/eslint`       | the `no-deprecated-object-properties` rule                                   |

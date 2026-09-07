@@ -11,8 +11,10 @@ export {
   type PluginStore
 } from "./db.js";
 
-export { notifyTasks, subtasks } from "./schema.js";
+export { notifyTasks, roundObservations, subtasks } from "./schema.js";
 
 export { makeTasks, stateOf, type TaskListQuery } from "./models/tasks.js";
 
 export { makeSubtasks, type SubtaskModelOptions } from "./models/subtasks.js";
+
+export { makeObservations } from "./models/observations.js";

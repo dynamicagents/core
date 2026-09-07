@@ -6,6 +6,17 @@ import { MockLanguageModelV3 } from "ai/test";
 import { APICallError } from "ai";
 
 /**
+ * The provider-level prompt, derived from the mock's own `doGenerate` rather
+ * than imported.
+ *
+ * `LanguageModelV3Prompt` lives in `@ai-sdk/provider`, which this module must not
+ * import for the reason above — so the type is read off the one declaration that
+ * is already here. It also cannot go stale: it is by construction whatever the
+ * installed SDK hands `doGenerate`.
+ */
+type ModelPrompt = Parameters<MockLanguageModelV3["doGenerate"]>[0]["prompt"];
+
+/**
  * Test doubles for the LLM. Lets the tool-loop / executor specs run the real
  * `generateText` machinery (tool execution, multi-step, fallback) against a
  * scripted model with no network or `AI` binding.
@@ -141,6 +152,19 @@ export function countingModel(...steps: MockStep[]): {
 export interface ModelCall {
   tools: string[];
   system: string;
+  /**
+   * Everything below the system prompt — the conversation the round assembled.
+   *
+   * The one thing about a round that is invisible from both its outcome and its
+   * tools: whether it was handed the *evidence* its predecessors produced, or
+   * only their conclusions. A round that carries no work-tool exchanges and one
+   * that carries all of them run the same script and return the same answer, and
+   * the difference between them is thirteen rounds of an incident.
+   *
+   * The provider prompt shape, not `ModelMessage` — this is what actually reached
+   * the model, which is the level a spec about replay wants to assert at.
+   */
+  messages: ModelPrompt;
 }
 
 /**
@@ -170,7 +194,8 @@ export function inspectingModel(...steps: MockStep[]): {
           system: options.prompt
             .filter((m) => m.role === "system")
             .map((m) => m.content)
-            .join("\n")
+            .join("\n"),
+          messages: options.prompt.filter((m) => m.role !== "system")
         });
         return stepResult(steps[Math.min(i++, steps.length - 1)]);
       }

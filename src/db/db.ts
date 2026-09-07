@@ -7,6 +7,7 @@ import * as schema from "./schema.js";
 import dbMigrations from "./migrations/index.js";
 import { makeTasks } from "./models/tasks.js";
 import { makeSubtasks } from "./models/subtasks.js";
+import { makeObservations } from "./models/observations.js";
 
 export type DB = DrizzleSqliteDODatabase<typeof schema>;
 
@@ -111,6 +112,7 @@ export class AgentDB {
   private readonly _ready: Promise<void>;
   private _tasks?: ReturnType<typeof makeTasks>;
   private _subtasks?: ReturnType<typeof makeSubtasks>;
+  private _observations?: ReturnType<typeof makeObservations>;
 
   constructor(
     private readonly storage: DurableObjectStorage,
@@ -134,6 +136,10 @@ export class AgentDB {
     return (this._subtasks ??= makeSubtasks(this.db, {
       maxSubtasks: this.options.maxSubtasks
     }));
+  }
+
+  get observations() {
+    return (this._observations ??= makeObservations(this.db));
   }
 
   /**

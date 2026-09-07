@@ -26,6 +26,7 @@ import {
   runTurn,
   type RunTurnArgs
 } from "./turn.js";
+import { captureObservations } from "./observations.js";
 import type { RoundPolicy } from "./policy.js";
 
 /**
@@ -605,6 +606,241 @@ describe("renderTurnMessages", () => {
       error: null
     };
     const { messages } = renderTurnMessages(session.messages, "t1", [branch]);
+
+    const ids = messages.flatMap((message) =>
+      Array.isArray(message.content)
+        ? message.content.flatMap((part) =>
+            part.type === "tool-call" || part.type === "tool-result"
+              ? [part.toolCallId]
+              : []
+          )
+        : []
+    );
+
+    expect(ids.length).toBeGreaterThan(0);
+    for (const id of ids) expect(id).toMatch(/^[a-zA-Z0-9_-]+$/);
+  });
+});
+
+/**
+ * The evidence a round produces, and whether the next one can see it.
+ *
+ * A round is one `generateText` call, so its work-tool calls and their results
+ * end with it — and what survives into the Session is the acknowledgment the user
+ * read. Carry nothing and every round inherits its predecessors' assertions and
+ * none of their observations, which is a loop that reinforces itself: by round
+ * five the context held five claims that a repository was ready and zero records
+ * of how any of them had checked.
+ *
+ * Two halves, and both are needed. A round has to *produce* its exchanges, and a
+ * later round has to be *handed* them.
+ */
+describe("what a round carries to the next one", () => {
+  const workTools = {
+    repo_clone: tool({
+      description: "clone a repository",
+      inputSchema: z.object({ url: z.string() }),
+      execute: async ({ url }: { url: string }) =>
+        url.startsWith("git@")
+          ? "this agent may only clone over https from: github.com"
+          : "reused the existing checkout at /workspace/SpikeResearch"
+    })
+  };
+
+  const delegated = (reply: string) => ({
+    toolCall: {
+      toolName: DELEGATE_TOOL_NAME,
+      input: {
+        reply,
+        subtasks: [{ type: "general", prompt: "research the thing" }]
+      }
+    }
+  });
+
+  it("reports the exchanges a delegating round made", async () => {
+    const outcome = await runTurn(
+      args({
+        tools: workTools,
+        models: pair(
+          mockModel(
+            {
+              toolCall: {
+                toolName: "repo_clone",
+                input: { url: "git@github.com:o/r.git" }
+              }
+            },
+            {
+              toolCall: {
+                toolName: "repo_clone",
+                input: { url: "https://github.com/o/r" }
+              }
+            },
+            delegated("Repo cloned successfully. Launching…")
+          )
+        )
+      })
+    );
+
+    expect(outcome.status).toBe("delegated");
+    // Exactly two exchanges, four messages. `onStepEnd` reports each step's *new*
+    // messages, not the conversation so far — a cumulative read here would carry
+    // the first exchange again with every step after it, and the duplication
+    // would grow with the round rather than announce itself.
+    if (outcome.status === "delegated")
+      expect(outcome.observations).toHaveLength(4);
+    const observed = JSON.stringify(
+      outcome.status === "delegated" ? outcome.observations : []
+    );
+    // Both attempts, including the one that was refused — that refusal is what
+    // thirteen rounds each re-discovered.
+    expect(observed).toContain("may only clone over https");
+    expect(observed).toContain("reused the existing checkout");
+    // And not the ending: it is already durable, and `delegationPair` rebuilds it.
+    expect(observed).not.toContain(DELEGATE_TOOL_NAME);
+    expect(observed).not.toContain("Launching");
+  });
+
+  /** A round that answered has ended the task. There is no later round to tell. */
+  it("reports none from a round that replied", async () => {
+    const outcome = await runTurn(
+      args({
+        tools: workTools,
+        models: pair(
+          mockModel(
+            {
+              toolCall: {
+                toolName: "repo_clone",
+                input: { url: "https://github.com/o/r" }
+              }
+            },
+            finalReply("here is what I found")
+          )
+        )
+      })
+    );
+
+    expect(outcome.status).toBe("replied");
+    expect(outcome).not.toHaveProperty("observations");
+  });
+
+  /**
+   * The incident, inverted. Round 1 is handed round 0's refusal, so the mistake
+   * it repeated thirteen times is one it can now see it already made.
+   */
+  it("hands a later round the refusal an earlier one hit", async () => {
+    const model = inspectingModel(finalReply("done"));
+    const session = new FakeSession();
+    await runTurn(args({ session }));
+
+    await runTurn(
+      args({
+        session,
+        round: 1,
+        models: pair(model.model),
+        observations: [
+          {
+            round: 0,
+            messages: captureObservations(
+              [
+                {
+                  role: "assistant",
+                  content: [
+                    {
+                      type: "tool-call",
+                      toolCallId: "functions.repo_clone:1",
+                      toolName: "repo_clone",
+                      input: { url: "git@github.com:o/r.git" }
+                    }
+                  ]
+                },
+                {
+                  role: "tool",
+                  content: [
+                    {
+                      type: "tool-result",
+                      toolCallId: "functions.repo_clone:1",
+                      toolName: "repo_clone",
+                      output: {
+                        type: "error-text",
+                        value:
+                          "this agent may only clone over https from: github.com"
+                      }
+                    }
+                  ]
+                }
+              ],
+              {
+                round: 0,
+                controlNames: [DELEGATE_TOOL_NAME, FINAL_REPLY_TOOL_NAME]
+              }
+            )
+          }
+        ]
+      })
+    );
+
+    const handed = JSON.stringify(model.asked()[0]?.messages ?? []);
+    expect(handed).toContain("may only clone over https");
+    expect(handed).toContain("git@github.com:o/r.git");
+  });
+
+  /** The control: without them, the round sees exactly what it used to. */
+  it("hands it nothing when the agent carries nothing", async () => {
+    const model = inspectingModel(finalReply("done"));
+    const session = new FakeSession();
+    await runTurn(args({ session }));
+
+    await runTurn(args({ session, round: 1, models: pair(model.model) }));
+
+    const handed = JSON.stringify(model.asked()[0]?.messages ?? []);
+    expect(handed).not.toContain("repo_clone");
+  });
+
+  /**
+   * The ids reach a provider as `tool_use.id`, which Anthropic restricts to
+   * `^[a-zA-Z0-9_-]+$`. A carried exchange keeps the id its *provider* assigned
+   * unless something rewrites it — and the incident's own transcript carries
+   * `functions.repo_clone:13`, so this is the failure that would replace the one
+   * being fixed.
+   */
+  it("renders carried exchanges with provider-safe ids", async () => {
+    const session = new FakeSession();
+    await runTurn(args({ session }));
+
+    const observed = captureObservations(
+      [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "functions.repo_clone:13",
+              toolName: "repo_clone",
+              input: {}
+            }
+          ]
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "functions.repo_clone:13",
+              toolName: "repo_clone",
+              output: { type: "text", value: "ok" }
+            }
+          ]
+        }
+      ],
+      { round: 0, controlNames: [DELEGATE_TOOL_NAME] }
+    );
+
+    const { messages } = renderTurnMessages(
+      session.messages,
+      "t1",
+      [],
+      new Map([[0, observed]])
+    );
 
     const ids = messages.flatMap((message) =>
       Array.isArray(message.content)

@@ -135,9 +135,10 @@ export abstract class RoundAgentBase<
     };
   }
 
-  /** Age out this agent's subtask rows alongside the task rows. */
+  /** Age out this agent's subtask and observation rows alongside the task rows. */
   protected override cleanupAgentState(): void {
     this.db.subtasks.cleanup();
+    this.db.observations.cleanup();
   }
 
   // --- The task round loop (turn → execute → turn → …) ---------------------
@@ -255,6 +256,12 @@ export abstract class RoundAgentBase<
       tools: await this.mainAgentTools(session),
       models: this.modelPair(metadata),
       branches: this.compositionBranches(taskId),
+      observations: this.db.observations.recent(
+        taskId,
+        round,
+        this.config.roundObservationWindow
+      ),
+      toolOutputWindow: this.config.toolOutputWindow,
       types: this.runtime.types,
       maxSubtasks: this.config.maxSubtasks,
       maxOutputTokens: this.config.model.maxOutputTokens,
@@ -287,6 +294,11 @@ export abstract class RoundAgentBase<
       round,
       outcome.drafts
     );
+    // What this round saw, for the rounds after it. Written beside the rows and
+    // after them: a crash between the two costs the next round its evidence,
+    // which degrades it to the behaviour it had before observations existed —
+    // where losing the rows would strand a delegation nothing will ever run.
+    this.db.observations.put(taskId, round, outcome.observations);
     await channel?.working(outcome.reply, `ack:${round}`);
     return { status: "delegated", reply: outcome.reply, subtasks };
   }

@@ -43,6 +43,11 @@ export type {
   RoundFailureKind
 } from "../agent/inference.js";
 
+// The shape `RunTurnArgs.observations` is built from — exported because a host
+// calling `runTurn` directly has to be able to name it. The two functions are
+// core's own: a host supplies rounds, not the mechanics of bounding them.
+export type { RoundObservations } from "./observations.js";
+
 export {
   buildTurnInstructions,
   joinSuccessfulBranches,

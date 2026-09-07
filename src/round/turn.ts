@@ -45,6 +45,11 @@ import {
 } from "../subtasks/catalog.js";
 import type { CompositionBranch, SubtaskDraft } from "../subtasks/types.js";
 import type { FinalRoundReason, RoundPolicy } from "./policy.js";
+import {
+  captureObservations,
+  renderObservations,
+  type RoundObservations
+} from "./observations.js";
 
 /**
  * One **round** of the main agent: a single inference over the agent's continuous
@@ -239,6 +244,13 @@ function delegationPair(
  * evidence would be noise. That holds for every ack in the Session, not only the
  * ones this render can pair with branches — see `parseRoundAckMessageId`.
  *
+ * A round's **observations** are restored the same way and for the same reason,
+ * immediately before its delegation pair — which is where they happened. The
+ * order a round reads back is therefore the order it ran in: the tools it used,
+ * then the acknowledgment it gave, then what its branches came back with. Without
+ * them a round inherits only its predecessors' claims, which is how thirteen
+ * rounds each re-discovered that an SSH clone URL is refused.
+ *
  * Everything here is ephemeral — scaffolding for this call only. Reference text is
  * snapshotted from the catalog, so no `[ref N]` prefix ever reaches a Subtask, and
  * the Session never sees any of this markup.
@@ -246,11 +258,23 @@ function delegationPair(
 export function renderTurnMessages(
   history: SessionMessage[],
   taskId: string,
-  branches: CompositionBranch[]
+  branches: CompositionBranch[],
+  /**
+   * Each carried round's exchanges, keyed by round — already elided against one
+   * another by {@link renderObservations}. A round with no entry renders exactly
+   * as it did before observations existed.
+   */
+  observations: Map<number, ModelMessage[]> = new Map()
 ): { messages: ModelMessage[]; catalog: ReferenceCatalogEntry[] } {
   const rounds = byRound(branches);
+  // Anchored on either half. A round is normally in both — it delegated, so it
+  // has branches, and it worked, so it has observations — but the two are written
+  // in separate steps and aged out on separate clocks, and evidence that lost its
+  // delegation is still evidence. Dropping it silently is the failure class this
+  // is here to end, not one to reproduce in the renderer.
+  const carried = new Set([...rounds.keys(), ...observations.keys()]);
   const ackIds = new Map(
-    [...rounds.keys()].map((round) => [roundAckMessageId(taskId, round), round])
+    [...carried].map((round) => [roundAckMessageId(taskId, round), round])
   );
 
   const catalog: ReferenceCatalogEntry[] = [];
@@ -264,10 +288,20 @@ export function renderTurnMessages(
 
     const round = ackIds.get(message.id);
     if (round !== undefined) {
-      messages.push(
-        ...delegationPair(taskId, round, text, rounds.get(round) ?? [])
-      );
       anchored.add(round);
+      // Before the pair, never after: these calls are what the acknowledgment
+      // was written from.
+      messages.push(...(observations.get(round) ?? []));
+      const roundBranches = rounds.get(round);
+      if (roundBranches) {
+        messages.push(...delegationPair(taskId, round, text, roundBranches));
+        continue;
+      }
+      // Observations but no rows: the crash window described below, reached from
+      // the other side. The evidence stands and the acknowledgment does not —
+      // this render belongs to the retry that will decide the round again, and it
+      // should see what the first attempt saw without being told it already
+      // answered.
       continue;
     }
 
@@ -298,11 +332,14 @@ export function renderTurnMessages(
 
   // Rounds whose acknowledgment is no longer in history (compacted away by a
   // concurrent task), in round order so the results still read chronologically.
-  const orphaned = [...rounds.entries()]
-    .filter(([round]) => !anchored.has(round))
-    .sort(([a], [b]) => a - b);
-  for (const [round, roundBranches] of orphaned) {
-    messages.push(...delegationPair(taskId, round, null, roundBranches));
+  const orphaned = [...carried]
+    .filter((round) => !anchored.has(round))
+    .sort((a, b) => a - b);
+  for (const round of orphaned) {
+    messages.push(...(observations.get(round) ?? []));
+    const roundBranches = rounds.get(round);
+    if (roundBranches)
+      messages.push(...delegationPair(taskId, round, null, roundBranches));
   }
 
   return { messages, catalog };
@@ -380,6 +417,22 @@ export interface RunTurnArgs {
   models: ModelPair;
   /** Every earlier round's branches, all rounds, in stable ordinal order. */
   branches: CompositionBranch[];
+  /**
+   * What earlier rounds saw — their work-tool exchanges, already narrowed to the
+   * rounds this one should still be able to read (`roundObservationWindow`) by
+   * whoever loaded them.
+   *
+   * Optional, and absent means the round is rendered exactly as it was before
+   * any of this existed: an agent that carries nothing loses nothing but the
+   * evidence.
+   */
+  observations?: RoundObservations[];
+  /**
+   * `CoreConfig.toolOutputWindow` — how many recent turns of the carried
+   * exchanges keep their tool *results* in full. Defaults to keeping them all,
+   * which is what a caller who passes no `observations` gets either way.
+   */
+  toolOutputWindow?: number;
   /** The installed subtask types — what `delegate` may name. */
   types: SubtaskTypeRegistry;
   /** `CoreConfig.maxSubtasks`, the per-round fan-out bound. */
@@ -416,7 +469,18 @@ export interface RunTurnArgs {
  */
 export type RunTurnOutcome =
   | { status: "replied"; reply: string }
-  | { status: "delegated"; reply: string; drafts: SubtaskDraft[] }
+  | {
+      status: "delegated";
+      reply: string;
+      drafts: SubtaskDraft[];
+      /**
+       * The work-tool exchanges this round ended on, for the caller to persist
+       * beside the Subtask rows. Only a delegating round produces them: a round
+       * that replied has ended the Task, and there is no later round to carry
+       * anything to.
+       */
+      observations: ModelMessage[];
+    }
   | { status: "failed"; kind: RoundFailureKind; error: string };
 
 /**
@@ -439,7 +503,18 @@ interface RejectedCall {
  * which is what the fallback slot exists for.
  */
 type Attempt =
-  | { ok: true; decision: TurnDecision }
+  | {
+      ok: true;
+      decision: TurnDecision;
+      /**
+       * The work-tool exchanges this attempt produced, already filtered and
+       * bounded. Only a winning attempt's are kept: a slot that failed and a
+       * repair that was rejected both reasoned from calls the round did not end
+       * on, and carrying those would hand the next round a history its own
+       * ending never followed from.
+       */
+      observations: ModelMessage[];
+    }
   | { ok: false; error: unknown; rejected?: RejectedCall };
 
 /**
@@ -502,6 +577,12 @@ async function attempt(
       ])
     : undefined;
 
+  // What this attempt actually sees, accumulated as it works. Collected from
+  // `onStepEnd` rather than `result.steps` for the same reason the budget is:
+  // the messages of a step that ran are worth keeping even when the call around
+  // them later throws, and the `catch` below has no `result` to read.
+  const seen: ModelMessage[] = [];
+
   try {
     const result = await generateText({
       model: model(),
@@ -533,6 +614,7 @@ async function attempt(
       // bills the steps already spent — the `catch` below has no `result` to read.
       onStepEnd: async (step) => {
         args.budget.spent += 1;
+        seen.push(...step.response.messages);
         if (content) await content(step);
       }
     });
@@ -559,7 +641,14 @@ async function attempt(
       let subject: unknown = reached.inputs[0];
       try {
         subject = reached.control.select(reached.inputs);
-        return { ok: true, decision: reached.control.parse(subject) };
+        return {
+          ok: true,
+          decision: reached.control.parse(subject),
+          observations: captureObservations(seen, {
+            round: args.round,
+            controlNames: control.map((c) => c.name)
+          })
+        };
       } catch (error) {
         // The model ended the round but the call cannot be used. Repairable: it is
         // handed this error and asked again, rather than costing the whole slot.
@@ -730,7 +819,17 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
   }
 
   const history = await session.getHistory();
-  const { messages, catalog } = renderTurnMessages(history, taskId, branches);
+  const { messages, catalog } = renderTurnMessages(
+    history,
+    taskId,
+    branches,
+    // Bounded across every carried round at once, so a tool called in three of
+    // them keeps its latest answer and stubs the identical ones behind it.
+    renderObservations(
+      args.observations ?? [],
+      args.toolOutputWindow ?? Number.POSITIVE_INFINITY
+    )
+  );
   const system =
     (await session.refreshSystemPrompt()) +
     systemSuffix +
@@ -862,7 +961,8 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
       return {
         status: "delegated",
         reply: stored,
-        drafts: outcome.decision.drafts
+        drafts: outcome.decision.drafts,
+        observations: outcome.observations
       };
     }
   }
