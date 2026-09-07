@@ -27,7 +27,7 @@ export interface AiEnv {
 }
 
 /**
- * The two secrets every Dynamic Agents agent must carry.
+ * The two secrets every Dynamic Agent must carry.
  *
  * - `A2A_SIGNING_KEY` — Ed25519 private JWK (JSON, **must** include `kid`). Signs
  *   the AgentCard and every push-notification callback JWT. Its public half is

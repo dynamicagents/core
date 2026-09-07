@@ -1,6 +1,6 @@
 # @dynamicagents/core
 
-**The mandatory foundation for a Dynamic Agents agent on Cloudflare Workers.**
+**The mandatory foundation for a Dynamic Agent on Cloudflare Workers.**
 
 Zero-trust A2A (signed AgentCard, gatekeeper-JWT verification, no shared secrets), the
 durable task lifecycle, the delegation and subagent runtime, and the test harness.

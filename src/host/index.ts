@@ -1,7 +1,7 @@
 /**
  * `@dynamicagents/core/host` — the Durable Object half of an agent.
  *
- * {@link DynamicAgent} is the DO body every Dynamic Agents agent has whatever loop it
+ * {@link DynamicAgent} is the DO body every Dynamic Agent has whatever loop it
  * runs: the runtime and database built once per instance, the one continuous
  * Session per verified caller, the gatekeeper callback channel, and the task
  * lifecycle RPC surface a Workflow drives. {@link PluginHost} is what it hands
