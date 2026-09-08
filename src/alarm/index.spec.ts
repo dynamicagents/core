@@ -364,6 +364,41 @@ describe("namedDeadline", () => {
     });
   });
 
+  /**
+   * A rejection from `cancel` is not "already gone".
+   *
+   * Swallowing it would delete the stored id and then create a replacement, so
+   * the original row — which may well still be live — would keep firing with
+   * nothing able to reach it: the only handle on it was the id just discarded.
+   * Aborting keeps the id, so the next attempt can still cancel.
+   */
+  it("keeps the standing id when cancelling fails, rather than doubling up", async () => {
+    const stub = fresh(plain, "cancel-throws");
+    await runInDurableObject(stub, async (instance, state) => {
+      await instance.wake.start();
+      const idle = deadlineOn(instance, state);
+
+      const first = await idle.set(new Date(Date.now() + 60_000), { at: "a" });
+
+      const scheduler = instance.wake.scheduler;
+      const realCancel = scheduler.cancel.bind(scheduler);
+      scheduler.cancel = () => Promise.reject(new Error("storage gone"));
+
+      await expect(
+        idle.set(new Date(Date.now() + 120_000), { at: "b" })
+      ).rejects.toThrow("storage gone");
+
+      // No replacement was created, and the id still names the live row.
+      expect(await scheduler.list()).toHaveLength(1);
+      expect(await state.storage.get("idle-id")).toBe(first.id);
+
+      // So a later attempt still reaches it.
+      scheduler.cancel = realCancel;
+      await idle.set(new Date(Date.now() + 180_000), { at: "c" });
+      expect(await scheduler.list()).toHaveLength(1);
+    });
+  });
+
   /** Two deadlines differ only by key, and must not disturb each other. */
   it("keeps two deadlines on one object independent", async () => {
     const stub = fresh(plain, "two");

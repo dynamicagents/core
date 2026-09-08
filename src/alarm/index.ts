@@ -7,20 +7,23 @@
  * happens. This module is the fix, and it is now a thin assembly over the
  * `agents` SDK rather than an implementation of its own.
  *
- * **Why this stopped being hand-rolled.** The predecessor kept every pending
- * deadline in one storage row and was the only thing in the object that called
- * `setAlarm`. It existed because the SDK sold the same mechanism only as a
- * method on `Agent`, so adopting it meant the object *became* an `Agent` —
- * `cf_agents_state`, `cf_agents_mcp_servers` and `cf_agents_queues` in its
- * SQLite, an `MCPClientManager`, and prototype-patching of every public method.
- * That objection was correct when it was written and no longer holds: the SDK
- * split the machinery apart, so a `Lifecycle` installs on a **plain**
- * `DurableObject` and a `Scheduler` is one capability composed onto it.
+ * **Why the SDK owns this rather than this package.** A `Lifecycle` installs on
+ * a **plain** `DurableObject`, and a `Scheduler` is one capability composed onto
+ * it — so scheduling costs the scheduler and nothing else, and none of the
+ * `Agent` base class comes with it. There is therefore nothing here worth
+ * hand-rolling.
  *
- * What that buys, beyond the deletion: retries with backoff, cron and interval
- * schedules, a hung-callback timeout, and per-schedule rows instead of one
- * shared blob. What it costs is named under "The two sharp edges" below and in
- * {@link installScheduler} — this is not a drop-in for a keyed map.
+ * One sentence of history, so the deleted alternative is not re-litigated: this
+ * package used to carry its own wake map because the SDK sold scheduling only as
+ * a method on `Agent`, and taking it meant the object *became* one — three
+ * tables in its SQLite, an `MCPClientManager`, and prototype-patching of every
+ * public method. Composition replaced that.
+ *
+ * What the SDK's version provides that a hand-rolled one did not: retries with
+ * backoff, cron and interval schedules, a hung-callback timeout, and
+ * per-schedule rows instead of one shared blob. What it costs is named under
+ * "The sharp edges" below and in {@link installScheduler} — this is not a
+ * drop-in for a keyed map.
  *
  * **Its own subpath, still deliberately, but the claim is weaker now.** This is
  * useful to a plain `DurableObject`, not only to a {@link DynamicAgent}. It no
@@ -33,7 +36,7 @@
  * that `/alarm` is a published subpath, so the churn is inherited rather than
  * absorbed. Keeping the assembly here is what makes that one file's problem.
  *
- * ## The two sharp edges
+ * ## The sharp edges
  *
  * **1. A host that defines its own handlers is skipped in silence.**
  * `Lifecycle.installHandlers()` only defines `fetch`, `alarm` and the WebSocket
@@ -186,7 +189,8 @@ export interface ScheduledHost<
 /**
  * One **movable** deadline over a scheduler that has none.
  *
- * The gap this fills is sharp edge 2, and it is the single most common thing a
+ * The gap this fills is the "no move" edge above, and it is the single most
+ * common thing a
  * consumer of a scheduler gets wrong. A schedule is a row with a minted id, so
  * "push this deadline back" is cancel-then-set — and a one-shot `set` is not
  * idempotent, so doing only the second half quietly accumulates rows. An idle
@@ -201,7 +205,7 @@ export interface Deadline<P = unknown> {
   /**
    * Move the deadline, replacing whatever stood before.
    *
-   * A `Date`, not a number — see sharp edge 3.
+   * A `Date`, not a number — see the "a number is a delay" edge above.
    */
   set(when: Date, payload?: P): Promise<Schedule<P>>;
   /**
@@ -254,15 +258,22 @@ export function namedDeadline<
   const standing = () => storage.get<string>(key);
 
   /**
-   * Best-effort, because the id routinely names a row that is already gone: a
-   * one-shot schedule is dropped when it runs, so the deadline a callback
-   * re-arms *from* has no row left to cancel. That is the ordinary path, not a
-   * failure.
+   * A resolved `false` is the ordinary path, not a failure: the id routinely
+   * names a row that is already gone, because a one-shot schedule is dropped
+   * when it runs and the deadline a callback re-arms *from* has nothing left to
+   * cancel.
+   *
+   * A **rejection** is a different thing and must not be swallowed. The row may
+   * still be live, so forgetting its id here would strand it — firing on a
+   * deadline the caller has already moved, with nothing left that could cancel
+   * it, because the only handle on it was the id just discarded. Letting this
+   * propagate keeps the id and aborts the move, so the next attempt can still
+   * reach the row.
    */
   const cancel = async (): Promise<void> => {
     const id = await standing();
     if (id === undefined) return;
-    await scheduler.cancel(id).catch(() => false);
+    await scheduler.cancel(id);
     await storage.delete(key);
   };
 
@@ -297,7 +308,8 @@ export function namedDeadline<
  *
  *   async touch(): Promise<void> {
  *     await this.#wake.start();
- *     await this.#wake.scheduler.set(Date.now() + 3_600_000, "reclaim", {
+ *     // A `Date`. A number here would be a delay in *seconds*.
+ *     await this.#wake.scheduler.set(new Date(Date.now() + 3_600_000), "reclaim", {
  *       name: "w1"
  *     });
  *   }
