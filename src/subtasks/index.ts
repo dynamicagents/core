@@ -27,4 +27,6 @@ export {
 
 export { isCatalogEligible, type ReferenceCatalogEntry } from "./catalog.js";
 
+export { labelSubagentNote } from "./progress.js";
+
 export * from "./types.js";

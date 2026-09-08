@@ -286,6 +286,38 @@ the type-aware `no-deprecated` rule only run under `check`.
 
 ---
 
+## Comments
+
+This repo comments heavily, and that is deliberate: a lot of what is here was
+expensive to learn and invisible in the code. The cost is that comments rot, so
+they are held to the same bar as the code.
+
+A comment states a **constraint, a measurement, or a coupling** — something that
+changes a decision. Not what changed, not when, not what a previous version said;
+`git log` owns that. In particular:
+
+- **No changelog.** "This used to…", "removed in 0.8.2", "the design plan called
+  for…", "this is not a reversal of…" are all history. Write the rule that
+  survives it. A measurement is worth keeping; the date it was taken is not.
+- **No package versions or dates** in prose. They are stale on the next bump and
+  nothing checks them.
+- **One home per fact.** Put the explanation in the file somebody edits when they
+  change that behaviour, and a pointer everywhere else — core's comments have
+  `{@link file://../path/to.ts Name}` for exactly this. Four copies of the same
+  paragraph in four files do not stay in step: they diverge, and then the reader
+  cannot tell which one is current.
+- **No counts.** "the three tables", "the four values below", module counts, spec
+  counts. Every one of these was wrong within a release. Name the thing, not how
+  many there are.
+- **Cross-file references name a real path**, and a path in a comment is
+  checkable — so check it before you write it. Nothing in `check` verifies these
+  for you here.
+
+If a comment is longer than the code it explains, ask what decision it is
+protecting. Usually one paragraph of that is doing the work.
+
+---
+
 ## The VCR harness
 
 Core publishes it, so core must run it. It shipped broken once — installed as
