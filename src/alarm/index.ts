@@ -73,7 +73,8 @@ import {
   type Schedule,
   type SchedulerCallbacks,
   type SchedulerHandlers,
-  type SchedulerOptions
+  type SchedulerOptions,
+  type SchedulerPayload
 } from "agents/schedules";
 
 export type {
@@ -196,13 +197,13 @@ export interface ScheduledHost<
  * That key is the whole of its durable state, so two deadlines differ only by
  * key and one object may hold as many as it has reasons to wake.
  */
-export interface Deadline {
+export interface Deadline<P = unknown> {
   /**
    * Move the deadline, replacing whatever stood before.
    *
    * A `Date`, not a number — see sharp edge 3.
    */
-  set(when: Date, payload?: unknown): Promise<Schedule<unknown>>;
+  set(when: Date, payload?: P): Promise<Schedule<P>>;
   /**
    * The schedule standing now, or `undefined` if none is.
    *
@@ -210,18 +211,21 @@ export interface Deadline {
    * one-shot row once it runs, and a caller that needs to tell those apart wants
    * its own state rather than this.
    */
-  get(): Promise<Schedule<unknown> | undefined>;
+  get(): Promise<Schedule<P> | undefined>;
   /** Cancel the standing schedule and forget its id. */
   clear(): Promise<void>;
 }
 
-export interface DeadlineOptions<H extends SchedulerHandlers> {
+export interface DeadlineOptions<
+  H extends SchedulerHandlers,
+  Name extends keyof H & string
+> {
   storage: DurableObjectStorage;
   scheduler: Scheduler<H>;
   /** The storage key holding the id of the schedule currently standing. */
   key: string;
   /** The registered callback this deadline fires. */
-  callback: keyof H & string;
+  callback: Name;
 }
 
 /**
@@ -238,12 +242,15 @@ export interface DeadlineOptions<H extends SchedulerHandlers> {
  * await idle.set(new Date(Date.now() + IDLE_MS));  // however often you like
  * ```
  */
-export function namedDeadline<H extends SchedulerHandlers>({
+export function namedDeadline<
+  H extends SchedulerHandlers,
+  Name extends keyof H & string
+>({
   storage,
   scheduler,
   key,
   callback
-}: DeadlineOptions<H>): Deadline {
+}: DeadlineOptions<H, Name>): Deadline<SchedulerPayload<H[Name]>> {
   const standing = () => storage.get<string>(key);
 
   /**
@@ -265,18 +272,15 @@ export function namedDeadline<H extends SchedulerHandlers>({
       // exist, and a wake-up in it fires the callback against a deadline the
       // caller has already moved.
       await cancel();
-      const schedule = await scheduler.set(
-        when,
-        callback,
-        payload as never as undefined
-      );
+      const schedule = await scheduler.set(when, callback, payload);
       await storage.put(key, schedule.id);
-      return schedule as Schedule<unknown>;
+      return schedule;
     },
     async get() {
       const id = await standing();
       if (id === undefined) return undefined;
-      return await scheduler.get(id);
+      return (await scheduler.get(id)) as
+        Schedule<SchedulerPayload<H[Name]>> | undefined;
     },
     clear: cancel
   };
