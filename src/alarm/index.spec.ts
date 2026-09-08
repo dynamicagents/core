@@ -81,7 +81,7 @@ describe("installScheduler — the undelegated-handler guard", () => {
     await runInDurableObject(fresh(plain, "declared"), (_instance, state) => {
       expect(() =>
         installScheduler(fakeHost(OWNS_BOTH, state), {
-          delegates: ["alarm", "fetch"]
+          hostOwns: ["alarm", "fetch"]
         })
       ).not.toThrow();
     });
@@ -98,7 +98,7 @@ describe("installScheduler — the undelegated-handler guard", () => {
       (_instance, state) => {
         expect(() =>
           installScheduler(fakeHost({}, state), {
-            delegates: [...HOST_HANDLERS]
+            hostOwns: [...HOST_HANDLERS]
           })
         ).not.toThrow();
       }

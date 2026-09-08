@@ -41,7 +41,7 @@
  * keep its own dispatch. An object that overrides `alarm()` therefore installs
  * a `Scheduler` that never fires, with no error anywhere. {@link
  * installScheduler} turns that into a throw at construction: a host with its own
- * handler must list it in `delegates` and call through.
+ * handler must say so in `hostOwns`, and an `alarm()` it owns must call through.
  *
  * **2. There is no "move this deadline".** The predecessor's `set` was an upsert
  * on a caller-chosen key, so pushing a deadline later was one call. A schedule
@@ -108,15 +108,24 @@ export interface InstallSchedulerOptions<
   H extends SchedulerHandlers
 > extends SchedulerOptions<H> {
   /**
-   * Handlers this host defines itself and **promises to delegate**.
+   * Handlers this host defines itself.
    *
    * Required for anything the host already has, because `installHandlers()`
-   * skips those without saying so. Listing one is the acknowledgement that the
-   * host's own implementation calls the matching method on the returned
-   * {@link ScheduledHost} — most importantly `alarm()`, which is the only one
-   * scheduling cannot work without.
+   * skips those without saying so. Listing one is an acknowledgement, not a
+   * promise: what the host then does with it is the host's decision, and the
+   * two cases genuinely differ.
+   *
+   * **`alarm` must be delegated.** It is the only one scheduling cannot work
+   * without — a host that owns `alarm()` and never calls {@link
+   * ScheduledHost.alarm} has a scheduler that never fires.
+   *
+   * **`fetch` and the WebSocket handlers usually should not be.** A lifecycle's
+   * `fetch` claims capability routes, falls through to a host's `onRequest`, and
+   * takes any upgrade request into its own connection handling. A host serving
+   * its own protocol over a WebSocket wants none of that, and delegating would
+   * hijack the upgrade. Declare it and keep it.
    */
-  readonly delegates?: readonly HostHandler[];
+  readonly hostOwns?: readonly HostHandler[];
 }
 
 /**
@@ -143,9 +152,18 @@ export interface ScheduledHost<
    * storage is never migrated and the first `set` runs against nothing.
    */
   start(): Promise<void>;
-  /** Delegation target for a host that declares `"alarm"`. */
+  /**
+   * Run the lifecycle's alarm phase, which is where due schedules execute.
+   *
+   * A host that owns `alarm()` **must** call this from it. Nothing else does.
+   */
   alarm(): Promise<void>;
-  /** Delegation target for a host that declares `"fetch"`. */
+  /**
+   * The lifecycle's request handling — capability routes, `onRequest`, and
+   * connection upgrades. A host serving its own protocol over `fetch` should
+   * keep its own rather than delegate here; see {@link
+   * InstallSchedulerOptions.hostOwns}.
+   */
   fetch(request: Request): Promise<Response>;
   /**
    * Recompute the physical alarm from every capability.
@@ -186,7 +204,7 @@ export interface ScheduledHost<
  * ```ts
  * readonly #wake = installScheduler(this, {
  *   callbacks: { ... },
- *   delegates: ["alarm"]
+ *   hostOwns: ["alarm"]
  * });
  *
  * override async alarm(): Promise<void> {
@@ -195,7 +213,7 @@ export interface ScheduledHost<
  * }
  * ```
  *
- * @throws if the host defines a handler it did not declare in `delegates`. That
+ * @throws if the host defines a handler it did not declare in `hostOwns`. That
  * is the whole reason to call this rather than assembling the two SDK objects by
  * hand: the failure it prevents produces no error of its own, only a schedule
  * that never fires.
@@ -207,13 +225,13 @@ export function installScheduler<
   host: DurableObject<Env>,
   options: InstallSchedulerOptions<H> = {}
 ): ScheduledHost<H, Env> {
-  const { delegates = [], ...schedulerOptions } = options;
+  const { hostOwns = [], ...schedulerOptions } = options;
 
   // Read **before** installing, with the same `in` test `installHandlers` uses.
   // Checking own properties afterwards would not be the same question: a host
   // that assigned a handler as an instance field is skipped too, and would look
   // identical to one the lifecycle had just written.
-  const declared = new Set<HostHandler>(delegates);
+  const declared = new Set<HostHandler>(hostOwns);
   const undeclared = HOST_HANDLERS.filter(
     (name) => name in host && !declared.has(name)
   );
@@ -221,9 +239,9 @@ export function installScheduler<
     throw new Error(
       `${host.constructor.name} defines ${undeclared.map((n) => `"${n}"`).join(", ")} ` +
         `and the lifecycle will not replace ${undeclared.length === 1 ? "it" : "them"}. ` +
-        `List ${undeclared.length === 1 ? "it" : "each"} in \`delegates\` and call the ` +
-        `matching method on the returned object — an undelegated "alarm" leaves every ` +
-        `schedule silently unfired.`
+        `List ${undeclared.length === 1 ? "it" : "each"} in \`hostOwns\` to say so. ` +
+        `An "alarm" the host owns must then call through to this object's \`alarm()\`, ` +
+        `or every schedule is silently unfired.`
     );
   }
 

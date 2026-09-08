@@ -94,7 +94,7 @@ export class DelegatingScheduled extends DurableObject<Cloudflare.Env> {
         this.marks.push(payload.at);
       }
     },
-    delegates: ["alarm"]
+    hostOwns: ["alarm"]
   });
 
   override async alarm(): Promise<void> {
