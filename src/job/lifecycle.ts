@@ -1,4 +1,9 @@
-import type { WakeMap } from "../alarm/index.js";
+import type {
+  Scheduler,
+  SchedulerCallbacks,
+  SchedulerHandlers
+} from "agents/schedules";
+import { namedDeadline, type Deadline } from "../alarm/index.js";
 import { isRearmable, type JobState, type RunningJob } from "./state.js";
 
 /**
@@ -32,9 +37,13 @@ import { isRearmable, type JobState, type RunningJob } from "./state.js";
  *
  * Derived from {@link JobLifecycleOptions.id} so one object can own several
  * jobs. For `id: "install"` they come out as `install`, `install:armed`,
- * `install:last-armed`, `install:context`, and the wake intents `install-run`
- * and `install-watch` — the exact keys the predecessor wrote by hand, which is
- * why adopting this needs no storage migration.
+ * `install:last-armed`, `install:context` and `install:watch-id`.
+ *
+ * The last of those is the one a scheduler forces. A schedule is a row with an
+ * id, not a keyed upsert, so re-arming the watchdog means cancelling the
+ * previous row and creating another — and cancelling needs the id that only the
+ * call which created it ever saw. Holding it in storage is what keeps a watchdog
+ * re-armed across a hundred drain windows from leaving a hundred rows behind.
  */
 
 /** What a job's result looks like to the lifecycle. Deliberately minimal. */
@@ -61,11 +70,32 @@ export interface JobContext {
   startedAt: number;
 }
 
-export interface JobLifecycleOptions {
-  /** Namespaces every key and intent. Also the state record's own key. */
+export interface JobLifecycleOptions<
+  H extends SchedulerHandlers = SchedulerCallbacks
+> {
+  /** Namespaces every storage key. Also the state record's own key. */
   id: string;
   storage: DurableObjectStorage;
-  wake: WakeMap;
+  /**
+   * The object's scheduler. Owned by the host, because the callbacks are.
+   *
+   * Taken directly rather than through an adapter: the only consumer of this
+   * module is a Durable Object that already has one, and a narrow interface
+   * that `Scheduler` happens to satisfy would buy nothing but a second name for
+   * it.
+   */
+  scheduler: Scheduler<H>;
+  /**
+   * The registered callback that **runs** a job.
+   *
+   * A name rather than a function, because that is what a schedule row persists
+   * — the callback is re-bound on every wake of the Durable Object, and a
+   * closure captured here would not survive one. The host registers it; this
+   * only ever schedules it.
+   */
+  run: keyof H & string;
+  /** The registered callback that re-attaches to a job nobody is draining. */
+  watch: keyof H & string;
   /**
    * How long a `running` record may stand before it is presumed dead.
    *
@@ -84,28 +114,17 @@ export interface JobLifecycleOptions {
   armCooldownMs?: number;
 }
 
-/**
- * `WakeMap`'s own storage row, spelled here rather than imported.
- *
- * Importing `WAKE_KEY` would be a *value* import from `../alarm`, and this
- * module is careful to reach that package only for types — a runtime edge would
- * pull the whole alarm module into any bundle that imports `/job`. So the string
- * is duplicated, and `lifecycle.spec.ts` asserts it still equals `WAKE_KEY`;
- * specs never ship, so the check costs nothing at runtime and fails loudly if
- * the two ever drift.
- */
-const WAKE_MAP_KEY = "wake";
-
 const DEFAULT_STALE_MS = 5 * 60_000;
 const DEFAULT_WATCH_MS = 60_000;
 const DEFAULT_ARM_COOLDOWN_MS = 5 * 60_000;
 
 export class JobLifecycle<
   TExtra extends object = Record<never, never>,
-  TContext extends JobContext = JobContext
+  TContext extends JobContext = JobContext,
+  H extends SchedulerHandlers = SchedulerCallbacks
 > {
-  readonly #o: Required<Omit<JobLifecycleOptions, "storage" | "wake">> &
-    Pick<JobLifecycleOptions, "storage" | "wake">;
+  readonly #o: Required<Omit<JobLifecycleOptions<H>, "storage" | "scheduler">> &
+    Pick<JobLifecycleOptions<H>, "storage" | "scheduler">;
 
   /** `install` — the state record. */
   readonly stateKey: string;
@@ -115,33 +134,24 @@ export class JobLifecycle<
   readonly lastArmedKey: string;
   /** `install:context` — where the generation marker lives. */
   readonly contextKey: string;
-  /** `install-run` — the intent that *runs* a job. */
-  readonly runIntent: string;
-  /** `install-watch` — the intent that re-attaches to one nobody is draining. */
-  readonly watchIntent: string;
+  /** `install:watch-id` — the schedule the watchdog must cancel to re-arm. */
+  readonly watchIdKey: string;
 
-  constructor(options: JobLifecycleOptions) {
+  /** The watchdog's one movable deadline, over {@link watchIdKey}. */
+  readonly #watch: Deadline;
+
+  constructor(options: JobLifecycleOptions<H>) {
     /**
      * An id is a storage key, so a bad one is not a bad name — it is a write
-     * landing on somebody else's row.
+     * landing on somebody else's row. Empty is the case that actually collides:
+     * it yields `:armed` and `:context`, which two differently-broken callers
+     * would share.
      *
-     * `"wake"` is the one that matters and the reason this guard exists: it is
-     * `WakeMap`'s single row, so a job with that id would overwrite the whole
-     * intent map on its first state write, and the `wake.set()` immediately
-     * after would then read job fields as intents. Every pending wake-up on the
-     * object — not just this job's — silently stops happening.
-     *
-     * Empty is rejected for the same reason one level down: it yields the
-     * intents `-run` and `-watch`, which two differently-broken callers would
-     * share.
+     * Only empty: a schedule carries an id the scheduler mints and lives in its
+     * own row, so no job id can collide with the scheduling machinery however it
+     * is spelled. The keys derived here are the only ones worth guarding.
      */
     if (!options.id) throw new Error("a job id must be a non-empty string");
-    if (options.id === WAKE_MAP_KEY) {
-      throw new Error(
-        `"${WAKE_MAP_KEY}" is reserved: it is WakeMap's storage row, and a job ` +
-          `with that id would overwrite every pending intent on this object`
-      );
-    }
     this.#o = {
       ...options,
       staleMs: options.staleMs ?? DEFAULT_STALE_MS,
@@ -152,8 +162,13 @@ export class JobLifecycle<
     this.armedKey = `${options.id}:armed`;
     this.lastArmedKey = `${options.id}:last-armed`;
     this.contextKey = `${options.id}:context`;
-    this.runIntent = `${options.id}-run`;
-    this.watchIntent = `${options.id}-watch`;
+    this.watchIdKey = `${options.id}:watch-id`;
+    this.#watch = namedDeadline({
+      storage: options.storage,
+      scheduler: options.scheduler,
+      key: this.watchIdKey,
+      callback: options.watch
+    });
   }
 
   // --- the record ------------------------------------------------------------
@@ -224,17 +239,21 @@ export class JobLifecycle<
     await this.#o.storage.put(this.lastArmedKey, armedAt);
 
     /**
-     * The placeholder and the alarm that owns it are two writes, and between
+     * The placeholder and the schedule that owns it are two writes, and between
      * them is the one window where this can strand a job: a `running` record no
-     * run intent points at, which every later {@link arm} then declines to
-     * replace *because* it is running.
+     * schedule points at, which every later {@link arm} then declines to replace
+     * *because* it is running.
      *
      * The staleness bound in {@link claim} would eventually free it, but only
      * after a full timeout — so unwind instead, and leave the record exactly as
      * re-armable as it was found.
      */
     try {
-      await this.#o.wake.set({ key: this.runIntent, notBefore: armedAt });
+      // A `Date`, never the bare number. `set` reads a number as a **delay in
+      // seconds** — an epoch-ms stamp passed straight through becomes a delay of
+      // roughly fifty thousand years, and nothing rejects it. Every deadline in
+      // this module is epoch ms, so every one of them crosses as a `Date`.
+      await this.#o.scheduler.set(new Date(armedAt), this.#o.run);
     } catch (err) {
       await this.write(state);
       await this.#o.storage.delete(this.armedKey).catch(() => {});
@@ -301,12 +320,17 @@ export class JobLifecycle<
     return now - state.startedAt > timeoutMs + this.#o.staleMs;
   }
 
-  /** Arm the watchdog that re-attaches to a job nobody is draining. */
+  /**
+   * Arm the watchdog that re-attaches to a job nobody is draining.
+   *
+   * A {@link Deadline} rather than a bare `scheduler.set`, because a drain
+   * re-arms on every window and a schedule is a row rather than a keyed upsert.
+   * Scheduling without cancelling would leave one row per window, every one of
+   * them due, each waking the object to discover the others already handled it.
+   */
   async armWatch(now: number = Date.now()): Promise<void> {
-    await this.#o.wake.set({
-      key: this.watchIntent,
-      notBefore: now + this.#o.watchMs
-    });
+    // A `Date`: a number would be read as a delay in seconds.
+    await this.#watch.set(new Date(now + this.#o.watchMs));
   }
 
   /**
@@ -317,7 +341,7 @@ export class JobLifecycle<
    * path the live run has.
    */
   async clearWatch(): Promise<void> {
-    await this.#o.wake.clear(this.watchIntent).catch(() => {});
+    await this.#watch.clear().catch(() => {});
   }
 
   // --- generation --------------------------------------------------------------

@@ -1,199 +1,477 @@
 import { describe, it, expect } from "vitest";
-import { WakeMap, WAKE_REPAIR_MS, type WakeIntent } from "./index.js";
+// From `cloudflare:workers`, not `cloudflare:test` — the latter's `env` is
+// deprecated, and the repo's type-aware `no-deprecated` rule fails the build on it.
+import { env } from "cloudflare:workers";
+import { runInDurableObject } from "cloudflare:test";
+// The class, not the ambient global of the same name — see `./index.ts`.
+import type { DurableObject } from "cloudflare:workers";
+import { installScheduler, namedDeadline, HOST_HANDLERS } from "./index.js";
+import type { DelegatingScheduled, PlainScheduled } from "../../test/worker.js";
 
 /**
- * The whole point of this class is that it is the *only* caller of `setAlarm`,
- * so what these specs pin is the arming policy rather than the map: an alarm
- * moved later by a coincidental write is how a pending intent silently stops
- * happening, and that is not observable from the map's contents.
+ * What these pin is the *installation*, not the scheduler.
  *
- * Driven through a fake rather than a real Durable Object because every rule
- * below is about the four storage calls in a particular order, which a fake
- * makes assertable and a real DO only makes reachable.
+ * `Scheduler` is the SDK's and has its own suite; re-testing cron parsing here
+ * would be someone else's coverage counted twice. What is ours is the assembly:
+ * which host gets a working alarm, which one silently does not, and what a
+ * Durable Object carrying a legacy `wake` row finds when it boots on this code.
+ *
+ * Real Durable Objects rather than a fake, because every rule below is a
+ * property of `ctx.storage` and the physical alarm — a fake storage would assert
+ * that the fake works.
  */
-function fakeStorage() {
-  const rows = new Map<string, unknown>();
-  let alarm: number | null = null;
-  const calls: string[] = [];
 
-  const storage = {
-    get: async <T>(key: string): Promise<T | undefined> =>
-      rows.get(key) as T | undefined,
-    put: async (key: string, value: unknown): Promise<void> => {
-      rows.set(key, structuredClone(value));
-    },
-    getAlarm: async (): Promise<number | null> => alarm,
-    setAlarm: async (when: number): Promise<void> => {
-      calls.push(`set:${when}`);
-      alarm = when;
-    },
-    deleteAlarm: async (): Promise<void> => {
-      calls.push("delete");
-      alarm = null;
+const ns = <T extends Rpc.DurableObjectBranded>(name: string) =>
+  (env as unknown as Record<string, DurableObjectNamespace<T>>)[name]!;
+
+const plain = ns<PlainScheduled>("PLAIN_SCHEDULED");
+const delegating = ns<DelegatingScheduled>("DELEGATING_SCHEDULED");
+
+const fresh = <T extends Rpc.DurableObjectBranded>(
+  namespace: DurableObjectNamespace<T>,
+  label: string
+) => namespace.get(namespace.idFromName(`${label}:${crypto.randomUUID()}`));
+
+/**
+ * A stand-in host carrying a real `ctx`.
+ *
+ * The guard is a question about the prototype chain and needs no Durable Object
+ * — but a lifecycle that gets *past* the guard reads `host.ctx` immediately, so
+ * the accepting cases have to hand it a real one. Borrowing the `ctx` of an
+ * object the test already has is cheaper and truer than faking storage.
+ */
+const fakeHost = (proto: object, ctx?: DurableObjectState) =>
+  Object.assign(
+    Object.create(proto) as object,
+    ctx ? { ctx } : {}
+  ) as never as DurableObject<Cloudflare.Env>;
+
+const OWNS_BOTH = {
+  alarm: () => Promise.resolve(),
+  fetch: () => new Response()
+};
+
+describe("installScheduler — the undelegated-handler guard", () => {
+  /**
+   * The failure this exists for produces no error of its own. A lifecycle
+   * defines `alarm` only when the host does not already have one, so a host that
+   * overrides it keeps its own — and the scheduler it installed then never runs,
+   * with nothing anywhere saying so. Turning that into a throw at construction
+   * is the whole reason to call this rather than composing the lifecycle and the
+   * scheduler
+   * by hand.
+   */
+  it("refuses a host that defines a handler it did not declare", () => {
+    const host = fakeHost({ alarm: () => Promise.resolve() });
+    expect(() => installScheduler(host)).toThrow(/"alarm"/);
+    expect(() => installScheduler(host)).toThrow(/silently unfired/);
+  });
+
+  it("names every undeclared handler, not just the first", () => {
+    let message = "";
+    try {
+      installScheduler(fakeHost(OWNS_BOTH));
+    } catch (err) {
+      message = String(err);
     }
-  };
+    expect(message).toContain('"fetch"');
+    expect(message).toContain('"alarm"');
+  });
 
-  return {
-    wake: new WakeMap(storage as unknown as DurableObjectStorage),
-    alarmAt: () => alarm,
-    calls
-  };
-}
+  it("accepts the same host once it declares them", async () => {
+    await runInDurableObject(fresh(plain, "declared"), (_instance, state) => {
+      expect(() =>
+        installScheduler(fakeHost(OWNS_BOTH, state), {
+          hostOwns: ["alarm", "fetch"]
+        })
+      ).not.toThrow();
+    });
+  });
 
-const intent = (key: string, notBefore: number): WakeIntent => ({
-  key,
-  notBefore
+  /**
+   * Declaring a handler the host does *not* have is harmless and stays that way
+   * deliberately: the list is an acknowledgement, and a host that grows an
+   * `alarm()` later should not have to remember to add one.
+   */
+  it("tolerates a declaration for a handler the host does not have", async () => {
+    await runInDurableObject(
+      fresh(plain, "overdeclared"),
+      (_instance, state) => {
+        expect(() =>
+          installScheduler(fakeHost({}, state), {
+            hostOwns: [...HOST_HANDLERS]
+          })
+        ).not.toThrow();
+      }
+    );
+  });
 });
 
-describe("WakeMap", () => {
-  it("round-trips an intent and arms the alarm for it", async () => {
-    const { wake, alarmAt } = fakeStorage();
-    await wake.set(intent("install-watch", 1_000));
-
-    expect(await wake.get("install-watch")).toEqual({
-      key: "install-watch",
-      notBefore: 1_000
+describe("installScheduler — a host with no handlers of its own", () => {
+  it("runs a callback the lifecycle's own alarm dispatches", async () => {
+    const stub = fresh(plain, "runs");
+    await runInDurableObject(stub, async (instance) => {
+      await instance.wake.start();
+      await instance.wake.scheduler.set(new Date(Date.now() - 1_000), "mark", {
+        at: "past"
+      });
+      await instance.wake.alarm();
+      expect(instance.marks).toEqual(["past"]);
     });
-    expect(alarmAt()).toBe(1_000);
-  });
-
-  it("keeps intents independent, which is the reason it exists", async () => {
-    const { wake } = fakeStorage();
-    await wake.set(intent("sync-retry:container-shell", 5_000));
-    await wake.set(intent("container-idle", 9_000));
-
-    expect(Object.keys(await wake.all()).sort()).toEqual([
-      "container-idle",
-      "sync-retry:container-shell"
-    ]);
-  });
-
-  it("replaces an intent written twice under one key", async () => {
-    const { wake } = fakeStorage();
-    await wake.set({ key: "sync-retry:a", notBefore: 5_000, attempt: 1 });
-    await wake.set({ key: "sync-retry:a", notBefore: 8_000, attempt: 2 });
-
-    expect(Object.keys(await wake.all())).toEqual(["sync-retry:a"]);
-    expect(await wake.get("sync-retry:a")).toEqual({
-      key: "sync-retry:a",
-      notBefore: 8_000,
-      attempt: 2
-    });
-  });
-
-  it("returns only what is due, earliest first", async () => {
-    const { wake } = fakeStorage();
-    await wake.set(intent("late", 9_000));
-    await wake.set(intent("early", 1_000));
-    await wake.set(intent("middle", 5_000));
-
-    expect((await wake.due(5_000)).map((i) => i.key)).toEqual([
-      "early",
-      "middle"
-    ]);
-    expect(await wake.due(0)).toEqual([]);
   });
 
   /**
-   * The rule the whole class exists for. An alarm that fires early finds nothing
-   * due and costs one wake-up; an alarm pushed later drops whatever was already
-   * waiting on the floor — in production that was a stranded container sync.
+   * A Durable Object has one physical alarm, and two deadlines over it must land
+   * on the earlier — the whole reason a scheduler is worth having rather than
+   * each caller reaching for `setAlarm`. Asserted against `storage.getAlarm()`
+   * rather than against the schedule rows, because the rows are not what the
+   * runtime wakes on.
    */
-  it("moves the alarm earlier but never later", async () => {
-    const { wake, alarmAt } = fakeStorage();
-    await wake.set(intent("first", 5_000));
-    expect(alarmAt()).toBe(5_000);
+  it("points the one physical alarm at the earlier of two deadlines", async () => {
+    const stub = fresh(plain, "earliest");
+    await runInDurableObject(stub, async (instance, state) => {
+      await instance.wake.start();
 
-    await wake.set(intent("sooner", 2_000));
-    expect(alarmAt()).toBe(2_000);
+      const far = new Date(Date.now() + 3_600_000);
+      const near = new Date(Date.now() + 60_000);
 
-    await wake.set(intent("later", 9_000));
-    expect(alarmAt()).toBe(2_000);
+      await instance.wake.scheduler.set(far, "mark", { at: "far" });
+      const afterFar = await state.storage.getAlarm();
+      expect(afterFar).not.toBeNull();
+
+      await instance.wake.scheduler.set(near, "mark", { at: "near" });
+      const afterNear = await state.storage.getAlarm();
+
+      expect(afterNear).not.toBeNull();
+      expect(afterNear!).toBeLessThan(afterFar!);
+      // Seconds are the scheduler's storage unit, so the alarm lands within one
+      // of the requested moment rather than exactly on it.
+      expect(Math.abs(afterNear! - near.getTime())).toBeLessThanOrEqual(1_000);
+    });
   });
 
-  it("deletes the alarm once the last intent clears", async () => {
-    const { wake, alarmAt, calls } = fakeStorage();
-    await wake.set(intent("only", 1_000));
-    await wake.clear("only");
+  it("clears the alarm once the last schedule is cancelled", async () => {
+    const stub = fresh(plain, "cleared");
+    await runInDurableObject(stub, async (instance, state) => {
+      await instance.wake.start();
+      const only = await instance.wake.scheduler.set(
+        new Date(Date.now() + 60_000),
+        "mark",
+        { at: "only" }
+      );
+      expect(await state.storage.getAlarm()).not.toBeNull();
 
-    expect(await wake.all()).toEqual({});
-    expect(alarmAt()).toBeNull();
-    expect(calls).toContain("delete");
+      await instance.wake.scheduler.cancel(only.id);
+      await instance.wake.rearm();
+      expect(await state.storage.getAlarm()).toBeNull();
+    });
+  });
+});
+
+describe("installScheduler — a host that owns its own alarm", () => {
+  /**
+   * The shape `starter`'s workspace object has. Both halves must run: the host's
+   * own work on waking, and the schedules. A delegation that replaced one with
+   * the other would pass any test that only looked at the half it kept.
+   */
+  it("runs the host's own alarm work and the schedules", async () => {
+    const stub = fresh(delegating, "both");
+    await runInDurableObject(stub, async (instance) => {
+      await instance.wake.start();
+      await instance.wake.scheduler.set(new Date(Date.now() - 1_000), "mark", {
+        at: "past"
+      });
+
+      await instance.alarm();
+
+      expect(instance.ownAlarms).toBe(1);
+      expect(instance.marks).toEqual(["past"]);
+    });
   });
 
-  it("leaves the alarm alone when clearing a key it never held", async () => {
-    const { wake, alarmAt, calls } = fakeStorage();
-    await wake.set(intent("kept", 4_000));
-    const before = calls.length;
+  it("arms the physical alarm from a host that is only ever reached by RPC", async () => {
+    const stub = fresh(delegating, "rpc");
+    await runInDurableObject(stub, async (instance, state) => {
+      // No `fetch` anywhere in this test, which is the point: native RPC bypasses
+      // it, so `start()` is the only thing that migrates the scheduler's schema.
+      await instance.wake.start();
+      await instance.wake.scheduler.set(new Date(Date.now() + 60_000), "mark", {
+        at: "later"
+      });
+      expect(await state.storage.getAlarm()).not.toBeNull();
+    });
+  });
+});
 
-    await wake.clear("never-set");
+describe("installScheduler — booting on a legacy wake row", () => {
+  /**
+   * There is no storage migration, by decision, so this is the test that
+   * decision rests on.
+   *
+   * Deployed objects hold a KV row called `"wake"` holding every deadline, and a
+   * physical alarm armed against it. Nothing reads that row here, so such an
+   * object boots with both still on disk: a row with no reader, and an alarm that
+   * fires once into a handler with no schedule rows behind it. Neither may throw —
+   * the runtime retries a throwing `alarm()` a bounded number of times and then
+   * stops for good, which would take every *future* schedule down with the
+   * orphan.
+   */
+  it("treats a leftover alarm with no schedules as a no-op, and still schedules after", async () => {
+    const stub = fresh(plain, "dirty");
+    await runInDurableObject(stub, async (instance, state) => {
+      // Exactly what such an object holds: the row, and an alarm armed for it.
+      await state.storage.put("wake", {
+        "sync-retry:github": { key: "sync-retry:github", notBefore: 1 }
+      });
+      await state.storage.setAlarm(Date.now() - 1_000);
 
-    expect(alarmAt()).toBe(4_000);
-    // No re-arm at all: the map did not change, so nothing should have touched
-    // the alarm.
-    expect(calls.length).toBe(before);
+      await expect(instance.wake.alarm()).resolves.toBeUndefined();
+      expect(instance.marks).toEqual([]);
+
+      // And the object is not poisoned by what it found.
+      await instance.wake.scheduler.set(new Date(Date.now() - 1_000), "mark", {
+        at: "after"
+      });
+      await instance.wake.alarm();
+      expect(instance.marks).toEqual(["after"]);
+    });
   });
 
   /**
-   * `key` is a caller-supplied string, so the three names that mean something to
-   * `Object.prototype` have to behave like any other key.
+   * The orphaned row is left in place rather than drained, and nothing reads it.
+   * Pinned so that "orphaned" stays a decision somebody made rather than a
+   * detail somebody assumes.
    */
-  describe("keys that collide with Object.prototype", () => {
-    it("does not report an inherited member as a stored intent", async () => {
-      const { wake } = fakeStorage();
+  it("leaves the orphaned row untouched", async () => {
+    const stub = fresh(plain, "orphan");
+    await runInDurableObject(stub, async (instance, state) => {
+      const leftover = {
+        "container-idle": { key: "container-idle", notBefore: 1 }
+      };
+      await state.storage.put("wake", leftover);
 
-      expect(await wake.get("toString")).toBeUndefined();
-      expect(await wake.get("constructor")).toBeUndefined();
-      expect(await wake.get("__proto__")).toBeUndefined();
-      expect(await wake.due(Date.now())).toEqual([]);
+      await instance.wake.start();
+      await instance.wake.scheduler.set(new Date(Date.now() - 1_000), "mark", {
+        at: "x"
+      });
+      await instance.wake.alarm();
+
+      expect(await state.storage.get("wake")).toEqual(leftover);
+    });
+  });
+});
+
+describe("namedDeadline", () => {
+  const deadlineOn = (instance: PlainScheduled, state: DurableObjectState) =>
+    namedDeadline({
+      storage: state.storage,
+      scheduler: instance.wake.scheduler,
+      key: "idle-id",
+      callback: "mark"
     });
 
-    it("stores and returns them like any other key", async () => {
-      const { wake, alarmAt } = fakeStorage();
-      await wake.set(intent("__proto__", 1_000));
-      await wake.set(intent("toString", 2_000));
+  /**
+   * The rule the whole abstraction exists for. `#touch()`-shaped code moves a
+   * deadline on every request, and a scheduler has no move — so without the
+   * cancel, an object touched a hundred times carries a hundred rows, every one
+   * of them due, each waking it to find the work already done.
+   */
+  it("leaves one schedule behind however often it moves", async () => {
+    const stub = fresh(plain, "moves");
+    await runInDurableObject(stub, async (instance, state) => {
+      await instance.wake.start();
+      const idle = deadlineOn(instance, state);
 
-      expect(await wake.get("__proto__")).toEqual({
-        key: "__proto__",
-        notBefore: 1_000
-      });
-      expect(await wake.get("toString")).toEqual({
-        key: "toString",
-        notBefore: 2_000
-      });
-      // Proof it was stored rather than swallowed by the prototype setter.
-      expect(alarmAt()).toBe(1_000);
-      expect((await wake.due(2_000)).map((i) => i.key)).toEqual([
-        "__proto__",
-        "toString"
+      await idle.set(new Date(Date.now() + 60_000), { at: "a" });
+      await idle.set(new Date(Date.now() + 120_000), { at: "b" });
+      await idle.set(new Date(Date.now() + 180_000), { at: "c" });
+
+      const all = await instance.wake.scheduler.list();
+      expect(all).toHaveLength(1);
+      expect((await idle.get())?.id).toBe(all[0]!.id);
+    });
+  });
+
+  it("moves the physical alarm with it, later as well as earlier", async () => {
+    const stub = fresh(plain, "later");
+    await runInDurableObject(stub, async (instance, state) => {
+      await instance.wake.start();
+      const idle = deadlineOn(instance, state);
+
+      await idle.set(new Date(Date.now() + 60_000), { at: "near" });
+      const near = await state.storage.getAlarm();
+
+      // A lifecycle owns the physical alarm outright, so a deadline pushed back
+      // moves the alarm back with it. An implementation that only ever armed
+      // earlier would leave the object waking on the old deadline to find
+      // nothing due, which is silent and costs a wake-up every time.
+      await idle.set(new Date(Date.now() + 600_000), { at: "far" });
+      const far = await state.storage.getAlarm();
+
+      expect(far!).toBeGreaterThan(near!);
+    });
+  });
+
+  it("reads back the payload it scheduled", async () => {
+    const stub = fresh(plain, "payload");
+    await runInDurableObject(stub, async (instance, state) => {
+      await instance.wake.start();
+      const idle = deadlineOn(instance, state);
+
+      await idle.set(new Date(Date.now() + 60_000), { at: "kept" });
+      expect((await idle.get())?.payload).toEqual({ at: "kept" });
+    });
+  });
+
+  it("reports nothing standing before it is ever set", async () => {
+    const stub = fresh(plain, "unset");
+    await runInDurableObject(stub, async (instance, state) => {
+      await instance.wake.start();
+      expect(await deadlineOn(instance, state).get()).toBeUndefined();
+    });
+  });
+
+  it("clears, and clearing twice is not an error", async () => {
+    const stub = fresh(plain, "cleared-twice");
+    await runInDurableObject(stub, async (instance, state) => {
+      await instance.wake.start();
+      const idle = deadlineOn(instance, state);
+
+      await idle.set(new Date(Date.now() + 60_000), { at: "x" });
+      await idle.clear();
+      expect(await idle.get()).toBeUndefined();
+      expect(await instance.wake.scheduler.list()).toHaveLength(0);
+
+      await expect(idle.clear()).resolves.toBeUndefined();
+    });
+  });
+
+  /**
+   * The ordinary path, not an error: a one-shot row is dropped when it runs, so
+   * the deadline a callback re-arms *from* has nothing left to cancel.
+   */
+  it("re-arms cleanly after its own schedule has fired", async () => {
+    const stub = fresh(plain, "refired");
+    await runInDurableObject(stub, async (instance, state) => {
+      await instance.wake.start();
+      const idle = deadlineOn(instance, state);
+
+      await idle.set(new Date(Date.now() - 1_000), { at: "due" });
+      await instance.wake.alarm();
+      expect(instance.marks).toEqual(["due"]);
+
+      await expect(
+        idle.set(new Date(Date.now() + 60_000), { at: "again" })
+      ).resolves.toBeDefined();
+      expect(await instance.wake.scheduler.list()).toHaveLength(1);
+    });
+  });
+
+  /**
+   * A rejection from `cancel` is not "already gone".
+   *
+   * Swallowing it would delete the stored id and then create a replacement, so
+   * the original row — which may well still be live — would keep firing with
+   * nothing able to reach it: the only handle on it was the id just discarded.
+   * Aborting keeps the id, so the next attempt can still cancel.
+   */
+  it("keeps the standing id when cancelling fails, rather than doubling up", async () => {
+    const stub = fresh(plain, "cancel-throws");
+    await runInDurableObject(stub, async (instance, state) => {
+      await instance.wake.start();
+      const idle = deadlineOn(instance, state);
+
+      const first = await idle.set(new Date(Date.now() + 60_000), { at: "a" });
+
+      const scheduler = instance.wake.scheduler;
+      const realCancel = scheduler.cancel.bind(scheduler);
+      scheduler.cancel = () => Promise.reject(new Error("storage gone"));
+
+      await expect(
+        idle.set(new Date(Date.now() + 120_000), { at: "b" })
+      ).rejects.toThrow("storage gone");
+
+      // No replacement was created, and the id still names the live row.
+      expect(await scheduler.list()).toHaveLength(1);
+      expect(await state.storage.get("idle-id")).toBe(first.id);
+
+      // So a later attempt still reaches it.
+      scheduler.cancel = realCancel;
+      await idle.set(new Date(Date.now() + 180_000), { at: "c" });
+      expect(await scheduler.list()).toHaveLength(1);
+    });
+  });
+
+  /**
+   * A move is read-cancel-create-write across several awaits, so two of them in
+   * flight at once could cancel the same row, create two, and keep one id.
+   *
+   * Deterministic here in a way the Durable Object level is not: these are
+   * genuinely concurrent at the microtask boundaries the implementation awaits
+   * on, with no dependence on how a runtime schedules delivery.
+   */
+  it("leaves one schedule when moves overlap", async () => {
+    const stub = fresh(plain, "overlapping");
+    await runInDurableObject(stub, async (instance, state) => {
+      await instance.wake.start();
+      const idle = deadlineOn(instance, state);
+
+      await Promise.all([
+        idle.set(new Date(Date.now() + 60_000), { at: "a" }),
+        idle.set(new Date(Date.now() + 120_000), { at: "b" }),
+        idle.set(new Date(Date.now() + 180_000), { at: "c" }),
+        idle.set(new Date(Date.now() + 240_000), { at: "d" })
       ]);
-    });
 
-    it("treats clearing an unheld prototype name as a no-op", async () => {
-      const { wake, alarmAt, calls } = fakeStorage();
-      await wake.set(intent("kept", 4_000));
-      const before = calls.length;
-
-      await wake.clear("constructor");
-
-      expect(await wake.get("kept")).toBeDefined();
-      expect(alarmAt()).toBe(4_000);
-      expect(calls.length).toBe(before);
+      expect(await instance.wake.scheduler.list()).toHaveLength(1);
+      expect((await idle.get())?.id).toBe(
+        (await instance.wake.scheduler.list())[0]!.id
+      );
     });
   });
 
-  describe("repair", () => {
-    it("arms a short retry when the handler failed with no alarm left", async () => {
-      const { wake, alarmAt } = fakeStorage();
-      await wake.repair(10_000);
-      expect(alarmAt()).toBe(10_000 + WAKE_REPAIR_MS);
-    });
+  /**
+   * The same, through two handles that name one key. A caller minting a fresh
+   * `Deadline` per call — one per backend, say — must serialize with the others
+   * on the same key, so anything held on the instance would not be enough.
+   */
+  it("leaves one schedule when two handles on one key overlap", async () => {
+    const stub = fresh(plain, "two-handles");
+    await runInDurableObject(stub, async (instance, state) => {
+      await instance.wake.start();
+      const a = deadlineOn(instance, state);
+      const b = deadlineOn(instance, state);
 
-    it("does not touch an alarm that is already set", async () => {
-      const { wake, alarmAt } = fakeStorage();
-      await wake.set(intent("pending", 3_000));
-      await wake.repair(10_000);
-      expect(alarmAt()).toBe(3_000);
+      await Promise.all([
+        a.set(new Date(Date.now() + 60_000), { at: "a" }),
+        b.set(new Date(Date.now() + 120_000), { at: "b" })
+      ]);
+
+      expect(await instance.wake.scheduler.list()).toHaveLength(1);
+    });
+  });
+
+  /** Two deadlines differ only by key, and must not disturb each other. */
+  it("keeps two deadlines on one object independent", async () => {
+    const stub = fresh(plain, "two");
+    await runInDurableObject(stub, async (instance, state) => {
+      await instance.wake.start();
+      const common = {
+        storage: state.storage,
+        scheduler: instance.wake.scheduler,
+        callback: "mark" as const
+      };
+      const idle = namedDeadline({ ...common, key: "idle-id" });
+      const container = namedDeadline({ ...common, key: "container-id" });
+
+      await idle.set(new Date(Date.now() + 60_000), { at: "idle" });
+      await container.set(new Date(Date.now() + 120_000), { at: "container" });
+
+      expect(await instance.wake.scheduler.list()).toHaveLength(2);
+
+      await idle.clear();
+      expect((await container.get())?.payload).toEqual({ at: "container" });
+      expect(await instance.wake.scheduler.list()).toHaveLength(1);
     });
   });
 });
