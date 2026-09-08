@@ -193,6 +193,10 @@ export interface ScheduledHost<
  * A deadline is named by the storage key that holds its current schedule id.
  * That key is the whole of its durable state, so two deadlines differ only by
  * key and one object may hold as many as it has reasons to wake.
+ *
+ * Moves on one key are **serialized**, because the read-cancel-create-write a
+ * move performs is not atomic and two of them in flight orphan a row. See
+ * {@link inFlight}.
  */
 export interface Deadline<P = unknown> {
   /**
@@ -223,6 +227,51 @@ export interface DeadlineOptions<
   key: string;
   /** The registered callback this deadline fires. */
   callback: Name;
+}
+
+/**
+ * One in-flight move per storage key, per object.
+ *
+ * A move is read-cancel-create-write across several awaits, and a Durable
+ * Object's input gate does not span them: it closes while a storage operation is
+ * *in flight*, not for the stretch between two of them. So two moves on one key
+ * genuinely interleave — both read the same id, both cancel that one row, both
+ * create a replacement, and the second write of the id orphans the first
+ * replacement. It then fires on a deadline the caller has already moved, and
+ * nothing holds its id, so nothing can ever cancel it.
+ *
+ * Keyed by the **storage object and the key**, not by the {@link Deadline}
+ * instance: a caller may mint a fresh handle per call — one per backend, say —
+ * and two handles naming one key have to take the same turn. A `WeakMap` on
+ * storage keeps this per Durable Object, so two objects that happen to use the
+ * same key name do not queue behind each other.
+ */
+const inFlight = new WeakMap<
+  DurableObjectStorage,
+  Map<string, Promise<unknown>>
+>();
+
+function serialized<T>(
+  storage: DurableObjectStorage,
+  key: string,
+  run: () => Promise<T>
+): Promise<T> {
+  let byKey = inFlight.get(storage);
+  if (byKey === undefined) {
+    byKey = new Map();
+    inFlight.set(storage, byKey);
+  }
+  // `then(run, run)` rather than `then(run)`: a move that failed still ends the
+  // turn, and a queue that stopped on the first rejection would strand every
+  // move behind it for the life of the object.
+  const next = (byKey.get(key) ?? Promise.resolve()).then(run, run);
+  // What the *next* caller waits on must never reject, or the rejection is
+  // reported twice — once to this caller and once to whoever queues behind it.
+  byKey.set(
+    key,
+    next.catch(() => undefined)
+  );
+  return next;
 }
 
 /**
@@ -271,14 +320,16 @@ export function namedDeadline<
   };
 
   return {
-    async set(when, payload) {
-      // Cancel *first*. The reverse order leaves a window in which both rows
-      // exist, and a wake-up in it fires the callback against a deadline the
-      // caller has already moved.
-      await cancel();
-      const schedule = await scheduler.set(when, callback, payload);
-      await storage.put(key, schedule.id);
-      return schedule;
+    set(when, payload) {
+      return serialized(storage, key, async () => {
+        // Cancel *first*. The reverse order leaves a window in which both rows
+        // exist, and a wake-up in it fires the callback against a deadline the
+        // caller has already moved.
+        await cancel();
+        const schedule = await scheduler.set(when, callback, payload);
+        await storage.put(key, schedule.id);
+        return schedule;
+      });
     },
     async get() {
       const id = await standing();
@@ -286,7 +337,7 @@ export function namedDeadline<
       return (await scheduler.get(id)) as
         Schedule<SchedulerPayload<H[Name]>> | undefined;
     },
-    clear: cancel
+    clear: () => serialized(storage, key, cancel)
   };
 }
 

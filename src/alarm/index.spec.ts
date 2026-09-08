@@ -402,6 +402,55 @@ describe("namedDeadline", () => {
     });
   });
 
+  /**
+   * A move is read-cancel-create-write across several awaits, so two of them in
+   * flight at once could cancel the same row, create two, and keep one id.
+   *
+   * Deterministic here in a way the Durable Object level is not: these are
+   * genuinely concurrent at the microtask boundaries the implementation awaits
+   * on, with no dependence on how a runtime schedules delivery.
+   */
+  it("leaves one schedule when moves overlap", async () => {
+    const stub = fresh(plain, "overlapping");
+    await runInDurableObject(stub, async (instance, state) => {
+      await instance.wake.start();
+      const idle = deadlineOn(instance, state);
+
+      await Promise.all([
+        idle.set(new Date(Date.now() + 60_000), { at: "a" }),
+        idle.set(new Date(Date.now() + 120_000), { at: "b" }),
+        idle.set(new Date(Date.now() + 180_000), { at: "c" }),
+        idle.set(new Date(Date.now() + 240_000), { at: "d" })
+      ]);
+
+      expect(await instance.wake.scheduler.list()).toHaveLength(1);
+      expect((await idle.get())?.id).toBe(
+        (await instance.wake.scheduler.list())[0]!.id
+      );
+    });
+  });
+
+  /**
+   * The same, through two handles that name one key. A caller minting a fresh
+   * `Deadline` per call — one per backend, say — must serialize with the others
+   * on the same key, so anything held on the instance would not be enough.
+   */
+  it("leaves one schedule when two handles on one key overlap", async () => {
+    const stub = fresh(plain, "two-handles");
+    await runInDurableObject(stub, async (instance, state) => {
+      await instance.wake.start();
+      const a = deadlineOn(instance, state);
+      const b = deadlineOn(instance, state);
+
+      await Promise.all([
+        a.set(new Date(Date.now() + 60_000), { at: "a" }),
+        b.set(new Date(Date.now() + 120_000), { at: "b" })
+      ]);
+
+      expect(await instance.wake.scheduler.list()).toHaveLength(1);
+    });
+  });
+
   /** Two deadlines differ only by key, and must not disturb each other. */
   it("keeps two deadlines on one object independent", async () => {
     const stub = fresh(plain, "two");
