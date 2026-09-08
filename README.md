@@ -560,7 +560,7 @@ across the three repos use `file:` overrides, or `npm pack` plus a tarball insta
 [`AGENTS.md`](./AGENTS.md) documents the constraints this package is guardian of.
 
 ```bash
-npm run check           # prettier + eslint + tsc (src) + tsc (test) + build
+npm run check           # peer ranges + prettier + eslint + tsc (src) + tsc (test) + build
 npm test                # vitest, inside real workerd
 npm run verify:exports  # the publish gate: subpaths, ESM specifiers, realm isolation
 ```

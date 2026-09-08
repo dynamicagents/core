@@ -256,12 +256,30 @@ Verify with `npm run check`, preceded by `npm run types` when wrangler moved.
 Run `npm test` as well: `check` catches the type and lint fallout of a bump,
 and only the suite catches a behavioural one.
 
+A bump also moves what the peer ranges describe, and a peer range is the one
+field in `package.json` that nothing else reads — npm resolves the root's peers
+for _consumers_ and never turns them back on the root, so a range and the
+devDependency beside it drift apart with a green build the whole way.
+`npm run verify:peer-ranges` is in `check` for that. Its `--latest` mode is run
+by hand, since `check` has no network, and reports the two ways a range and
+reality come apart: a published release the range excludes, and a published
+release the range admits that nothing here has ever run.
+
+**Bound a peer ceiling only where the package has actually been breaking.** Open
+is the default — the vitest plugin peer under _The VCR harness_ is the worked
+example, and it says why. `agents` has a ceiling because it has broken across
+most of its recent minors and core is coupled to it about as deeply as a
+consumer can be — `Agent`, `Session`, `SessionMessage`, and the experimental
+subpaths. That ceiling is not a number anyone has to remember to revisit:
+`--latest` reports when a release lands outside it, so widening it becomes a
+deliberate act after a green suite rather than a guess made in advance.
+
 ---
 
 ## Working here
 
 ```bash
-npm run check     # types:check + prettier + eslint + tsc (src) + tsc (test) + build
+npm run check     # peer ranges + types:check + prettier + eslint + tsc x2 + build
 npm test          # vitest, inside real workerd
 npm run keys      # generate an Ed25519 A2A_SIGNING_KEY
 npm run types     # regenerate worker-configuration.d.ts, then commit it
@@ -269,8 +287,8 @@ npm run types     # regenerate worker-configuration.d.ts, then commit it
 
 `worker-configuration.d.ts` is generated but **committed**: it is an input to
 `tsc` and to eslint's type-aware pass, so a fresh clone must be able to
-typecheck without running a script first. `npm run types:check` — the first step
-of `check` — fails when the committed copy drifts from `wrangler.jsonc` or the
+typecheck without running a script first. `npm run types:check` — part of
+`check` — fails when the committed copy drifts from `wrangler.jsonc` or the
 installed workerd, and `scripts/verify-runtime-types.mjs` fails when it was
 regenerated without `--include-env=false` and so carries a global `Env`.
 
