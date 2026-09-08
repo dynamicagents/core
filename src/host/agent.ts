@@ -226,11 +226,19 @@ export abstract class DynamicAgent<
     // Await migrations before the SDK dispatches any RPC — eliminates the race
     // between schema creation and first query on cold start / hibernation wake-up.
     await this.db.ensureReady();
-    // Register the weekly cleanup cron once per DO instance (idempotent guard).
-    const existing = await this.listSchedules({ type: "cron" });
-    if (!existing.some((s) => s.callback === "cleanupOldTasks")) {
-      await this.schedule("0 1 * * 0", "cleanupOldTasks", {});
-    }
+    /**
+     * The weekly cleanup cron, registered on every start.
+     *
+     * Unguarded on purpose: a cron schedule is idempotent by default, matched on
+     * callback, expression and payload, so re-registering returns the existing
+     * row. The read-then-write this replaces cost a `listSchedules` on every
+     * cold start and hibernation wake to establish what the write already knew.
+     *
+     * One behaviour to know rather than discover: dedup keys on the *expression*
+     * too, so changing it here adds a second schedule beside the first rather
+     * than moving it. Changing the sweep's time means cancelling the old one.
+     */
+    await this.schedule("0 1 * * 0", "cleanupOldTasks", {});
   }
 
   /**

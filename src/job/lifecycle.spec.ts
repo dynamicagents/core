@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { WakeMap, WAKE_KEY } from "../alarm/index.js";
+import type { Scheduler, SchedulerCallbacks } from "agents/schedules";
 import { JobLifecycle } from "./lifecycle.js";
 import type { JobState } from "./state.js";
 
@@ -9,9 +9,10 @@ import type { JobState } from "./state.js";
  * each one is asserted negatively — that the wrong thing is refused — rather
  * than merely that the right thing works.
  *
- * Driven through a fake storage for the same reason `alarm/index.spec.ts` is:
- * the rules are about which keys are written in which order, which a fake makes
- * assertable and a real Durable Object only makes reachable.
+ * Driven through fakes rather than a real Durable Object because the rules are
+ * about which keys are written in which order and which scheduling calls are
+ * made in which order. A real `Scheduler` would make those reachable; a fake
+ * makes them assertable, and the scheduler's own behaviour is the SDK's to test.
  */
 function fakeStorage(): DurableObjectStorage {
   const rows = new Map<string, unknown>();
@@ -33,24 +34,68 @@ function fakeStorage(): DurableObjectStorage {
   } as unknown as DurableObjectStorage;
 }
 
+/**
+ * A scheduler that records what it was asked to do.
+ *
+ * `when` is kept **raw** rather than normalised, because the type it arrives as
+ * is itself a rule: `Scheduler.set` reads a number as a delay in seconds, so an
+ * epoch-ms deadline passed through as a number schedules fifty thousand years
+ * out and nothing rejects it. A fake that normalised would hide exactly that.
+ */
+function fakeScheduler() {
+  const live = new Map<string, { callback: string; when: unknown }>();
+  const calls: string[] = [];
+  let minted = 0;
+
+  const scheduler = {
+    set: async (when: unknown, callback: string) => {
+      const id = `sched-${++minted}`;
+      calls.push(`set:${callback}`);
+      live.set(id, { callback, when });
+      return { id, callback, type: "scheduled" };
+    },
+    cancel: async (id: string) => {
+      calls.push(`cancel:${id}`);
+      return live.delete(id);
+    }
+  };
+
+  return {
+    scheduler: scheduler as unknown as Scheduler<SchedulerCallbacks>,
+    /** Every schedule that has been created and not cancelled. */
+    live,
+    /** `set` and `cancel` in the order they happened. Ordering is a rule here. */
+    calls
+  };
+}
+
 type Install = { command: string };
 
-function lifecycle(id = "install") {
+function lifecycle(id = "install", over: { watchMs?: number } = {}) {
   const storage = fakeStorage();
-  const wake = new WakeMap(storage);
+  const sched = fakeScheduler();
   return {
     storage,
-    wake,
-    job: new JobLifecycle<Install>({ id, storage, wake })
+    ...sched,
+    job: new JobLifecycle<Install>({
+      id,
+      storage,
+      scheduler: sched.scheduler,
+      run: "jobRun",
+      watch: "jobWatch",
+      ...over
+    })
   };
 }
 
 describe("key derivation", () => {
   /**
-   * The zero-migration guarantee. These six strings are what the predecessor
-   * wrote by hand, and a deployed object's storage still holds them — so a
-   * change here is not a rename, it is every live workspace losing its install
-   * record and its pending intents at once.
+   * The four record keys are what the predecessor wrote by hand, and a deployed
+   * object's storage still holds them — so a change here is not a rename, it is
+   * every live workspace losing its install record.
+   *
+   * `watch-id` is the one addition, and it is new state rather than moved state:
+   * the intents it replaces were rows in somebody else's map.
    */
   it("reproduces the hand-written keys for id 'install'", () => {
     const { job } = lifecycle();
@@ -58,20 +103,19 @@ describe("key derivation", () => {
     expect(job.armedKey).toBe("install:armed");
     expect(job.lastArmedKey).toBe("install:last-armed");
     expect(job.contextKey).toBe("install:context");
-    expect(job.runIntent).toBe("install-run");
-    expect(job.watchIntent).toBe("install-watch");
+    expect(job.watchIdKey).toBe("install:watch-id");
   });
 
   it("namespaces a second job on the same object", () => {
     const { job } = lifecycle("claude-run");
     expect(job.stateKey).toBe("claude-run");
-    expect(job.runIntent).toBe("claude-run-run");
+    expect(job.watchIdKey).toBe("claude-run:watch-id");
   });
 });
 
 describe("arm", () => {
-  it("writes running before anything runs, and arms the run intent", async () => {
-    const { job, wake } = lifecycle();
+  it("writes running before anything runs, and schedules the run callback", async () => {
+    const { job, live } = lifecycle();
     await job.write({
       state: "done",
       command: "npm ci",
@@ -88,7 +132,14 @@ describe("arm", () => {
     // through against a workspace that is not ready.
     expect(state.state).toBe("running");
     expect(await job.armedAt()).toBe(armedAt);
-    expect((await wake.get(job.runIntent))?.notBefore).toBe(armedAt);
+
+    const scheduled = [...live.values()];
+    expect(scheduled).toHaveLength(1);
+    expect(scheduled[0]!.callback).toBe("jobRun");
+    // A `Date`, not the raw stamp — a number would be read as a delay in
+    // seconds, putting the run fifty thousand years out with no error.
+    expect(scheduled[0]!.when).toBeInstanceOf(Date);
+    expect((scheduled[0]!.when as Date).getTime()).toBe(armedAt);
   });
 
   it("is self-limiting: a second call sees running and declines", async () => {
@@ -250,34 +301,44 @@ describe("generation", () => {
 
 describe("reserved ids", () => {
   /**
-   * `"wake"` is `WakeMap`'s single storage row. A job with that id overwrites
-   * the whole intent map on its first state write, and the `wake.set()` right
-   * after then reads job fields as intents — so every pending wake-up on the
-   * object, not just this job's, silently stops happening.
+   * The predecessor also reserved `"wake"`, because that id collided with the
+   * single row holding every pending deadline: a job with it overwrote the lot
+   * on its first state write, and every wake-up on the object — not just this
+   * job's — silently stopped happening. Schedules are per-row now and carry ids
+   * the scheduler mints, so there is no shared row left to collide with and no
+   * reservation left to make.
+   *
+   * Empty is the collision that remains: it yields `:armed` and `:context`,
+   * which two differently-broken callers would share.
    */
-  it("refuses WakeMap's own storage key", () => {
-    const storage = fakeStorage();
-    expect(
-      () =>
-        new JobLifecycle({ id: "wake", storage, wake: new WakeMap(storage) })
-    ).toThrow(/reserved/);
-  });
-
   it("refuses an empty id", () => {
     const storage = fakeStorage();
+    const { scheduler } = fakeScheduler();
     expect(
-      () => new JobLifecycle({ id: "", storage, wake: new WakeMap(storage) })
+      () =>
+        new JobLifecycle({
+          id: "",
+          storage,
+          scheduler,
+          run: "jobRun",
+          watch: "jobWatch"
+        })
     ).toThrow(/non-empty/);
   });
 
-  /**
-   * The guard hardcodes `"wake"` so this module reaches `../alarm` for types
-   * only — a value import would pull the alarm module into every bundle that
-   * imports `/job`. This assertion is what keeps the duplicate honest; specs
-   * never ship, so it costs nothing at runtime.
-   */
-  it("keeps the hardcoded reserved key in step with WAKE_KEY", () => {
-    expect(WAKE_KEY).toBe("wake");
+  it("accepts the id the predecessor reserved", () => {
+    const storage = fakeStorage();
+    const { scheduler } = fakeScheduler();
+    expect(
+      () =>
+        new JobLifecycle({
+          id: "wake",
+          storage,
+          scheduler,
+          run: "jobRun",
+          watch: "jobWatch"
+        })
+    ).not.toThrow();
   });
 });
 
@@ -288,12 +349,10 @@ describe("arm rollback", () => {
    * later `arm()` then declines to replace *because* it is running.
    */
   it("restores the prior state when scheduling fails", async () => {
-    const storage = fakeStorage();
-    const wake = new WakeMap(storage);
-    wake.set = async () => {
-      throw new Error("alarm unavailable");
+    const { job, scheduler } = lifecycle();
+    scheduler.set = async () => {
+      throw new Error("scheduler unavailable");
     };
-    const job = new JobLifecycle<Install>({ id: "install", storage, wake });
 
     const before: JobState<Install> = {
       state: "failed",
@@ -304,7 +363,7 @@ describe("arm rollback", () => {
     await job.write(before);
 
     await expect(job.arm({ command: "npm ci" })).rejects.toThrow(
-      "alarm unavailable"
+      "scheduler unavailable"
     );
 
     // Left exactly as re-armable as it was found, rather than wedged at
@@ -316,12 +375,10 @@ describe("arm rollback", () => {
   it("keeps the cooldown floor even when scheduling failed", async () => {
     // A floor that applied only to *successful* arming would let a persistently
     // failing schedule re-arm on every call into the object.
-    const storage = fakeStorage();
-    const wake = new WakeMap(storage);
-    wake.set = async () => {
-      throw new Error("alarm unavailable");
+    const { job, storage, scheduler } = lifecycle();
+    scheduler.set = async () => {
+      throw new Error("scheduler unavailable");
     };
-    const job = new JobLifecycle<Install>({ id: "install", storage, wake });
     await job.write({
       state: "failed",
       command: "npm ci",
@@ -335,44 +392,89 @@ describe("arm rollback", () => {
 });
 
 describe("the watchdog", () => {
-  it("arms the namespaced intent at the watch deadline", async () => {
-    const { job, wake } = lifecycle();
+  it("schedules the watch callback at the watch deadline", async () => {
+    const { job, live, storage } = lifecycle();
     const now = 1_000_000;
     await job.armWatch(now);
 
-    const intent = await wake.get("install-watch");
+    const scheduled = [...live.values()];
+    expect(scheduled).toHaveLength(1);
+    expect(scheduled[0]!.callback).toBe("jobWatch");
     // Default watchMs is 60s; the deadline is what a dead drain is recovered by.
-    expect(intent?.notBefore).toBe(now + 60_000);
+    expect(scheduled[0]!.when).toBeInstanceOf(Date);
+    expect((scheduled[0]!.when as Date).getTime()).toBe(now + 60_000);
+    // The id is held so the next re-arm can cancel this row.
+    expect(await storage.get("install:watch-id")).toBeTypeOf("string");
   });
 
   it("honours a configured watchMs", async () => {
-    const storage = fakeStorage();
-    const wake = new WakeMap(storage);
-    const job = new JobLifecycle<Install>({
-      id: "install",
-      storage,
-      wake,
-      watchMs: 5_000
-    });
+    const { job, live } = lifecycle("install", { watchMs: 5_000 });
     await job.armWatch(1_000_000);
-    expect((await wake.get("install-watch"))?.notBefore).toBe(1_005_000);
+    expect(([...live.values()][0]!.when as Date).getTime()).toBe(1_005_000);
+  });
+
+  /**
+   * The rule the predecessor got for free and this one has to earn.
+   *
+   * `WakeMap.set` was an upsert on a key, so re-arming replaced. A schedule is a
+   * row, so re-arming *adds* unless the previous one is cancelled first — and a
+   * drain re-arms on every window. Left alone, a job drained for an hour leaves
+   * sixty rows, every one of them due, each waking the object to find the others
+   * already handled it.
+   */
+  it("leaves one schedule behind however often it re-arms", async () => {
+    const { job, live, calls } = lifecycle();
+    await job.armWatch(1_000_000);
+    await job.armWatch(1_060_000);
+    await job.armWatch(1_120_000);
+
+    expect(live.size).toBe(1);
+    expect(([...live.values()][0]!.when as Date).getTime()).toBe(1_180_000);
+    // Cancel *then* set, not the other way round: the reverse order would leave
+    // the window in which both rows exist and the object wakes twice.
+    expect(calls).toEqual([
+      "set:jobWatch",
+      "cancel:sched-1",
+      "set:jobWatch",
+      "cancel:sched-2",
+      "set:jobWatch"
+    ]);
   });
 
   it("disarms on request", async () => {
-    const { job, wake } = lifecycle();
+    const { job, live, storage } = lifecycle();
     await job.armWatch(1_000_000);
-    expect(await wake.get("install-watch")).toBeDefined();
+    expect(live.size).toBe(1);
+
     await job.clearWatch();
-    expect(await wake.get("install-watch")).toBeUndefined();
+    expect(live.size).toBe(0);
+    // The id goes too, so a later re-arm does not try to cancel a row that is
+    // gone and, worse, one whose id has since been minted again.
+    expect(await storage.get("install:watch-id")).toBeUndefined();
   });
 
   it("swallows a failure to disarm", async () => {
     // Called from a `finally`, so a throw here would mask the drain's own
     // outcome — which is the thing the caller actually needs to report.
-    const { job, wake } = lifecycle();
-    wake.clear = async () => {
+    const { job, scheduler } = lifecycle();
+    await job.armWatch(1_000_000);
+    scheduler.cancel = async () => {
       throw new Error("storage gone");
     };
     await expect(job.clearWatch()).resolves.toBeUndefined();
+  });
+
+  /**
+   * A schedule the scheduler has already run and removed is the ordinary case,
+   * not an error: the watchdog fires, and the drain that it woke re-arms.
+   */
+  it("re-arms cleanly when the previous schedule is already gone", async () => {
+    const { job, scheduler, live } = lifecycle();
+    await job.armWatch(1_000_000);
+    live.clear();
+
+    await expect(job.armWatch(1_060_000)).resolves.toBeUndefined();
+    expect(live.size).toBe(1);
+    expect(await scheduler.cancel("nothing")).toBe(false);
   });
 });

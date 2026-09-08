@@ -17,7 +17,9 @@
   "durable_objects": {
     "bindings": [
       { "name": "TEST_AGENT", "class_name": "TestAgent" },
-      { "name": "TEST_SUBAGENT", "class_name": "TestSubagent" }
+      { "name": "TEST_SUBAGENT", "class_name": "TestSubagent" },
+      { "name": "PLAIN_SCHEDULED", "class_name": "PlainScheduled" },
+      { "name": "DELEGATING_SCHEDULED", "class_name": "DelegatingScheduled" }
     ]
   },
 
@@ -28,6 +30,10 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["TestAgent", "TestSubagent"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["PlainScheduled", "DelegatingScheduled"]
     }
   ]
 }
