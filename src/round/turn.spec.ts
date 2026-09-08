@@ -222,6 +222,114 @@ describe("runTurn", () => {
   });
 
   /**
+   * The two roads to "this attempt reached no ending", which look identical from
+   * the outcome and are charged by entirely different code.
+   *
+   * A model that narrates instead of calling anything never returns: the SDK
+   * enforces `toolChoice` and throws, so `onStepEnd` — where a round bills its
+   * budget — never runs for that step. A model that spends every step on work
+   * tools returns normally, having billed each one. Both fail the slot; only the
+   * step count tells them apart, so that is what these assert.
+   *
+   * Worth pinning because the throw is the fragile road. Narration arriving as a
+   * *result* is safe — `onStepEnd` runs and bills it, and it falls out as the
+   * no-control-call failure. The silent one is the throw ceasing to be a
+   * `ToolChoiceViolationError`: `isInstance` stops matching, the `catch`
+   * rethrows without charging, and a model that never calls a tool burns both
+   * slots and every repair for free.
+   */
+  it("charges a narrated attempt, which never completes a step", async () => {
+    const budget = newTurnBudget(5);
+    const primary = countingModel({ text: "narrating instead of acting" });
+    const fallback = countingModel(finalReply("fallback answered"));
+
+    const outcome = await runTurn(
+      args({ budget, models: pair(primary.model, fallback.model) })
+    );
+
+    expect(outcome).toEqual({ status: "replied", reply: "fallback answered" });
+    // One call, no repair: nothing was rejected, so there is no ending to
+    // correct and the slot goes straight to the fallback.
+    expect(primary.calls()).toBe(1);
+    // The step the provider answered, plus the fallback's. Zero here would mean
+    // a model that never calls a tool costs nothing.
+    expect(budget.spent).toBe(2);
+  });
+
+  it("charges every step of an attempt that never reaches a control tool", async () => {
+    const budget = newTurnBudget(3);
+    // Always calls a work tool: `toolChoice` is satisfied every step, so nothing
+    // throws — the attempt simply runs out of steps having decided nothing.
+    const primary = countingModel({ toolCall: { toolName: "work" } });
+    const fallback = countingModel(finalReply("fallback answered"));
+
+    const outcome = await runTurn(
+      args({
+        budget,
+        tools: {
+          work: tool({
+            description: "Does some work.",
+            inputSchema: z.object({}),
+            execute: async () => "done"
+          })
+        },
+        models: pair(primary.model, fallback.model)
+      })
+    );
+
+    expect(outcome).toEqual({ status: "replied", reply: "fallback answered" });
+    // Its whole allowance, one step at a time.
+    expect(primary.calls()).toBe(3);
+    // Three spent by the primary, and the fallback's one step past the
+    // allowance — `stepAllowance`'s floor, which a round may exceed by exactly
+    // that and never by more.
+    expect(budget.spent).toBe(4);
+  });
+
+  /**
+   * Truncation is the round's own diagnosis, and it survives only because a work
+   * call landed in the same step: a truncated step with no tool call at all is a
+   * `toolChoice` violation and throws before the round sees a `finishReason`.
+   *
+   * It also ends the attempt on the spot. A cut-off response is terminal to the
+   * SDK's loop, so the round gets a one-step attempt rather than one that spends
+   * its allowance — which is why a truncated round fails so much cheaper than a
+   * stuck one, and why `maxOutputTokens` set too low looks like a fallback that
+   * answers everything.
+   */
+  it("charges a truncated step, which is spent like any other", async () => {
+    const budget = newTurnBudget(2);
+    const primary = countingModel({
+      toolCall: { toolName: "work" },
+      truncated: true
+    });
+    const fallback = countingModel(finalReply("fallback answered"));
+
+    const outcome = await runTurn(
+      args({
+        budget,
+        tools: {
+          work: tool({
+            description: "Does some work.",
+            inputSchema: z.object({}),
+            execute: async () => "done"
+          })
+        },
+        models: pair(primary.model, fallback.model)
+      })
+    );
+
+    expect(outcome).toEqual({ status: "replied", reply: "fallback answered" });
+    // One call, though the allowance was two: the cut-off ends the loop.
+    expect(primary.calls()).toBe(1);
+    // The step still cost a turn. Zero for the primary — a total of one here —
+    // would mean truncation had begun throwing before the step completed, the
+    // way a `toolChoice` violation does, and the round had stopped billing for
+    // a response the provider had already produced.
+    expect(budget.spent).toBe(2);
+  });
+
+  /**
    * A rate limit is "not yet", not "this model cannot do it".
    *
    * The fallback slot answers the second question and is useless for the first

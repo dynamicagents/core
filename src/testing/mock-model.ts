@@ -45,6 +45,16 @@ export interface MockStep {
    * the same ending twice (the tool's own `parse` decides).
    */
   toolCalls?: { toolName: string; input?: unknown }[];
+  /**
+   * Finish this step on `length` — the provider cut the response off at
+   * `maxOutputTokens` rather than because the model was done.
+   *
+   * Scriptable because the round treats truncation as its own diagnosis, and
+   * whether a step *ended* or was *cut off* is invisible from its content. Note
+   * that a truncated step carrying no tool call never reaches that branch: the
+   * SDK enforces `toolChoice` first and throws.
+   */
+  truncated?: boolean;
 }
 
 /**
@@ -83,8 +93,11 @@ function stepResult(step: MockStep) {
       input: JSON.stringify(call.input ?? {})
     });
   }
-  const unified =
-    calls.length > 0 ? ("tool-calls" as const) : ("stop" as const);
+  const unified = step.truncated
+    ? ("length" as const)
+    : calls.length > 0
+      ? ("tool-calls" as const)
+      : ("stop" as const);
   return {
     content,
     finishReason: { unified, raw: undefined },

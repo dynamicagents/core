@@ -108,31 +108,32 @@
     "types:check": "wrangler types --include-env=false --check && node scripts/verify-runtime-types.mjs",
     "format": "prettier --write .",
     "lint": "eslint .",
-    "check": "npm run types:check && prettier --check . && eslint . && tsc && tsc -p test/tsconfig.json && npm run build",
+    "check": "npm run verify:peer-ranges && npm run types:check && prettier --check . && eslint . && tsc && tsc -p test/tsconfig.json && npm run build",
     "test": "vitest run",
     "test:watch": "vitest",
     "verify:exports": "node scripts/verify-exports.mjs",
+    "verify:peer-ranges": "node scripts/verify-peer-ranges.mjs",
     "prepack": "npm run build && npm run verify:exports",
     "prepublishOnly": "npm run check && npm test && npm run verify:exports",
     "prepare": "husky"
   },
   "dependencies": {
-    "@a2a-js/sdk": "^1.0.1",
+    "@a2a-js/sdk": "^1.1.0",
     "@dynamicagents/g2a-protocol": "^0.3.0",
     "drizzle-orm": "^0.45.2",
-    "jose": "^6.2.10",
-    "zod": "^4.4.3"
+    "jose": "^6.2.12",
+    "zod": "^4.5.4"
   },
   "peerDependencies": {
-    "@cloudflare/vitest-pool-workers": ">=0.18",
+    "@cloudflare/vitest-plugin": ">=1",
     "@typescript-eslint/utils": ">=8",
-    "agents": "^0.21.0",
-    "ai": "^7.0.77",
+    "agents": ">=0.21.0 <0.23.0",
+    "ai": "^7.0.88",
     "vitest": ">=4",
     "workers-ai-provider": "^4.0.0"
   },
   "peerDependenciesMeta": {
-    "@cloudflare/vitest-pool-workers": {
+    "@cloudflare/vitest-plugin": {
       "optional": true
     },
     "@typescript-eslint/utils": {
@@ -143,19 +144,20 @@
     }
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.22.0",
-    "@types/node": "^26.2.0",
-    "agents": "^0.21.0",
-    "ai": "^7.0.77",
+    "@cloudflare/vitest-plugin": "^1.1.5",
+    "@types/node": "^26.5.0",
+    "agents": "^0.22.0",
+    "ai": "^7.0.93",
     "drizzle-kit": "^0.31.10",
-    "eslint": "^10.9.0",
+    "eslint": "^10.10.0",
     "husky": "^9.1.7",
     "prettier": "^3.9.6",
+    "semver": "^7.8.5",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.67.0",
+    "typescript-eslint": "^8.70.0",
     "vitest": "^4.1.11",
     "workers-ai-provider": "^4.0.0",
-    "wrangler": "^4.125.0"
+    "wrangler": "^4.129.1"
   },
   "engines": {
     "node": ">=24"

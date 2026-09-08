@@ -31,7 +31,7 @@ import { AGENT_ORIGIN, TEST_AGENT_PRIVATE_JWK } from "../testing/fixtures.js";
  * decode collapsed the scheme to `{}` and the signature failed. That is the
  * reason `advertiseSecuritySchemes` defaults to `false`.
  *
- * **Under the pinned `@a2a-js/sdk` (1.0.1) it no longer breaks.** The specs below
+ * **Under the SDK this package peers it no longer breaks.** The specs below
  * pin the property in the positive for *both* settings — schemes omitted and
  * schemes advertised — and additionally that an advertised-schemes signature
  * survives the double decode `slack-gatekeeper`'s `canonicalCardPayload` performs.
@@ -85,10 +85,10 @@ describe("AgentCard fixed point", () => {
     expect(wire.securityRequirements).toBeDefined();
   });
 
-  it("is ALSO stable with schemes advertised, as of @a2a-js/sdk 1.0.1", () => {
+  it("is ALSO stable with schemes advertised", () => {
     // Older SDK releases collapsed the `SecurityScheme` oneof to `{}` on a
     // second decode, breaking the signature — which is why
-    // `advertiseSecuritySchemes` still defaults to false. The pinned SDK does
+    // `advertiseSecuritySchemes` still defaults to false. The peered SDK does
     // not: the scheme survives, and so does the fixed point.
     //
     // Deliberately asserted in the positive so the default can be flipped with

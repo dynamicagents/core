@@ -86,13 +86,14 @@ export interface BuildCardOptions {
    * different document from the one that was signed, so the signature failed.
    * slack-gatekeeper's `canonicalCardPayload` double-decodes exactly this way.
    *
-   * **As of the pinned `@a2a-js/sdk` (1.0.1) that is fixed.** `card.spec.ts`
-   * asserts it directly: an advertised-schemes card is a fixed point under
-   * repeated decoding, and its signature verifies both as served and after a
-   * double decode. So the safety argument for the `false` default is gone, and
-   * the remaining reason to keep it is deployment ordering — a gatekeeper pinned to
+   * **The SDK this package peers no longer does that.** `card.spec.ts` asserts it
+   * directly: an advertised-schemes card is a fixed point under repeated
+   * decoding, and its signature verifies both as served and after a double
+   * decode. So the safety argument for the `false` default is gone, and the
+   * remaining reason to keep it is deployment ordering — a gatekeeper resolving
    * an older SDK copy would still collapse the oneof. Flip the default once the
-   * gatekeepers in play are known to be on ≥1.0.1; the specs will hold the line if
+   * gatekeepers in play are known to decode it as a fixed point; the specs will
+   * hold the line if
    * a later SDK regresses.
    *
    * `securityRequirements` is unaffected either way — it is a plain map, not a
