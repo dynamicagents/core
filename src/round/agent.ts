@@ -15,6 +15,7 @@ import {
 import { newTurnBudget, type TurnBudget } from "../agent/budget.js";
 import type { AiGatewayMetadata } from "../agent/model.js";
 import { FINGERPRINT_MISMATCH, subagentName } from "../subagent/index.js";
+import { labelSubagentNote } from "../subtasks/progress.js";
 import type {
   CompositionBranch,
   RecipeChunkResult,
@@ -462,7 +463,7 @@ export abstract class RoundAgentBase<
     if (prepared.kind === "terminal") {
       return { done: true, status: prepared.subtask.status, progress: [] };
     }
-    const { request, recipe, name, runtime } = prepared;
+    const { request, recipe, name, runtime, ordinal } = prepared;
 
     const outcome = await this.executeChunkInChild(
       name,
@@ -489,10 +490,18 @@ export abstract class RoundAgentBase<
 
     // Post progress the chunk emitted (best-effort; `working` never throws).
     // Deterministic keys let the gatekeeper dedupe a re-posted event on replay.
+    //
+    // The only place a subagent's words reach the gatekeeper, which is why the
+    // attribution goes on here: everything arriving in `outcome.progress` is by
+    // definition a subagent's, so the main agent's own messages need no
+    // discrimination and stay unlabelled. The key is *not* labelled — it is the
+    // replay-dedupe id and must stay derived from position alone — and neither
+    // is `outcome.progress` itself, which rides back to the Workflow.
     if (push) {
       const channel = this.push(push);
+      const source = { type: request.type, ordinal };
       for (const event of outcome.progress) {
-        await channel.working(event.text, event.key);
+        await channel.working(labelSubagentNote(event.text, source), event.key);
       }
     }
 
@@ -569,6 +578,13 @@ export abstract class RoundAgentBase<
         recipe: ResolvedRecipe;
         name: string;
         runtime: SubtaskRuntime;
+        /**
+         * The row's Task-wide position, carried out because the row is already
+         * read here — it identifies the branch in the progress notes this
+         * execution posts, and re-reading it at the post site would cost a
+         * second query for a number this method already holds.
+         */
+        ordinal: number;
       }
   > {
     const subtask = this.db.subtasks.get(id);
@@ -650,6 +666,7 @@ export abstract class RoundAgentBase<
       request,
       recipe: validated,
       name,
+      ordinal: subtask.ordinal,
       // Resolve the session state this execution needs and no model can supply —
       // a leased external resource, a session handle, a cookie jar — by asking
       // the plugin that owns the type. `{}` for a type whose plugin declares no
