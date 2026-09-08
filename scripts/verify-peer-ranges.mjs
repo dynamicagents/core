@@ -10,10 +10,17 @@
  *
  * So a peer range is prose until something asserts it. `tsc` reads the installed
  * copy, the specs run against the installed copy, and the range — the only part
- * a consumer actually installs against — can say anything at all. That is how a
- * 0.x caret stayed on `agents` after the devDependency moved past it: green
- * build, green suite, and a package claiming support for a version it was no
- * longer built against.
+ * a consumer actually installs against — can say anything at all. A `0.x` caret
+ * is where that bites first: it locks to the *minor*, so a devDependency moving
+ * to the next one leaves the range behind, with a green build and a green suite
+ * the whole way.
+ *
+ * What it does **not** check: that the floor of a range can actually run this
+ * code. A range is a claim about an API surface, and only the installed copy is
+ * ever exercised here — so a floor naming a release predating an import this
+ * package makes is a claim nothing on this machine can falsify. Raising a floor
+ * is a judgement about what the source needs; this script only holds the range
+ * and the installed copy to each other.
  *
  * Offline and deterministic, which is why it belongs in `check`:
  *
@@ -72,11 +79,27 @@ const optional = (name) => meta[name]?.optional === true;
  * this package resolves. A nested one belongs to whoever nested it.
  */
 function installedVersion(name) {
+  const manifest = path.join(root, "node_modules", name, "package.json");
+  let source;
   try {
-    const manifest = path.join(root, "node_modules", name, "package.json");
-    return JSON.parse(readFileSync(manifest, "utf8")).version;
-  } catch {
-    return undefined;
+    source = readFileSync(manifest, "utf8");
+  } catch (error) {
+    // Absent is the only error that means absent. A manifest that exists and
+    // cannot be read — a permission problem, a half-written tree — is not the
+    // same as a peer nobody installed, and swallowing it here would let an
+    // *optional* peer pass this gate while unreadable, which is the one case
+    // where nothing downstream would notice either.
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return undefined;
+    throw new Error(`cannot read ${manifest}: ${error.message}`, {
+      cause: error
+    });
+  }
+  try {
+    return JSON.parse(source).version;
+  } catch (error) {
+    throw new Error(`${manifest} is not valid JSON: ${error.message}`, {
+      cause: error
+    });
   }
 }
 
@@ -116,7 +139,9 @@ for (const [name, range] of peers) {
 // --- 3. no meta entry without a peer -----------------------------------------
 
 for (const name of Object.keys(meta)) {
-  if (!(name in (pkg.peerDependencies ?? {}))) {
+  // `Object.hasOwn`, not `in`: `in` walks the prototype chain, so a stale key
+  // named `constructor` or `toString` would name a "peer" that does not exist.
+  if (!Object.hasOwn(pkg.peerDependencies ?? {}, name)) {
     fail(
       `peerDependenciesMeta has "${name}", which is not a peer — npm ignores ` +
         `it silently, so if the peer was renamed its replacement is now required`

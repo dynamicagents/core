@@ -691,9 +691,15 @@ async function attempt(
     // tool burn both slots and every repair without the budget moving.
     if (ToolChoiceViolationError.isInstance(error)) {
       args.budget.spent += 1;
+      // Joined before trimming, not trimmed per part: `StepResult.text` on the
+      // other road concatenates the parts first, and the two roads emit the
+      // same diagnostic. Summing trimmed parts drops the whitespace between
+      // them and reports a shorter text than the same content would elsewhere.
       const text = error.content
         .filter((part) => part.type === "text")
-        .reduce((n, part) => n + part.text.trim().length, 0);
+        .map((part) => part.text)
+        .join("")
+        .trim().length;
       return {
         ok: false,
         error: new Error(

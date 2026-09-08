@@ -231,10 +231,12 @@ describe("runTurn", () => {
    * tools returns normally, having billed each one. Both fail the slot; only the
    * step count tells them apart, so that is what these assert.
    *
-   * Worth pinning because the first road is new. The enforcement moved into the
-   * SDK, and the day it moves again — or a model's narration starts arriving as
-   * a result rather than a throw — the round silently stops charging for work it
-   * paid a provider to do.
+   * Worth pinning because the throw is the fragile road. Narration arriving as a
+   * *result* is safe — `onStepEnd` runs and bills it, and it falls out as the
+   * no-control-call failure. The silent one is the throw ceasing to be a
+   * `ToolChoiceViolationError`: `isInstance` stops matching, the `catch`
+   * rethrows without charging, and a model that never calls a tool burns both
+   * slots and every repair for free.
    */
   it("charges a narrated attempt, which never completes a step", async () => {
     const budget = newTurnBudget(5);
@@ -295,7 +297,7 @@ describe("runTurn", () => {
    * stuck one, and why `maxOutputTokens` set too low looks like a fallback that
    * answers everything.
    */
-  it("charges a truncated step, which is spend like any other", async () => {
+  it("charges a truncated step, which is spent like any other", async () => {
     const budget = newTurnBudget(2);
     const primary = countingModel({
       toolCall: { toolName: "work" },

@@ -128,7 +128,7 @@
     "@cloudflare/vitest-plugin": ">=1",
     "@typescript-eslint/utils": ">=8",
     "agents": ">=0.21.0 <0.23.0",
-    "ai": "^7.0.77",
+    "ai": "^7.0.88",
     "vitest": ">=4",
     "workers-ai-provider": "^4.0.0"
   },
