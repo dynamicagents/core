@@ -14,7 +14,7 @@ import type { DelegatingScheduled, PlainScheduled } from "../../test/worker.js";
  * `Scheduler` is the SDK's and has its own suite; re-testing cron parsing here
  * would be someone else's coverage counted twice. What is ours is the assembly:
  * which host gets a working alarm, which one silently does not, and what a
- * Durable Object that ran the predecessor finds when it boots on this code.
+ * Durable Object carrying a legacy `wake` row finds when it boots on this code.
  *
  * Real Durable Objects rather than a fake, because every rule below is a
  * property of `ctx.storage` and the physical alarm — a fake storage would assert
@@ -57,7 +57,8 @@ describe("installScheduler — the undelegated-handler guard", () => {
    * defines `alarm` only when the host does not already have one, so a host that
    * overrides it keeps its own — and the scheduler it installed then never runs,
    * with nothing anywhere saying so. Turning that into a throw at construction
-   * is the whole reason to call this rather than composing the two SDK objects
+   * is the whole reason to call this rather than composing the lifecycle and the
+   * scheduler
    * by hand.
    */
   it("refuses a host that defines a handler it did not declare", () => {
@@ -120,10 +121,11 @@ describe("installScheduler — a host with no handlers of its own", () => {
   });
 
   /**
-   * The invariant the predecessor's `rearm()` existed for, now the lifecycle's:
-   * a Durable Object has one physical alarm, and two deadlines over it must land
-   * on the earlier. Asserted against `storage.getAlarm()` rather than against
-   * the schedule rows, because the rows are not what the runtime wakes on.
+   * A Durable Object has one physical alarm, and two deadlines over it must land
+   * on the earlier — the whole reason a scheduler is worth having rather than
+   * each caller reaching for `setAlarm`. Asserted against `storage.getAlarm()`
+   * rather than against the schedule rows, because the rows are not what the
+   * runtime wakes on.
    */
   it("points the one physical alarm at the earlier of two deadlines", async () => {
     const stub = fresh(plain, "earliest");
@@ -201,15 +203,15 @@ describe("installScheduler — a host that owns its own alarm", () => {
   });
 });
 
-describe("installScheduler — booting on what the predecessor left behind", () => {
+describe("installScheduler — booting on a legacy wake row", () => {
   /**
    * There is no storage migration, by decision, so this is the test that
    * decision rests on.
    *
-   * The predecessor kept every deadline in one KV row called `"wake"` and armed
-   * the physical alarm itself. An object that ran it and then took this code has
-   * both still on disk: a row nothing reads any more, and an alarm that will fire
-   * once into a handler with no schedule rows behind it. Neither may throw —
+   * Deployed objects hold a KV row called `"wake"` holding every deadline, and a
+   * physical alarm armed against it. Nothing reads that row here, so such an
+   * object boots with both still on disk: a row with no reader, and an alarm that
+   * fires once into a handler with no schedule rows behind it. Neither may throw —
    * the runtime retries a throwing `alarm()` a bounded number of times and then
    * stops for good, which would take every *future* schedule down with the
    * orphan.
@@ -217,7 +219,7 @@ describe("installScheduler — booting on what the predecessor left behind", () 
   it("treats a leftover alarm with no schedules as a no-op, and still schedules after", async () => {
     const stub = fresh(plain, "dirty");
     await runInDurableObject(stub, async (instance, state) => {
-      // Exactly what the predecessor left: the row, and an alarm it armed.
+      // Exactly what such an object holds: the row, and an alarm armed for it.
       await state.storage.put("wake", {
         "sync-retry:github": { key: "sync-retry:github", notBefore: 1 }
       });
@@ -299,9 +301,10 @@ describe("namedDeadline", () => {
       await idle.set(new Date(Date.now() + 60_000), { at: "near" });
       const near = await state.storage.getAlarm();
 
-      // The predecessor could only ever move the alarm *earlier* — pushing an
-      // intent back left the object waking on the old deadline to find nothing
-      // due. A lifecycle owns the alarm outright, so this genuinely moves.
+      // A lifecycle owns the physical alarm outright, so a deadline pushed back
+      // moves the alarm back with it. An implementation that only ever armed
+      // earlier would leave the object waking on the old deadline to find
+      // nothing due, which is silent and costs a wake-up every time.
       await idle.set(new Date(Date.now() + 600_000), { at: "far" });
       const far = await state.storage.getAlarm();
 

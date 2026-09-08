@@ -90,12 +90,8 @@ function lifecycle(id = "install", over: { watchMs?: number } = {}) {
 
 describe("key derivation", () => {
   /**
-   * The four record keys are what the predecessor wrote by hand, and a deployed
-   * object's storage still holds them — so a change here is not a rename, it is
-   * every live workspace losing its install record.
-   *
-   * `watch-id` is the one addition, and it is new state rather than moved state:
-   * the intents it replaces were rows in somebody else's map.
+   * A deployed object's storage holds these strings, so a change here is not a
+   * rename — it is every live workspace losing its install record.
    */
   it("reproduces the hand-written keys for id 'install'", () => {
     const { job } = lifecycle();
@@ -301,15 +297,13 @@ describe("generation", () => {
 
 describe("reserved ids", () => {
   /**
-   * The predecessor also reserved `"wake"`, because that id collided with the
-   * single row holding every pending deadline: a job with it overwrote the lot
-   * on its first state write, and every wake-up on the object — not just this
-   * job's — silently stopped happening. Schedules are per-row now and carry ids
-   * the scheduler mints, so there is no shared row left to collide with and no
-   * reservation left to make.
+   * Empty is the only id that collides: it yields `:armed` and `:context`, which
+   * two differently-broken callers would share.
    *
-   * Empty is the collision that remains: it yields `:armed` and `:context`,
-   * which two differently-broken callers would share.
+   * Nothing else can, and the second test is what pins that. A schedule lives in
+   * its own row under an id the scheduler mints, so no job id reaches the
+   * scheduling machinery however it is spelled — which is why an id that reads
+   * like scheduler state is accepted rather than reserved.
    */
   it("refuses an empty id", () => {
     const storage = fakeStorage();
@@ -326,7 +320,7 @@ describe("reserved ids", () => {
     ).toThrow(/non-empty/);
   });
 
-  it("accepts the id the predecessor reserved", () => {
+  it("accepts an id that reads like scheduler state", () => {
     const storage = fakeStorage();
     const { scheduler } = fakeScheduler();
     expect(
@@ -414,13 +408,10 @@ describe("the watchdog", () => {
   });
 
   /**
-   * The rule the predecessor got for free and this one has to earn.
-   *
-   * `WakeMap.set` was an upsert on a key, so re-arming replaced. A schedule is a
-   * row, so re-arming *adds* unless the previous one is cancelled first — and a
-   * drain re-arms on every window. Left alone, a job drained for an hour leaves
-   * sixty rows, every one of them due, each waking the object to find the others
-   * already handled it.
+   * A schedule is a row, not a keyed upsert, so re-arming *adds* unless the
+   * previous one is cancelled first — and a drain re-arms on every window. Left
+   * alone, a job drained for an hour leaves sixty rows, every one of them due,
+   * each waking the object to find the others already handled it.
    */
   it("leaves one schedule behind however often it re-arms", async () => {
     const { job, live, calls } = lifecycle();

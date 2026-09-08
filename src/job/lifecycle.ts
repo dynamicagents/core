@@ -147,10 +147,9 @@ export class JobLifecycle<
      * it yields `:armed` and `:context`, which two differently-broken callers
      * would share.
      *
-     * The predecessor reserved `"wake"` as well, because that was the single row
-     * holding every pending deadline and a job with that id overwrote the lot.
-     * Schedules are per-row now and carry ids the scheduler mints, so there is
-     * no shared row left to collide with.
+     * Only empty: a schedule carries an id the scheduler mints and lives in its
+     * own row, so no job id can collide with the scheduling machinery however it
+     * is spelled. The keys derived here are the only ones worth guarding.
      */
     if (!options.id) throw new Error("a job id must be a non-empty string");
     this.#o = {

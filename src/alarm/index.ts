@@ -7,23 +7,16 @@
  * happens. This module is the fix, and it is now a thin assembly over the
  * `agents` SDK rather than an implementation of its own.
  *
- * **Why the SDK owns this rather than this package.** A `Lifecycle` installs on
- * a **plain** `DurableObject`, and a `Scheduler` is one capability composed onto
- * it — so scheduling costs the scheduler and nothing else, and none of the
- * `Agent` base class comes with it. There is therefore nothing here worth
- * hand-rolling.
+ * **Scheduling does not require the `Agent` base class**, and that is the fact
+ * worth checking before anyone hand-rolls a wake map here again. A `Lifecycle`
+ * installs on a **plain** `DurableObject` and a `Scheduler` composes onto it, so
+ * nothing in this module pulls `cf_agents_state`, an `MCPClientManager`, or the
+ * prototype patching that comes with extending `Agent`.
  *
- * One sentence of history, so the deleted alternative is not re-litigated: this
- * package used to carry its own wake map because the SDK sold scheduling only as
- * a method on `Agent`, and taking it meant the object *became* one — three
- * tables in its SQLite, an `MCPClientManager`, and prototype-patching of every
- * public method. Composition replaced that.
- *
- * What the SDK's version provides that a hand-rolled one did not: retries with
- * backoff, cron and interval schedules, a hung-callback timeout, and
- * per-schedule rows instead of one shared blob. What it costs is named under
- * "The sharp edges" below and in {@link installScheduler} — this is not a
- * drop-in for a keyed map.
+ * What that buys: retries with backoff, cron and interval schedules, a
+ * hung-callback timeout, and per-schedule rows instead of one shared blob. What
+ * it costs is named under "The sharp edges" below and in {@link
+ * installScheduler} — this is **not** a drop-in for a keyed map.
  *
  * **Its own subpath, still deliberately, but the claim is weaker now.** This is
  * useful to a plain `DurableObject`, not only to a {@link DynamicAgent}. It no
@@ -46,14 +39,14 @@
  * installScheduler} turns that into a throw at construction: a host with its own
  * handler must say so in `hostOwns`, and an `alarm()` it owns must call through.
  *
- * **2. There is no "move this deadline".** The predecessor's `set` was an upsert
- * on a caller-chosen key, so pushing a deadline later was one call. A schedule
- * is a row with an id, and rescheduling means {@link Scheduler.cancel} then
- * {@link Scheduler.set}. One-shot schedules are also **not** idempotent by
- * default, so calling `set` again makes a *second* row rather than replacing the
- * first — which on a hot path is how an object ends up with thousands of them.
- * Hold the id and cancel it; do not schedule twice and hope. {@link
- * namedDeadline} is that, packaged — reach for it rather than repeating it.
+ * **2. There is no "move this deadline".** A schedule is a row with a minted id,
+ * so pushing one later is {@link Scheduler.cancel} then {@link Scheduler.set} —
+ * there is no keyed upsert, which is what most callers reach for and expect.
+ * One-shot schedules are also **not** idempotent by default, so calling `set`
+ * again makes a *second* row rather than replacing the first, and on a hot path
+ * that is how an object ends up with thousands of them. Hold the id and cancel
+ * it; do not schedule twice and hope. {@link namedDeadline} is that, packaged —
+ * reach for it rather than repeating it.
  *
  * **3. A bare number is a delay in seconds, not a moment.** `set(when)` reads a
  * `Date` as an instant, a string as a cron expression, and a **number as a delay
@@ -332,9 +325,9 @@ export function namedDeadline<
  * ```
  *
  * @throws if the host defines a handler it did not declare in `hostOwns`. That
- * is the whole reason to call this rather than assembling the two SDK objects by
- * hand: the failure it prevents produces no error of its own, only a schedule
- * that never fires.
+ * is the whole reason to call this rather than assembling the lifecycle and the
+ * scheduler by hand: the failure it prevents produces no error of its own, only
+ * a schedule that never fires.
  */
 export function installScheduler<
   H extends SchedulerHandlers = SchedulerCallbacks,
