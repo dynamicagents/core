@@ -3,6 +3,7 @@ import type {
   SchedulerCallbacks,
   SchedulerHandlers
 } from "agents/schedules";
+import { namedDeadline, type Deadline } from "../alarm/index.js";
 import { isRearmable, type JobState, type RunningJob } from "./state.js";
 
 /**
@@ -136,6 +137,9 @@ export class JobLifecycle<
   /** `install:watch-id` — the schedule the watchdog must cancel to re-arm. */
   readonly watchIdKey: string;
 
+  /** The watchdog's one movable deadline, over {@link watchIdKey}. */
+  readonly #watch: Deadline;
+
   constructor(options: JobLifecycleOptions<H>) {
     /**
      * An id is a storage key, so a bad one is not a bad name — it is a write
@@ -160,6 +164,12 @@ export class JobLifecycle<
     this.lastArmedKey = `${options.id}:last-armed`;
     this.contextKey = `${options.id}:context`;
     this.watchIdKey = `${options.id}:watch-id`;
+    this.#watch = namedDeadline({
+      storage: options.storage,
+      scheduler: options.scheduler,
+      key: this.watchIdKey,
+      callback: options.watch
+    });
   }
 
   // --- the record ------------------------------------------------------------
@@ -314,31 +324,14 @@ export class JobLifecycle<
   /**
    * Arm the watchdog that re-attaches to a job nobody is draining.
    *
-   * Cancels the previous schedule first, and that ordering is the whole content
-   * of this method. A drain re-arms on every window, and a schedule is a row
-   * rather than a keyed upsert — so scheduling without cancelling leaves one row
-   * per window, every one of them due, each waking the object to discover the
-   * others already handled it.
-   *
-   * The cancel is best-effort because the id may name a row the scheduler has
-   * already run and removed, which is the ordinary case rather than an error.
+   * A {@link Deadline} rather than a bare `scheduler.set`, because a drain
+   * re-arms on every window and a schedule is a row rather than a keyed upsert.
+   * Scheduling without cancelling would leave one row per window, every one of
+   * them due, each waking the object to discover the others already handled it.
    */
   async armWatch(now: number = Date.now()): Promise<void> {
-    await this.#cancelWatch();
-    const schedule = await this.#o.scheduler.set(
-      // A `Date` for the same reason as in `arm` — a number is a delay.
-      new Date(now + this.#o.watchMs),
-      this.#o.watch
-    );
-    await this.#o.storage.put(this.watchIdKey, schedule.id);
-  }
-
-  /** Cancel whatever schedule {@link watchIdKey} names, and forget it. */
-  async #cancelWatch(): Promise<void> {
-    const id = await this.#o.storage.get<string>(this.watchIdKey);
-    if (id === undefined) return;
-    await this.#o.scheduler.cancel(id).catch(() => false);
-    await this.#o.storage.delete(this.watchIdKey);
+    // A `Date`: a number would be read as a delay in seconds.
+    await this.#watch.set(new Date(now + this.#o.watchMs));
   }
 
   /**
@@ -349,7 +342,7 @@ export class JobLifecycle<
    * path the live run has.
    */
   async clearWatch(): Promise<void> {
-    await this.#cancelWatch().catch(() => {});
+    await this.#watch.clear().catch(() => {});
   }
 
   // --- generation --------------------------------------------------------------

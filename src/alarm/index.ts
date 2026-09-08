@@ -49,7 +49,8 @@
  * {@link Scheduler.set}. One-shot schedules are also **not** idempotent by
  * default, so calling `set` again makes a *second* row rather than replacing the
  * first — which on a hot path is how an object ends up with thousands of them.
- * Hold the id and cancel it; do not schedule twice and hope.
+ * Hold the id and cancel it; do not schedule twice and hope. {@link
+ * namedDeadline} is that, packaged — reach for it rather than repeating it.
  *
  * **3. A bare number is a delay in seconds, not a moment.** `set(when)` reads a
  * `Date` as an instant, a string as a cron expression, and a **number as a delay
@@ -69,6 +70,7 @@ import type { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "agents/lifecycle";
 import {
   Scheduler,
+  type Schedule,
   type SchedulerCallbacks,
   type SchedulerHandlers,
   type SchedulerOptions
@@ -178,6 +180,106 @@ export interface ScheduledHost<
   disableAlarms(): Promise<void>;
   /** Dispose installed capabilities in reverse registration order. */
   dispose(): Promise<void>;
+}
+
+/**
+ * One **movable** deadline over a scheduler that has none.
+ *
+ * The gap this fills is sharp edge 2, and it is the single most common thing a
+ * consumer of a scheduler gets wrong. A schedule is a row with a minted id, so
+ * "push this deadline back" is cancel-then-set — and a one-shot `set` is not
+ * idempotent, so doing only the second half quietly accumulates rows. An idle
+ * timer re-armed on every request is the case that bites: it is the busiest
+ * path in the object, and every call leaves another row that will wake it.
+ *
+ * A deadline is named by the storage key that holds its current schedule id.
+ * That key is the whole of its durable state, so two deadlines differ only by
+ * key and one object may hold as many as it has reasons to wake.
+ */
+export interface Deadline {
+  /**
+   * Move the deadline, replacing whatever stood before.
+   *
+   * A `Date`, not a number — see sharp edge 3.
+   */
+  set(when: Date, payload?: unknown): Promise<Schedule<unknown>>;
+  /**
+   * The schedule standing now, or `undefined` if none is.
+   *
+   * `undefined` covers both "never set" and "already fired": a scheduler drops a
+   * one-shot row once it runs, and a caller that needs to tell those apart wants
+   * its own state rather than this.
+   */
+  get(): Promise<Schedule<unknown> | undefined>;
+  /** Cancel the standing schedule and forget its id. */
+  clear(): Promise<void>;
+}
+
+export interface DeadlineOptions<H extends SchedulerHandlers> {
+  storage: DurableObjectStorage;
+  scheduler: Scheduler<H>;
+  /** The storage key holding the id of the schedule currently standing. */
+  key: string;
+  /** The registered callback this deadline fires. */
+  callback: keyof H & string;
+}
+
+/**
+ * Bind a {@link Deadline} to one storage key and one registered callback.
+ *
+ * ```ts
+ * const idle = namedDeadline({
+ *   storage: this.ctx.storage,
+ *   scheduler: this.#wake.scheduler,
+ *   key: "idle-reclaim-id",
+ *   callback: "reclaim"
+ * });
+ *
+ * await idle.set(new Date(Date.now() + IDLE_MS));  // however often you like
+ * ```
+ */
+export function namedDeadline<H extends SchedulerHandlers>({
+  storage,
+  scheduler,
+  key,
+  callback
+}: DeadlineOptions<H>): Deadline {
+  const standing = () => storage.get<string>(key);
+
+  /**
+   * Best-effort, because the id routinely names a row that is already gone: a
+   * one-shot schedule is dropped when it runs, so the deadline a callback
+   * re-arms *from* has no row left to cancel. That is the ordinary path, not a
+   * failure.
+   */
+  const cancel = async (): Promise<void> => {
+    const id = await standing();
+    if (id === undefined) return;
+    await scheduler.cancel(id).catch(() => false);
+    await storage.delete(key);
+  };
+
+  return {
+    async set(when, payload) {
+      // Cancel *first*. The reverse order leaves a window in which both rows
+      // exist, and a wake-up in it fires the callback against a deadline the
+      // caller has already moved.
+      await cancel();
+      const schedule = await scheduler.set(
+        when,
+        callback,
+        payload as never as undefined
+      );
+      await storage.put(key, schedule.id);
+      return schedule as Schedule<unknown>;
+    },
+    async get() {
+      const id = await standing();
+      if (id === undefined) return undefined;
+      return await scheduler.get(id);
+    },
+    clear: cancel
+  };
 }
 
 /**

@@ -5,7 +5,7 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 // The class, not the ambient global of the same name — see `./index.ts`.
 import type { DurableObject } from "cloudflare:workers";
-import { installScheduler, HOST_HANDLERS } from "./index.js";
+import { installScheduler, namedDeadline, HOST_HANDLERS } from "./index.js";
 import type { DelegatingScheduled, PlainScheduled } from "../../test/worker.js";
 
 /**
@@ -255,6 +255,136 @@ describe("installScheduler — booting on what the predecessor left behind", () 
       await instance.wake.alarm();
 
       expect(await state.storage.get("wake")).toEqual(leftover);
+    });
+  });
+});
+
+describe("namedDeadline", () => {
+  const deadlineOn = (instance: PlainScheduled, state: DurableObjectState) =>
+    namedDeadline({
+      storage: state.storage,
+      scheduler: instance.wake.scheduler,
+      key: "idle-id",
+      callback: "mark"
+    });
+
+  /**
+   * The rule the whole abstraction exists for. `#touch()`-shaped code moves a
+   * deadline on every request, and a scheduler has no move — so without the
+   * cancel, an object touched a hundred times carries a hundred rows, every one
+   * of them due, each waking it to find the work already done.
+   */
+  it("leaves one schedule behind however often it moves", async () => {
+    const stub = fresh(plain, "moves");
+    await runInDurableObject(stub, async (instance, state) => {
+      await instance.wake.start();
+      const idle = deadlineOn(instance, state);
+
+      await idle.set(new Date(Date.now() + 60_000), { at: "a" });
+      await idle.set(new Date(Date.now() + 120_000), { at: "b" });
+      await idle.set(new Date(Date.now() + 180_000), { at: "c" });
+
+      const all = await instance.wake.scheduler.list();
+      expect(all).toHaveLength(1);
+      expect((await idle.get())?.id).toBe(all[0]!.id);
+    });
+  });
+
+  it("moves the physical alarm with it, later as well as earlier", async () => {
+    const stub = fresh(plain, "later");
+    await runInDurableObject(stub, async (instance, state) => {
+      await instance.wake.start();
+      const idle = deadlineOn(instance, state);
+
+      await idle.set(new Date(Date.now() + 60_000), { at: "near" });
+      const near = await state.storage.getAlarm();
+
+      // The predecessor could only ever move the alarm *earlier* — pushing an
+      // intent back left the object waking on the old deadline to find nothing
+      // due. A lifecycle owns the alarm outright, so this genuinely moves.
+      await idle.set(new Date(Date.now() + 600_000), { at: "far" });
+      const far = await state.storage.getAlarm();
+
+      expect(far!).toBeGreaterThan(near!);
+    });
+  });
+
+  it("reads back the payload it scheduled", async () => {
+    const stub = fresh(plain, "payload");
+    await runInDurableObject(stub, async (instance, state) => {
+      await instance.wake.start();
+      const idle = deadlineOn(instance, state);
+
+      await idle.set(new Date(Date.now() + 60_000), { at: "kept" });
+      expect((await idle.get())?.payload).toEqual({ at: "kept" });
+    });
+  });
+
+  it("reports nothing standing before it is ever set", async () => {
+    const stub = fresh(plain, "unset");
+    await runInDurableObject(stub, async (instance, state) => {
+      await instance.wake.start();
+      expect(await deadlineOn(instance, state).get()).toBeUndefined();
+    });
+  });
+
+  it("clears, and clearing twice is not an error", async () => {
+    const stub = fresh(plain, "cleared-twice");
+    await runInDurableObject(stub, async (instance, state) => {
+      await instance.wake.start();
+      const idle = deadlineOn(instance, state);
+
+      await idle.set(new Date(Date.now() + 60_000), { at: "x" });
+      await idle.clear();
+      expect(await idle.get()).toBeUndefined();
+      expect(await instance.wake.scheduler.list()).toHaveLength(0);
+
+      await expect(idle.clear()).resolves.toBeUndefined();
+    });
+  });
+
+  /**
+   * The ordinary path, not an error: a one-shot row is dropped when it runs, so
+   * the deadline a callback re-arms *from* has nothing left to cancel.
+   */
+  it("re-arms cleanly after its own schedule has fired", async () => {
+    const stub = fresh(plain, "refired");
+    await runInDurableObject(stub, async (instance, state) => {
+      await instance.wake.start();
+      const idle = deadlineOn(instance, state);
+
+      await idle.set(new Date(Date.now() - 1_000), { at: "due" });
+      await instance.wake.alarm();
+      expect(instance.marks).toEqual(["due"]);
+
+      await expect(
+        idle.set(new Date(Date.now() + 60_000), { at: "again" })
+      ).resolves.toBeDefined();
+      expect(await instance.wake.scheduler.list()).toHaveLength(1);
+    });
+  });
+
+  /** Two deadlines differ only by key, and must not disturb each other. */
+  it("keeps two deadlines on one object independent", async () => {
+    const stub = fresh(plain, "two");
+    await runInDurableObject(stub, async (instance, state) => {
+      await instance.wake.start();
+      const common = {
+        storage: state.storage,
+        scheduler: instance.wake.scheduler,
+        callback: "mark" as const
+      };
+      const idle = namedDeadline({ ...common, key: "idle-id" });
+      const container = namedDeadline({ ...common, key: "container-id" });
+
+      await idle.set(new Date(Date.now() + 60_000), { at: "idle" });
+      await container.set(new Date(Date.now() + 120_000), { at: "container" });
+
+      expect(await instance.wake.scheduler.list()).toHaveLength(2);
+
+      await idle.clear();
+      expect((await container.get())?.payload).toEqual({ at: "container" });
+      expect(await instance.wake.scheduler.list()).toHaveLength(1);
     });
   });
 });
