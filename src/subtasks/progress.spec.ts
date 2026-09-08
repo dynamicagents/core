@@ -31,8 +31,8 @@ describe("labelSubagentNote", () => {
   });
 
   it("distinguishes branches that share a type", () => {
-    // The case a bare "[subagent]" could not disambiguate: one round fanning out
-    // to several branches of one type, interleaving in one thread.
+    // One round fanning out to several branches of one type, interleaving in
+    // one thread — the case a type alone cannot separate.
     const notes = [0, 1, 2].map((ordinal) =>
       labelSubagentNote("done", { type: "general", ordinal })
     );
