@@ -48,13 +48,13 @@
     // installed workerd, which are its only two inputs. Regenerate with
     // `npm run types` and commit the result.
     //
-    // `@cloudflare/vitest-pool-workers/types` is here for `src/testing/*`, which
+    // `@cloudflare/vitest-plugin/types` is here for `src/testing/*`, which
     // imports `cloudflare:test`. That subpath is only ever loaded from a test
-    // run, and a consumer of `@dynamicagents/core/testing` has the pool installed by
-    // definition — nothing in the runtime graph reaches it.
+    // run, and a consumer of `@dynamicagents/core/testing` has the plugin installed
+    // by definition — nothing in the runtime graph reaches it.
     "types": [
       "./worker-configuration.d.ts",
-      "@cloudflare/vitest-pool-workers/types",
+      "@cloudflare/vitest-plugin/types",
       "node"
     ],
     "strict": true,

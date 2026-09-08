@@ -4,7 +4,12 @@ import type {
   ModelMessage,
   ToolSet
 } from "ai";
-import { generateText, hasToolCall, isStepCount } from "ai";
+import {
+  generateText,
+  hasToolCall,
+  isStepCount,
+  ToolChoiceViolationError
+} from "ai";
 import type { SessionMessage } from "agents/experimental/memory/session";
 import type { AgentLimits } from "../config.js";
 import type { SubtaskTypeRegistry } from "../subtasks/subtask-types.js";
@@ -656,11 +661,11 @@ async function attempt(
       }
     }
 
-    // No control call. Either the model ran out of steps mid-tool-use, or it
-    // ignored `toolChoice: "required"` and narrated an action instead of taking
-    // one — the failure this whole design exists to catch. Failing the attempt
-    // hands the round to the fallback model rather than shipping the narration to
-    // the user as if it were an answer.
+    // No control call, and no violation thrown: the model ran out of steps
+    // mid-tool-use. A model that narrated instead of calling anything does not
+    // reach here — the SDK enforces `toolChoice` and throws, which the `catch`
+    // below turns into this same failure. Both roads hand the round to the
+    // fallback rather than shipping the narration to the user as an answer.
     if (result.finishReason === "length") {
       console.warn("[turn] model output truncated", {
         taskId: args.taskId,
@@ -675,6 +680,27 @@ async function attempt(
       )
     };
   } catch (error) {
+    // The model narrated instead of calling a tool — the failure this whole
+    // design exists to catch. The SDK enforces `toolChoice` itself and throws
+    // before the step ends, so this arrives as a throw rather than as a result
+    // with no control call, and `onStepEnd` never ran for it.
+    //
+    // Charge it anyway. The step happened: a provider was called and answered,
+    // and the round's rule is that a failed attempt costs exactly what a
+    // successful one does. Leaving it free would let a model that never calls a
+    // tool burn both slots and every repair without the budget moving.
+    if (ToolChoiceViolationError.isInstance(error)) {
+      args.budget.spent += 1;
+      const text = error.content
+        .filter((part) => part.type === "text")
+        .reduce((n, part) => n + part.text.trim().length, 0);
+      return {
+        ok: false,
+        error: new Error(
+          `round produced no decision (finishReason=${error.finishReason}, textLength=${text})`
+        )
+      };
+    }
     return { ok: false, error };
   }
 }

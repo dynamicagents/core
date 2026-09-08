@@ -277,7 +277,7 @@ regenerated without `--include-env=false` and so carries a global `Env`.
 Specs live next to the code they test (`src/**/*.spec.ts`) and run inside
 workerd, because `AgentDB` drives `ctx.storage.sql` and the Agents SDK `Session`
 has no Node-side stand-in. `wrangler.jsonc` and `test/worker.ts` exist only to
-give the pool something to bind — they are dev-only and excluded from the
+give the plugin something to bind — they are dev-only and excluded from the
 published tarball.
 
 Two things `npm test` alone will not catch, so run `npm run check` before
@@ -332,8 +332,8 @@ Four rules follow, and the specs pin all of them:
 - **The recorder is an `outboundService`, never `fetchMock`.** That is the hook
   `fetchMock` was one line of sugar over (`outboundService = (req) => fetch(req,
 { dispatcher: fetchMock })`), it is identical in Miniflare 4 and 5, and it has
-  no `instanceof` check in either direction — which is why the pool peer is open
-  (`>=0.18`) and why core declares no `undici` at all. Do not reintroduce either
+  no `instanceof` check in either direction — which is why the plugin peer is
+  left open and why core declares no `undici` at all. Do not reintroduce either
   pin. `setupRecording()` proves the recorder answered before any test runs, so
   the silent-no-op failure cannot recur.
 

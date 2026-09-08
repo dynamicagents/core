@@ -1,5 +1,5 @@
 import { defineConfig } from "vitest/config";
-import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
+import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import path from "node:path";
 import { createVcr, recordFromEnv } from "./src/testing/node.js";
 

@@ -481,7 +481,7 @@ await withDb("accepts a turn once", async (db) => {
 - **VCR** — record/replay real HTTP against on-disk cassettes, split across the Node
   and workerd realms because specs run in workerd, which has no filesystem. The
   recorder is a Miniflare `outboundService`, so it works on any
-  `@cloudflare/vitest-pool-workers` from 0.18 up and needs no `undici`:
+  `@cloudflare/vitest-plugin` and needs no `undici`:
 
   ```ts
   // vitest.config.ts
