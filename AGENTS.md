@@ -48,9 +48,9 @@ Generate a keypair with `npm run keys`.
 
 ## Publishing constraints
 
-Merging a version bump to `main` is the release: once Test is green,
-`.github/workflows/release.yml` publishes that version to npm over OIDC and only
-then cuts the tag. The bump is the decision to ship, and `prepack` and
+A version bump reaching `main` is what ships it: on the first green Test run for
+a commit carrying that version, `.github/workflows/release.yml` publishes it to
+npm over OIDC and only then cuts the tag. The bump is the decision to ship, and `prepack` and
 `prepublishOnly` are the last gate a tarball passes before it is immutable on the
 registry. The workflow comments hold the rest.
 
