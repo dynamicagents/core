@@ -48,6 +48,12 @@ Generate a keypair with `npm run keys`.
 
 ## Publishing constraints
 
+A version bump reaching `main` is what ships it: on the first green Test run for
+a commit carrying that version, `.github/workflows/release.yml` publishes it to
+npm over OIDC and only then cuts the tag. The bump is the decision to ship, and `prepack` and
+`prepublishOnly` are the last gate a tarball passes before it is immutable on the
+registry. The workflow comments hold the rest.
+
 The package has no root barrel; every area is its own subpath export. Four rules
 follow from that, and all four have already been violated once:
 
