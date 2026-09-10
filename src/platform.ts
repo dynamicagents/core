@@ -79,9 +79,10 @@ export const STEPS_PER_INSTANCE = 10_000;
  * `STEP_TIMEOUT_MS - CHUNK_SOFT_MS` is 15 minutes, covering
  * {@link MAX_TOOL_CALL_MS} of tool call plus five minutes for the model call and
  * its provider retries. Those retries are the AI SDK's own defaults — core
- * configures none — and it caps a single honoured `retry-after` at 60s, so an SDK
- * release that retries more moves this worst case with nothing here to say so.
- * Asserted in `platform.spec.ts` — raise the step timeout before raising this.
+ * configures none — and it caps a single honoured `retry-after` at 60s. A release
+ * that retried more would eat this headroom silently, so the attempt count is
+ * pinned in `round/turn.spec.ts` and fails there instead. The headroom itself is
+ * asserted in `platform.spec.ts` — raise the step timeout before raising this.
  */
 export const CHUNK_SOFT_MS = 15 * 60_000;
 

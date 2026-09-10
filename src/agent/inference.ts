@@ -1,5 +1,5 @@
 import type { FinishReason, StepResult, ToolSet } from "ai";
-import { APICallError, RetryError } from "ai";
+import { RetryError } from "ai";
 // Type-only would not work: this is a runtime guard. `errors.ts` is the neutral
 // sibling of `model.ts` and imports nothing, so this reaches no provider.
 import { CredentialRejectedError } from "./errors.js";
@@ -46,6 +46,23 @@ const lastAttempt = (err: unknown): unknown => {
 };
 
 /**
+ * Whether the error carries a provider's own "wait and try again", read as a
+ * property rather than as a class.
+ *
+ * `APICallError` is the shape core's provider raises, but the SDK's retry
+ * predicate honours `@ai-sdk/gateway`'s `GatewayError` on the same flag, and a
+ * consumer whose {@link file://./model.ts ModelRuntime} returns a bare model id
+ * gets exactly those. Core cannot name that class — it is not a dependency here,
+ * and importing one npm happens to have hoisted into place is the mistake
+ * `AGENTS.md` records twice. Matching on the property instead covers both, and
+ * covers a provider written outside the SDK's own set, the same way
+ * {@link file://./errors.ts CredentialRejectedError} is matched structurally.
+ */
+const saysRetry = (err: unknown): boolean =>
+  err instanceof Error &&
+  (err as { readonly isRetryable?: unknown }).isRetryable === true;
+
+/**
  * Whether an error is a transient availability condition rather than a
  * deterministic bad-output one.
  *
@@ -58,19 +75,18 @@ const lastAttempt = (err: unknown): unknown => {
  * nothing was decided.
  *
  * The model's own verdict decides it and nothing else: `isRetryable` on the
- * `APICallError` the call ended on. It is the same flag the SDK's in-place retry
- * reads, so what waits on this model and what retries the step cannot disagree,
- * and a failure arriving here has already been waited out as far as the provider
- * said was worth waiting. See {@link file://./model.ts ModelRuntime} for what a
- * provider owes this.
+ * error the call ended on, read by {@link saysRetry}. It is the same flag the
+ * SDK's in-place retry reads, so what waits on this model and what retries the
+ * step cannot disagree, and a failure arriving here has already been waited out
+ * as far as the provider said was worth waiting. See
+ * {@link file://./model.ts ModelRuntime} for what a provider owes this.
  *
- * Anything that is not an `APICallError` is deterministic. Reading its message
+ * An error that carries no such flag is deterministic. Reading its message
  * instead is how a `403` whose text said "service unavailable" — an account
  * blocked until a human clears it — spent a step's retries and abandoned a Task.
  */
 export function isTransientAiError(err: unknown): boolean {
-  const error = lastAttempt(err);
-  return APICallError.isInstance(error) && error.isRetryable;
+  return saysRetry(lastAttempt(err));
 }
 
 /**

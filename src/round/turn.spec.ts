@@ -380,8 +380,13 @@ describe("runTurn", () => {
 
     // Each slot waited in place before it was given up, which is the half of
     // this a thrown error alone does not show.
-    expect(primary.calls()).toBeGreaterThan(1);
-    expect(fallback.calls()).toBeGreaterThan(1);
+    //
+    // The exact count is the SDK's own default, and core configures nothing —
+    // which makes it the budget `CHUNK_SOFT_MS`'s headroom is sized against in
+    // src/platform.ts. Pinned here so a release that changes that default fails
+    // a test rather than quietly eating five minutes of a chunk step.
+    expect(primary.calls()).toBe(3);
+    expect(fallback.calls()).toBe(3);
   });
 
   /**

@@ -49,6 +49,19 @@ describe("classifying a failed model call", () => {
     expect(isTransientAiError(rateLimited())).toBe(true);
   });
 
+  it("waits out any provider that carries the same flag", () => {
+    // The SDK's own retry predicate reads this flag on `@ai-sdk/gateway`'s
+    // errors as well as on `APICallError`, and a `ModelRuntime` returning a bare
+    // model id raises those. Core cannot import that class to name it, so the
+    // flag is what it matches — and the two must agree about what gets waited
+    // out, or a gateway blip spends the fallback slot.
+    const gatewayError = Object.assign(new Error("gateway is over capacity"), {
+      isRetryable: true
+    });
+
+    expect(isTransientAiError(gatewayError)).toBe(true);
+  });
+
   it("reads a blocked account off its status rather than its sentence", () => {
     // Blocked until a human clears it, and the status says so. The *message*
     // says "Service unavailable", which is the reading that had the Workflow
