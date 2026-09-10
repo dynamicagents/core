@@ -60,14 +60,32 @@ async function raceAbort<T>(
   let listener: (() => void) | undefined;
   try {
     return await new Promise<T>((resolve, reject) => {
+      // Whichever side fires first wins, latched the moment it fires rather than
+      // when it settles. The abort side awaits its cleanup before rejecting, and
+      // work that finishes in that gap — often *because* of the kill — would
+      // otherwise resolve a call its caller has already cancelled. The latch also
+      // keeps a late abort from running cleanup for work that has already won.
+      let decided = false;
       listener = () => {
-        // Sent before the rejection propagates, and its own failure is not
-        // allowed to become the caller's error: the caller asked to stop, and
-        // that is what it hears either way.
+        if (decided) return;
+        decided = true;
+        // Cleanup's own failure is not allowed to become the caller's error: the
+        // caller asked to stop, and that is what it hears either way.
         void terminate(onAbort).then(() => reject(signal.reason));
       };
       signal.addEventListener("abort", listener, { once: true });
-      work.then(resolve, reject);
+      work.then(
+        (value) => {
+          if (decided) return;
+          decided = true;
+          resolve(value);
+        },
+        (err: unknown) => {
+          if (decided) return;
+          decided = true;
+          reject(err);
+        }
+      );
     });
   } finally {
     // `once` removes it on an abort, but the ordinary path never fires and would

@@ -113,3 +113,45 @@ describe("withAbort", () => {
     await expect(work.catch(() => "handled")).resolves.toBe("handled");
   });
 });
+
+describe("withAbort, once one side has won", () => {
+  it("rejects even if the work finishes while cleanup is still running", async () => {
+    const controller = new AbortController();
+    const reason = new Error("cancelled");
+    let finishWork: ((value: string) => void) | undefined;
+    let finishKill: (() => void) | undefined;
+    const pending = withAbort(
+      controller.signal,
+      new Promise<string>((resolve) => {
+        finishWork = resolve;
+      }),
+      () =>
+        new Promise<void>((resolve) => {
+          finishKill = resolve;
+        })
+    );
+
+    controller.abort(reason);
+    // The kill is what ends the process, so work finishing inside this gap is the
+    // ordinary case, not a race nobody hits.
+    finishWork?.("exited on SIGTERM");
+    await Promise.resolve();
+    finishKill?.();
+
+    await expect(pending).rejects.toBe(reason);
+  });
+
+  it("runs no cleanup for work that has already won", async () => {
+    const controller = new AbortController();
+    const kill = vi.fn();
+    const pending = withAbort(controller.signal, Promise.resolve("done"), kill);
+
+    // One microtask: the work has settled, but the listener is not yet removed —
+    // exactly the window in which a late abort could still reach it.
+    await Promise.resolve();
+    controller.abort();
+
+    await expect(pending).resolves.toBe("done");
+    expect(kill).not.toHaveBeenCalled();
+  });
+});
