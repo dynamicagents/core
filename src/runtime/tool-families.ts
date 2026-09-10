@@ -5,6 +5,7 @@ import type {
   ToolFamilyContext
 } from "../contract/plugin.js";
 import type { SubtaskRuntime } from "../subtasks/types.js";
+import { boundToolCalls } from "./bound-tools.js";
 
 /**
  * Assemble a recipe's toolset from the installed families.
@@ -20,6 +21,9 @@ import type { SubtaskRuntime } from "../subtasks/types.js";
  * here means the policy and the registry disagreed, and a subagent that silently
  * runs with fewer tools degrades better than one that fails a whole branch. The
  * skipped names are returned so a caller can log them.
+ *
+ * Every tool comes back wrapped by {@link boundToolCalls}, so a family is held to
+ * `MAX_TOOL_CALL_MS` whether or not its tools read a signal.
  */
 export function buildRecipeTools<TRuntime = SubtaskRuntime>(
   families: readonly string[],
@@ -48,7 +52,7 @@ export function buildRecipeTools<TRuntime = SubtaskRuntime>(
           for (const run of aborts) await run(c);
         };
 
-  return { tools, abort, skipped };
+  return { tools: boundToolCalls(tools), abort, skipped };
 }
 
 /**

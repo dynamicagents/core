@@ -64,6 +64,14 @@ const toolCtx = (compactions: unknown[] = []): MainAgentToolContext => ({
   } as unknown as SessionLike
 });
 
+/** The options the SDK passes a tool's `execute`. */
+const executeOptions = (abortSignal: AbortSignal) => ({
+  toolCallId: "call-1",
+  messages: [],
+  context: undefined,
+  abortSignal
+});
+
 describe("createAgentRuntime — what it refuses at startup", () => {
   it("refuses two plugins claiming the same key", () => {
     const a = definePlugin({ key: "dup" });
@@ -246,6 +254,44 @@ describe("createAgentRuntime — what it composes", () => {
         "You can delegate beta work."
       ].join("\n\n")
     );
+  });
+
+  it("hands plugins the round's signal, and bounds every tool they return", async () => {
+    let seen: AbortSignal | undefined;
+    const execute = vi.fn(async () => "acted");
+    const rt = createAgentRuntime({
+      config: { model: TEST_MODELS },
+      plugins: [
+        definePlugin({
+          key: "gamma",
+          mainAgentTools: (ctx) => {
+            seen = ctx.signal;
+            return {
+              act: tool({
+                description: "act",
+                inputSchema: z.object({}),
+                execute
+              })
+            };
+          }
+        })
+      ]
+    });
+    const round = new AbortController();
+
+    const tools = await rt.mainAgentTools({
+      ...toolCtx(),
+      signal: round.signal
+    });
+
+    expect(seen).toBe(round.signal);
+    // Only the wrapper declines to start a call whose signal has already fired,
+    // so a call that never reaches `execute` is one that went through it.
+    round.abort();
+    await expect(
+      tools.act!.execute!({}, executeOptions(round.signal))
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it("renders a capability block declared only on a plugin's subtask type", () => {
@@ -658,6 +704,44 @@ describe("buildRecipeTools", () => {
     ]);
 
     expect(buildRecipeTools(["plain"], registry, ctx).abort).toBeUndefined();
+  });
+
+  it("hands each family the chunk's signal, and bounds every tool it returns", async () => {
+    let seen: AbortSignal | undefined;
+    const execute = vi.fn(async () => "acted");
+    const registry = collectToolFamilies([
+      {
+        key: "p",
+        toolFamilies: {
+          act: (c: ToolFamilyContext) => {
+            seen = c.signal;
+            return {
+              tools: {
+                act: tool({
+                  description: "act",
+                  inputSchema: z.object({}),
+                  execute
+                })
+              }
+            };
+          }
+        }
+      }
+    ]);
+    const chunk = new AbortController();
+    chunk.abort();
+
+    const built = buildRecipeTools(["act"], registry, {
+      ...ctx,
+      signal: chunk.signal
+    });
+
+    expect(seen).toBe(chunk.signal);
+    // See the main-agent case: never reaching `execute` is the wrapper's mark.
+    await expect(
+      built.tools.act!.execute!({}, executeOptions(chunk.signal))
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(execute).not.toHaveBeenCalled();
   });
 });
 

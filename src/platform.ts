@@ -84,25 +84,39 @@ export const STEPS_PER_INSTANCE = 10_000;
 export const CHUNK_SOFT_MS = 15 * 60_000;
 
 /**
- * The longest a **single tool call** may run. Core enforces the *wait*: every
- * `generateText` in the round and the recipe loop passes it as the SDK's
- * `timeout.toolMs`, so a tool that outruns it is failed and the loop moves on.
+ * The longest a **single plugin tool call** may hold the loop that made it. Core
+ * enforces it whatever the tool does: every `generateText` in the round and the
+ * recipe loop fires the call's signal {@link TOOL_CALL_GRACE_MS} before it, and
+ * every plugin tool is wrapped where core assembles it, so a call still running at
+ * this bound is abandoned and the loop moves on. See
+ * {@link file://./runtime/bound-tools.ts boundToolCalls}.
  *
- * That is only half a bound, and the half core owns. The SDK merges the deadline
- * into the `AbortSignal` it hands `execute` — it does not race the promise — so a
- * tool that never reads its signal keeps running after the loop has stopped
- * waiting for it. **A host installing a tool that can block (a shell, a container
- * command, a fetch with no ceiling of its own) must still bound it at or below
- * this, and honour its signal.** See the `timeoutMs` passed to
- * `@dynamicagents/plugins/computer` in starter.
+ * What core cannot stop is the tool's *work*. The SDK aborts a signal — it does
+ * not cancel a promise — so an abandoned call runs on unattended. **A tool whose
+ * work must not outlive its call (a container command, a write that must not start
+ * late) still reads its signal and stops that work**, or bounds it at the source,
+ * as starter's container `timeoutMs` does.
  *
  * It exists because {@link CHUNK_SOFT_MS} cannot be reasoned about without it. The
- * soft deadline is checked between turns, so a host that lets one tool block for
- * longer than the headroom under {@link STEP_TIMEOUT_MS} reintroduces exactly the
- * step-timeout kill this pair is sized to prevent — and it reintroduces it
- * invisibly, in a plugin, a long way from this file.
+ * soft deadline is checked between turns, so a tool call that could hold the loop
+ * for longer than the headroom under {@link STEP_TIMEOUT_MS} would reintroduce
+ * exactly the step-timeout kill this pair is sized to prevent — invisibly, from
+ * inside a plugin, a long way from this file. That is why core enforces it rather
+ * than asking hosts to.
  */
 export const MAX_TOOL_CALL_MS = 10 * 60_000;
+
+/**
+ * How far ahead of {@link MAX_TOOL_CALL_MS} a tool call's signal fires: the window
+ * a tool that honours its signal has to stop its work and answer for itself.
+ *
+ * An answer inside it is the one the model reads, so the tool can say what it
+ * stopped and what survived. Past it core abandons the call with a sentence of its
+ * own, which can only say the tool may still be running. Taken out of the bound
+ * rather than added to it, so nothing sized against `MAX_TOOL_CALL_MS` moves. It
+ * needs to cover a kill sent over RPC, and nothing more.
+ */
+export const TOOL_CALL_GRACE_MS = 5_000;
 
 /**
  * Hard ceiling on durable chunk steps for one Subtask branch. A backstop, not a

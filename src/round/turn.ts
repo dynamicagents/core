@@ -11,7 +11,7 @@ import {
   ToolChoiceViolationError
 } from "ai";
 import type { SessionMessage } from "agents/experimental/memory/session";
-import { MAX_TOOL_CALL_MS } from "../platform.js";
+import { MAX_TOOL_CALL_MS, TOOL_CALL_GRACE_MS } from "../platform.js";
 import type { AgentLimits } from "../config.js";
 import type { SubtaskTypeRegistry } from "../subtasks/subtask-types.js";
 import { appendOnce, type SessionLike } from "../agent/session.js";
@@ -645,21 +645,18 @@ async function attempt(
       // that. See `ModelConfig.maxRetries`.
       maxRetries: args.maxRetries,
       abortSignal: args.abortSignal,
-      // What the loop waits for a single tool call, and the only place core can
-      // enforce {@link file://../platform.ts MAX_TOOL_CALL_MS} at all — the
-      // constant is a bound on the host's tools, and this is core's half of it.
+      // When a single tool call's signal fires: a grace ahead of
+      // {@link file://../platform.ts MAX_TOOL_CALL_MS}, so a tool that honours it
+      // can stop its work and still answer inside the bound. Every plugin tool is
+      // abandoned at the bound itself, listening or not — see `boundToolCalls`.
       //
-      // A tool that outruns it is failed and the loop continues: the SDK turns
-      // the expiry into a `tool-error` the next step reads, so the model can
-      // route around a wedged tool instead of the round dying with it. That is
-      // why only `toolMs` is set here. `stepMs` and `totalMs` abort the whole
-      // call, which arrives indistinguishable from a real fault and would spend
-      // the fallback slot on work that was merely slow.
-      //
-      // It bounds the *wait*, not the tool: the signal is merged into the one
-      // `execute` receives, and a tool that ignores it runs on unattended. See
-      // `MAX_TOOL_CALL_MS` for why a host must bound its own tools regardless.
-      timeout: { toolMs: MAX_TOOL_CALL_MS },
+      // A call stopped either way ends as a result or a `tool-error` the next
+      // step reads, and the loop continues, so the model can route around a
+      // wedged tool instead of the round dying with it. That is why only `toolMs`
+      // is set here. `stepMs` and `totalMs` abort the whole call, which arrives
+      // indistinguishable from a real fault and would spend the fallback slot on
+      // work that was merely slow.
+      timeout: { toolMs: MAX_TOOL_CALL_MS - TOOL_CALL_GRACE_MS },
       // Charged here rather than from `result.steps` so a throw mid-loop still
       // bills the steps already spent — the `catch` below has no `result` to read.
       onStepEnd: async (step) => {

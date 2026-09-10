@@ -28,6 +28,7 @@ import type {
   RecipeExecutionResult,
   SubtaskRuntime
 } from "../subtasks/types.js";
+import { boundToolCalls } from "./bound-tools.js";
 import { collectToolFamilies } from "./tool-families.js";
 
 export { buildRecipeTools, collectToolFamilies } from "./tool-families.js";
@@ -81,7 +82,11 @@ export interface AgentRuntime {
 
   /** The plugin that declared a subtask type, or null. */
   pluginForType(type: string): AgentPlugin | null;
-  /** Tools the installed plugins offer the *main* agent, merged. */
+  /**
+   * Tools the installed plugins offer the *main* agent, merged, each bounded by
+   * {@link boundToolCalls}. Pass the round's `signal` so a plugin can stop work a
+   * cancel has made pointless.
+   */
   mainAgentTools(ctx: MainAgentToolContext): Promise<ToolSet>;
   /**
    * The capability blocks for the main agent's soul, in plugin declaration
@@ -282,7 +287,7 @@ export function createAgentRuntime(
         if (plugin.mainAgentTools)
           Object.assign(tools, await plugin.mainAgentTools(ctx));
       }
-      return tools;
+      return boundToolCalls(tools);
     },
 
     renderCapabilities(): string {
