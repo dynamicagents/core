@@ -1,9 +1,9 @@
 name: Test
 
-# `next` is where development lands; `main` is the released line, and a merge
-# from `next` into it is what a release is. Both need the suite: without `next`
-# here a PR into it would be unchecked, and Release keys off the run Test
-# completes on `main`.
+# Both lines need the suite, and for different reasons: without `next` here a
+# PR into it would merge unchecked, and Release keys off the run Test completes
+# on `main`. Why development lands on `next` at all is one fact with one home —
+# AGENTS.md, under the publishing constraints.
 on:
   push:
     branches:
