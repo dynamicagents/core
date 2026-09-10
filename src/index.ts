@@ -71,6 +71,8 @@ export {
   type CoreEnv
 } from "./env.js";
 
+export { withAbort } from "./abort.js";
+
 export {
   CHUNK_SOFT_MS,
   CHUNK_STEP,
