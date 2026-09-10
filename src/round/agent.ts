@@ -36,6 +36,7 @@ import {
   buildTurnInstructions,
   runTurn,
   type RoundMode,
+  type RunTurnOutcome,
   type TurnInstructions
 } from "./turn.js";
 
@@ -85,6 +86,23 @@ export abstract class RoundAgentBase<
     A2ASecretsEnv
 > extends DynamicAgent<TEnv> {
   private _instructions?: TurnInstructions;
+
+  /**
+   * The rounds inferring here right now, by Task id. In memory only — these exist
+   * to be interrupted mid-call, and an isolate that lost them has no in-flight
+   * call left to interrupt.
+   *
+   * Keyed rather than a single field, which is the difference from the facet's
+   * own `inflight`: one facet serves one Subtask, but this DO serves every Task
+   * for its agent, and a model call does not hold the input gate closed — so two
+   * Tasks can be mid-round here at once, and cancelling one must not abort the
+   * other.
+   *
+   * The controller is created here rather than in the Workflow because
+   * `WorkflowStep.do` hands its body nothing to cancel with, so the layer that
+   * drives the round has none to pass down.
+   */
+  private readonly inflight = new Map<string, AbortController>();
 
   // --- the two extra seams a delegating agent fills ------------------------
 
@@ -245,37 +263,50 @@ export abstract class RoundAgentBase<
     }
 
     const metadata: AiGatewayMetadata = { taskId, round };
-    const outcome = await runTurn({
-      session,
-      taskId,
-      round,
-      text,
-      mode,
-      finalReason,
-      budget,
-      systemSuffix: this.callerContext(identity),
-      tools: await this.mainAgentTools(session),
-      models: this.modelPair(metadata),
-      branches: this.compositionBranches(taskId),
-      observations: this.db.observations.recent(
+    const controller = new AbortController();
+    this.inflight.set(taskId, controller);
+    let outcome: RunTurnOutcome;
+    try {
+      outcome = await runTurn({
+        session,
         taskId,
         round,
-        this.config.roundObservationWindow
-      ),
-      toolOutputWindow: this.config.toolOutputWindow,
-      types: this.runtime.types,
-      maxSubtasks: this.config.maxSubtasks,
-      maxOutputTokens: this.config.model.maxOutputTokens,
-      maxRetries: this.config.model.maxRetries,
-      instructions: this.instructions,
-      partialNote: policy.copy.partialNote,
-      // The key carries the round so two rounds of one Task cannot collide on
-      // the gatekeeper, which a bare step index would.
-      onContent: channel?.stream((step) => `r${round}:step:${step}`)
-    });
+        text,
+        mode,
+        finalReason,
+        budget,
+        systemSuffix: this.callerContext(identity),
+        tools: await this.mainAgentTools(session),
+        models: this.modelPair(metadata),
+        branches: this.compositionBranches(taskId),
+        observations: this.db.observations.recent(
+          taskId,
+          round,
+          this.config.roundObservationWindow
+        ),
+        toolOutputWindow: this.config.toolOutputWindow,
+        types: this.runtime.types,
+        maxSubtasks: this.config.maxSubtasks,
+        maxOutputTokens: this.config.model.maxOutputTokens,
+        maxRetries: this.config.model.maxRetries,
+        instructions: this.instructions,
+        partialNote: policy.copy.partialNote,
+        // The key carries the round so two rounds of one Task cannot collide on
+        // the gatekeeper, which a bare step index would.
+        onContent: channel?.stream((step) => `r${round}:step:${step}`),
+        abortSignal: controller.signal
+      });
+    } finally {
+      this.inflight.delete(taskId);
+    }
     // Terminal for this round with nothing to persist — the kind rides out with
     // it, and the Workflow turns it into words.
     if (outcome.status === "failed") return outcome;
+
+    // Interrupted mid-call. The re-read below would reach the same verdict, so
+    // this is not what makes the Task canceled — it is what keeps a cancel from
+    // being reported as the models failing.
+    if (outcome.status === "canceled") return outcome;
 
     // Cancelled while the model worked: persist nothing and publish nothing. The
     // turns stay charged — the model ran, whatever became of its output.
@@ -848,6 +879,11 @@ export abstract class RoundAgentBase<
    * non-terminal until the 30-day cleanup.
    */
   protected override async onTaskCanceled(taskId: string): Promise<void> {
+    // This Task's own round, before any child: without it a cancel waits out a
+    // model call that may be holding a tool for MAX_TOOL_CALL_MS. Scoped to the
+    // Task, because a sibling Task may be mid-round in this same DO.
+    this.inflight.get(taskId)?.abort();
+
     // First, and outside the loop: `cancelPending` is one guarded bulk
     // `pending -> canceled`, so it cannot be skipped by a best-effort teardown
     // below throwing partway through, and a branch that won the claim a moment

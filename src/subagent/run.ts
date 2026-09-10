@@ -1,6 +1,6 @@
 import type { LanguageModel, ModelMessage, StepResult, ToolSet } from "ai";
 import { generateText, isStepCount } from "ai";
-import { CHUNK_SOFT_MS } from "../platform.js";
+import { CHUNK_SOFT_MS, MAX_TOOL_CALL_MS } from "../platform.js";
 import { stepAllowance } from "../agent/budget.js";
 import {
   isTransientAiError,
@@ -324,6 +324,9 @@ export async function runResumableChunk(
         // cannot do it", and a 429 says "not yet". See `ModelConfig.maxRetries`.
         maxRetries: deps.maxRetries,
         abortSignal: deps.abortSignal,
+        // The recipe's tools get the same ceiling the main agent's do; see the
+        // `timeout` on the round's own `generateText` for why only `toolMs`.
+        timeout: { toolMs: MAX_TOOL_CALL_MS },
         onStepEnd
       });
     } catch (error) {

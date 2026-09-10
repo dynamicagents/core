@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { tool } from "ai";
+import { generateText, isStepCount, tool } from "ai";
+import { MockLanguageModelV3 } from "ai/test";
 import { z } from "zod";
 import { FINAL_REPLY_TOOL_NAME } from "../agent/final-reply.js";
 import { DELEGATE_TOOL_NAME } from "../subtasks/delegate.js";
@@ -1044,5 +1045,221 @@ describe("joinSuccessfulBranches", () => {
     );
     expect(joined).toContain("MY OWN WORDING");
     expect(joined).not.toContain(policy.copy.partialNote);
+  });
+});
+
+/**
+ * Cancellation reaching the round's own inference.
+ *
+ * The round is the widest window a Task has — a model call plus every tool it
+ * decides to make — and before this it could only be interrupted between rounds.
+ * What these pin is not that a cancelled Task ends (the caller re-reads the row
+ * and would reach that anyway) but that it ends as a **cancellation**: an abort
+ * read as bad model output walks the repair ladder and spends the fallback slot,
+ * which is real money and a real delay on work nobody is waiting for.
+ */
+describe("a cancelled round", () => {
+  it("reports canceled rather than failed, and leaves the fallback unspent", async () => {
+    const controller = new AbortController();
+    const fallback = countingModel(finalReply("fallback answered"));
+
+    // Aborted while the call is in flight, then allowed to return normally. That
+    // is the same-tick race — the signal lands as the provider answers — and it
+    // is why the abort is checked before the result is read rather than only in
+    // the `catch`. A model that rejects on abort takes the other road; both
+    // arrive here.
+    const primary = new MockLanguageModelV3({
+      doGenerate: async () => {
+        controller.abort();
+        return {
+          content: [{ type: "text" as const, text: "" }],
+          finishReason: { unified: "stop" as const, raw: undefined },
+          usage: {
+            inputTokens: { total: 0, noCache: 0, cacheRead: 0, cacheWrite: 0 },
+            outputTokens: { total: 0, text: 0, reasoning: 0 }
+          },
+          warnings: []
+        };
+      }
+    });
+
+    const outcome = await runTurn(
+      args({
+        models: {
+          primary: () => primary,
+          fallback: () => fallback.model,
+          primaryId: () => TEST_MODELS.chatModelId,
+          fallbackId: () => TEST_MODELS.fallbackChatModelId
+        } as unknown as ModelPair,
+        abortSignal: controller.signal
+      })
+    );
+
+    expect(outcome.status).toBe("canceled");
+    // The assertion that costs something to get wrong. Without the abort check
+    // this is a `stop` with no control call — the round's canonical "model
+    // narrated instead of acting" failure — which spends the second slot and
+    // then reports `exhausted` for a Task the user cancelled.
+    expect(fallback.calls()).toBe(0);
+  });
+
+  it("still charges the turns the model already spent", async () => {
+    const controller = new AbortController();
+    const budget = newTurnBudget(20);
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        controller.abort();
+        return {
+          content: [
+            {
+              type: "tool-call" as const,
+              toolCallId: crypto.randomUUID(),
+              toolName: FINAL_REPLY_TOOL_NAME,
+              input: JSON.stringify({ text: "answered anyway" })
+            }
+          ],
+          finishReason: { unified: "tool-calls" as const, raw: undefined },
+          usage: {
+            inputTokens: { total: 0, noCache: 0, cacheRead: 0, cacheWrite: 0 },
+            outputTokens: { total: 0, text: 0, reasoning: 0 }
+          },
+          warnings: []
+        };
+      }
+    });
+
+    const outcome = await runTurn(
+      args({ models: pair(model), budget, abortSignal: controller.signal })
+    );
+
+    expect(outcome.status).toBe("canceled");
+    // A cancelled round is not a free round: the provider was called and
+    // answered. Forgiving it would let a cancel-heavy caller infer for nothing,
+    // and every other exit in this file charges what it spent.
+    expect(budget.spent).toBe(1);
+  });
+
+  it("hands the round's tools a signal that its cancellation reaches", async () => {
+    const controller = new AbortController();
+    let toolSignal: AbortSignal | undefined;
+
+    const outcome = await runTurn(
+      args({
+        tools: {
+          look: tool({
+            description: "A work tool.",
+            inputSchema: z.object({}),
+            execute: async (_input, options) => {
+              toolSignal = options.abortSignal;
+              return "looked";
+            }
+          })
+        },
+        models: pair(
+          mockModel({ toolCall: { toolName: "look" } }, finalReply("done"))
+        ),
+        abortSignal: controller.signal
+      })
+    );
+
+    expect(outcome.status).toBe("replied");
+    // Core's half of MAX_TOOL_CALL_MS is that a tool is *given* something to
+    // stop on — the SDK merges the round's signal with the per-tool deadline and
+    // hands the result to `execute`. Whether the tool reads it is the plugin's
+    // half, and no amount of core code can supply it.
+    expect(toolSignal).toBeInstanceOf(AbortSignal);
+    expect(toolSignal?.aborted).toBe(false);
+    controller.abort();
+    expect(toolSignal?.aborted).toBe(true);
+  });
+});
+
+/**
+ * The SDK behaviour core's `timeout.toolMs` depends on, pinned here because
+ * depending on it silently is how an upgrade breaks a design — and because the
+ * two specs below are the reason core's half of this change is inert on its own.
+ *
+ * `MAX_TOOL_CALL_MS` is ten minutes, so neither can go through `runTurn`: they
+ * call `generateText` directly with a deadline a spec can wait out.
+ */
+describe("the tool deadline the round relies on", () => {
+  it("fails a tool that honours its signal, and lets the model answer around it", async () => {
+    const result = await generateText({
+      model: mockModel(
+        { toolCall: { toolName: "slow" } },
+        { text: "answered without it" }
+      ),
+      messages: [{ role: "user", content: "go" }],
+      tools: {
+        slow: tool({
+          description: "Runs until its signal says stop.",
+          inputSchema: z.object({}),
+          execute: async (_input, options) =>
+            new Promise<string>((_resolve, reject) => {
+              const signal = options.abortSignal;
+              signal?.addEventListener("abort", () => reject(signal.reason), {
+                once: true
+              });
+            })
+        })
+      },
+      stopWhen: isStepCount(2),
+      timeout: { toolMs: 10 }
+    });
+
+    const errors = result.steps
+      .flatMap((step) => step.content)
+      .filter((part) => part.type === "tool-error");
+
+    // A `tool-error`, not a thrown call. The loop kept going and the model got a
+    // second step, which is what lets a round route around a wedged tool instead
+    // of dying with it — and is why the round sets `toolMs` and not `stepMs`.
+    expect(errors).toHaveLength(1);
+    expect(result.text).toContain("answered without it");
+  });
+
+  it("does not stop a tool that ignores its signal", async () => {
+    let release: (() => void) | undefined;
+    const hang = new Promise<string>((resolve) => {
+      release = () => resolve("far too late");
+    });
+
+    const generation = generateText({
+      model: mockModel(
+        { toolCall: { toolName: "deaf" } },
+        { text: "answered eventually" }
+      ),
+      messages: [{ role: "user", content: "go" }],
+      tools: {
+        deaf: tool({
+          description: "Never reads its signal.",
+          inputSchema: z.object({}),
+          // No second parameter: exactly the shape every tool has before it is
+          // taught to take one.
+          execute: async () => hang
+        })
+      },
+      stopWhen: isStepCount(2),
+      timeout: { toolMs: 10 }
+    });
+
+    try {
+      // The deadline is 10 ms and this waits twenty times that. The SDK merges
+      // the deadline into the signal it hands `execute` — it does not race the
+      // promise — so nothing here has stopped, and the round is still waiting.
+      const marker = Symbol("still running");
+      const raced = await Promise.race([
+        generation,
+        new Promise<symbol>((resolve) => setTimeout(() => resolve(marker), 200))
+      ]);
+
+      // The whole justification for the plugins half of this work. A deadline
+      // core sets is a deadline only if the tool reads its signal; the constant
+      // stays a contract with the host for every tool that does not.
+      expect(raced).toBe(marker);
+    } finally {
+      release?.();
+      await generation;
+    }
   });
 });

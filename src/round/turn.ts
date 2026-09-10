@@ -11,6 +11,7 @@ import {
   ToolChoiceViolationError
 } from "ai";
 import type { SessionMessage } from "agents/experimental/memory/session";
+import { MAX_TOOL_CALL_MS } from "../platform.js";
 import type { AgentLimits } from "../config.js";
 import type { SubtaskTypeRegistry } from "../subtasks/subtask-types.js";
 import { appendOnce, type SessionLike } from "../agent/session.js";
@@ -452,6 +453,19 @@ export interface RunTurnArgs {
   partialNote: string;
   /** Streams intermediate content while the model reasons. Best-effort. */
   onContent?: OnContent;
+  /**
+   * Cancellation for the round's own inference, so a cancel lands on the model
+   * call in flight rather than after it — the widest window a round has.
+   *
+   * The SDK hands this to every work tool's `execute` as well, merged with the
+   * per-tool deadline, so a tool that reads its `abortSignal` stops on both. One
+   * that ignores it keeps running either way: {@link MAX_TOOL_CALL_MS} bounds
+   * what the loop *waits* for, not what the tool does.
+   *
+   * Optional, and absent means the round cannot be interrupted, which is what a
+   * caller with nothing to interrupt it from already had.
+   */
+  abortSignal?: AbortSignal;
 }
 
 /**
@@ -486,7 +500,16 @@ export type RunTurnOutcome =
        */
       observations: ModelMessage[];
     }
-  | { status: "failed"; kind: RoundFailureKind; error: string };
+  | { status: "failed"; kind: RoundFailureKind; error: string }
+  /**
+   * The round was cancelled while a model call was in flight. Separate from
+   * `failed` because the models did nothing wrong and a human is owed no
+   * explanation about them — the caller asked for this to stop.
+   *
+   * The budget is still charged, as every other exit charges it: the model ran,
+   * whatever became of its output.
+   */
+  | { status: "canceled" };
 
 /**
  * A control call the round refused, kept so it can be handed back to the model
@@ -509,7 +532,13 @@ interface RejectedCall {
  */
 type Attempt =
   | { ok: true; decision: TurnDecision }
-  | { ok: false; error: unknown; rejected?: RejectedCall };
+  /**
+   * Cancelled mid-call. Distinct from a failure because it is not evidence about
+   * the model: repairing it asks a cancelled round to try again, and falling
+   * through spends the second slot on work nobody is waiting for any more.
+   */
+  | { ok: false; aborted: true }
+  | { ok: false; aborted?: false; error: unknown; rejected?: RejectedCall };
 
 /**
  * One attempt against a single model: let it work, and take whichever ending it
@@ -615,6 +644,22 @@ async function attempt(
       // and when both slots share a credential the fallback cannot even answer
       // that. See `ModelConfig.maxRetries`.
       maxRetries: args.maxRetries,
+      abortSignal: args.abortSignal,
+      // What the loop waits for a single tool call, and the only place core can
+      // enforce {@link file://../platform.ts MAX_TOOL_CALL_MS} at all — the
+      // constant is a bound on the host's tools, and this is core's half of it.
+      //
+      // A tool that outruns it is failed and the loop continues: the SDK turns
+      // the expiry into a `tool-error` the next step reads, so the model can
+      // route around a wedged tool instead of the round dying with it. That is
+      // why only `toolMs` is set here. `stepMs` and `totalMs` abort the whole
+      // call, which arrives indistinguishable from a real fault and would spend
+      // the fallback slot on work that was merely slow.
+      //
+      // It bounds the *wait*, not the tool: the signal is merged into the one
+      // `execute` receives, and a tool that ignores it runs on unattended. See
+      // `MAX_TOOL_CALL_MS` for why a host must bound its own tools regardless.
+      timeout: { toolMs: MAX_TOOL_CALL_MS },
       // Charged here rather than from `result.steps` so a throw mid-loop still
       // bills the steps already spent — the `catch` below has no `result` to read.
       onStepEnd: async (step) => {
@@ -623,6 +668,11 @@ async function attempt(
         if (content) await content(step);
       }
     });
+
+    // Before the result is read, for the same reason the `catch` checks first: a
+    // cancel that lands as the call returns is still a cancel, and acting on the
+    // decision would persist rows for a Task nobody is waiting on.
+    if (args.abortSignal?.aborted) return { ok: false, aborted: true };
 
     // The most committal ending the model reached, and every call it made to that
     // tool. Ranking by precedence rather than by position keeps "which ending
@@ -680,6 +730,11 @@ async function attempt(
       )
     };
   } catch (error) {
+    // Check the signal before the error: an abort surfaces as a rejection, and
+    // reading it as bad model output would walk the repair ladder and spend the
+    // fallback on a round that was cancelled on purpose.
+    if (args.abortSignal?.aborted) return { ok: false, aborted: true };
+
     // The model narrated instead of calling a tool — the failure this whole
     // design exists to catch. The SDK enforces `toolChoice` itself and throws
     // before the step ends, so this arrives as a throw rather than as a result
@@ -902,6 +957,12 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
       );
 
       if (!outcome.ok) {
+        // Ahead of every other exit, including the non-recoverable one: a
+        // cancelled round has no second slot to spend and nothing to diagnose.
+        // The caller re-reads cancellation itself, so returning here only saves
+        // the work — it is not what makes the Task canceled.
+        if (outcome.aborted) return { status: "canceled" };
+
         // Before anything else, and before the fallback slot exists as an
         // option: a failure nothing can clear ends the round here. Repairing
         // asks a dead credential to try again; falling through spends the
