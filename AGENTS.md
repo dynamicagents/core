@@ -48,11 +48,25 @@ Generate a keypair with `npm run keys`.
 
 ## Publishing constraints
 
+**Development lands on `next`; `main` is the released line.** A release is a merge
+from `next` into `main` carrying a version bump — so a bump is a deliberate act at
+release time rather than something that rides every merge.
+
 A version bump reaching `main` is what ships it: on the first green Test run for
 a commit carrying that version, `.github/workflows/release.yml` publishes it to
 npm over OIDC and only then cuts the tag. The bump is the decision to ship, and `prepack` and
 `prepublishOnly` are the last gate a tarball passes before it is immutable on the
 registry. The workflow comments hold the rest.
+
+The release gate reads the **registry**, not the commit log — it asks whether
+`name@version` is already published — so a merge of many commits and one bump
+publishes once, and a merge with no bump does nothing. That is what makes batching a
+release safe.
+
+`prepare` runs `build`, which is what lets a consumer depend on this package by git
+ref while it is still unreleased: `dist/` is not committed, and npm runs `prepare`
+when installing a git dependency. `husky || true` because husky exits non-zero
+outside a git checkout, which is exactly the consumer-install case.
 
 The package has no root barrel; every area is its own subpath export. Four rules
 follow from that, and all four have already been violated once:
