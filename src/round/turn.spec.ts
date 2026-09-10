@@ -1176,9 +1176,10 @@ describe("a cancelled round", () => {
 
 /**
  * The SDK behaviour core's `timeout.toolMs` depends on, pinned here because
- * depending on it silently is how an upgrade breaks a design — and because the
- * second spec below is why core wraps every plugin tool rather than trusting the
- * signal. The wrapper's own specs are in `runtime/bound-tools.spec.ts`.
+ * depending on it silently is how an upgrade breaks a design — and because "does
+ * not stop a tool that ignores its signal" is why core wraps every plugin tool
+ * rather than trusting the signal. The wrapper's own specs are in
+ * `src/runtime/bound-tools.spec.ts`.
  *
  * `MAX_TOOL_CALL_MS` is far too long to wait out, so neither goes through
  * `runTurn`: they call `generateText` directly with a deadline a spec can.

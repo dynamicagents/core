@@ -164,19 +164,111 @@ describe("boundToolCalls", () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
-  it("leaves a streaming tool's stream to the SDK", () => {
-    const stream = (async function* () {
-      yield "partial";
-    })();
+  it("passes a stream's values through when nothing stops it", async () => {
     const tools = boundToolCalls({
       feed: tool({
         description: "Streams.",
         inputSchema: z.object({}),
-        execute: () => stream
+        execute: async function* () {
+          yield "partial";
+          yield "whole";
+        }
       })
     });
 
-    expect(call(tools, "feed", new AbortController().signal)).toBe(stream);
+    const seen: unknown[] = [];
+    const stream = call(
+      tools,
+      "feed",
+      new AbortController().signal
+    ) as AsyncIterable<unknown>;
+    for await (const value of stream) seen.push(value);
+
+    expect(seen).toEqual(["partial", "whole"]);
+  });
+
+  it("abandons a stream that stops yielding once the grace runs out", async () => {
+    const { done, release } = hanging();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const tools = boundToolCalls(
+      {
+        feed: tool({
+          description: "Streams, then stalls.",
+          inputSchema: z.object({}),
+          execute: async function* () {
+            yield "partial";
+            yield await done;
+          }
+        })
+      },
+      30
+    );
+
+    try {
+      const seen: unknown[] = [];
+      const drain = async () => {
+        const stream = call(
+          tools,
+          "feed",
+          AbortSignal.timeout(1)
+        ) as AsyncIterable<unknown>;
+        for await (const value of stream) seen.push(value);
+      };
+
+      await expect(drain()).rejects.toThrow(
+        /^feed did not finish within its time limit/
+      );
+      // What it had said before stalling still reached the SDK.
+      expect(seen).toEqual(["partial"]);
+    } finally {
+      warn.mockRestore();
+      release();
+    }
+  });
+
+  it("does not let a stream that keeps yielding restart the grace", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let yielded = 0;
+    const tools = boundToolCalls(
+      {
+        feed: tool({
+          description: "Streams forever.",
+          inputSchema: z.object({}),
+          execute: async function* () {
+            for (;;) {
+              await new Promise((resolve) => setTimeout(resolve, 5));
+              yielded += 1;
+              yield yielded;
+            }
+          }
+        })
+      },
+      30
+    );
+
+    try {
+      const drain = async () => {
+        const stream = call(
+          tools,
+          "feed",
+          AbortSignal.timeout(1)
+        ) as AsyncIterable<unknown>;
+        // Each value arrives well inside the grace on its own; only a grace
+        // shared by the whole call can end this.
+        for await (const _value of stream) void _value;
+      };
+
+      await expect(drain()).rejects.toThrow(
+        /^feed did not finish within its time limit/
+      );
+      // Returned when abandoned, so the generator stops at its next `yield`
+      // rather than running on with nobody reading it.
+      const atAbandon = yielded;
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(yielded).toBeLessThanOrEqual(atAbandon + 1);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("leaves a tool with no execute untouched", () => {
@@ -218,7 +310,7 @@ describe("boundToolCalls", () => {
         .filter((part) => part.type === "tool-error");
 
       // The same tool, unwrapped, is still holding its loop in
-      // `round/turn.spec.ts`. Wrapped, the loop gets its step back, and the model
+      // `src/round/turn.spec.ts`. Wrapped, the loop gets its step back, and the model
       // reads why rather than a bare `TimeoutError`.
       expect(errors).toHaveLength(1);
       expect(String((errors[0] as { error: unknown }).error)).toContain(

@@ -16,6 +16,11 @@ import { TOOL_CALL_GRACE_MS } from "../platform.js";
  * outlive its call reads its signal and stops that work, and the grace is its
  * window to do so: an answer that arrives inside it is the one the model reads, so
  * the tool can say what it stopped. Past it, the model reads {@link abandoned}.
+ *
+ * A streaming tool is held to the same bound. The SDK waits on each step of a
+ * stream as it would on a promise, so every step is raced against one grace for
+ * the whole call — a stream that keeps yielding after its signal fired cannot
+ * restart the clock with each value.
  */
 export function boundToolCalls(
   tools: ToolSet,
@@ -52,18 +57,20 @@ function boundCall(
   // starting it would begin work only to walk away from it.
   if (signal.aborted) return Promise.reject(signal.reason);
   const result = run();
-  // The SDK iterates a streaming tool itself, so there is no one promise here to
-  // stop waiting on.
-  if (isAsyncIterable(result)) return result;
-  return abandonLate(name, graceMs, signal, Promise.resolve(result));
+  const late = lateSignal(name, graceMs, signal);
+  if (isAsyncIterable(result)) return boundStream(late, result);
+  return withAbort(late.signal, Promise.resolve(result)).finally(late.dispose);
 }
 
-function abandonLate<T>(
+/**
+ * A signal that aborts `graceMs` after `signal` does, carrying the error the model
+ * reads. `dispose` stops listening once the call has settled.
+ */
+function lateSignal(
   name: string,
   graceMs: number,
-  signal: AbortSignal,
-  work: Promise<T>
-): Promise<T> {
+  signal: AbortSignal
+): { signal: AbortSignal; dispose: () => void } {
   const late = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const expire = () => {
@@ -84,10 +91,45 @@ function abandonLate<T>(
   // starting has already fired its event, and it does not fire twice.
   if (signal.aborted) expire();
   else signal.addEventListener("abort", expire, { once: true });
-  return withAbort(late.signal, work).finally(() => {
-    signal.removeEventListener("abort", expire);
-    clearTimeout(timer);
-  });
+  return {
+    signal: late.signal,
+    dispose: () => {
+      signal.removeEventListener("abort", expire);
+      clearTimeout(timer);
+    }
+  };
+}
+
+/**
+ * The tool's stream, with every step raced against `late`.
+ *
+ * An abandoned stream has its iterator returned as well, so a generator that is
+ * slow rather than stuck stops at its next `yield` instead of running on.
+ */
+async function* boundStream(
+  late: { signal: AbortSignal; dispose: () => void },
+  stream: AsyncIterable<unknown>
+): AsyncGenerator<unknown> {
+  const iterator = stream[Symbol.asyncIterator]();
+  let finished = false;
+  try {
+    for (;;) {
+      const step = await withAbort(
+        late.signal,
+        Promise.resolve(iterator.next())
+      );
+      if (step.done) {
+        finished = true;
+        return;
+      }
+      yield step.value;
+    }
+  } finally {
+    late.dispose();
+    // Not awaited: returning an iterator that is mid-step waits for that step,
+    // and waiting on it is what this exists to stop doing.
+    if (!finished) void Promise.resolve(iterator.return?.()).catch(() => {});
+  }
 }
 
 /**
