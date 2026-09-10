@@ -114,6 +114,10 @@ async function* boundStream(
   let finished = false;
   try {
     for (;;) {
+      // Before advancing, and not only while waiting: a consumer can hold this
+      // generator at its `yield` past the grace, and asking the stream for its
+      // next step then would restart its work after the bound.
+      late.signal.throwIfAborted();
       const step = await withAbort(
         late.signal,
         Promise.resolve(iterator.next())
@@ -127,8 +131,13 @@ async function* boundStream(
   } finally {
     late.dispose();
     // Not awaited: returning an iterator that is mid-step waits for that step,
-    // and waiting on it is what this exists to stop doing.
-    if (!finished) void Promise.resolve(iterator.return?.()).catch(() => {});
+    // and waiting on it is what this exists to stop doing. Called from inside a
+    // promise, so a `return` that throws outright is as best-effort as one that
+    // rejects, and neither replaces the error that ended the stream.
+    if (!finished)
+      void Promise.resolve()
+        .then(() => iterator.return?.())
+        .catch(() => {});
   }
 }
 

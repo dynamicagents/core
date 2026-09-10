@@ -271,6 +271,89 @@ describe("boundToolCalls", () => {
     }
   });
 
+  it("does not advance a stream once its grace has run out", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let advanced = 0;
+    const tools = boundToolCalls(
+      {
+        feed: tool({
+          description: "Streams whenever asked.",
+          inputSchema: z.object({}),
+          execute: async function* () {
+            for (;;) {
+              advanced += 1;
+              yield advanced;
+            }
+          }
+        })
+      },
+      10
+    );
+
+    try {
+      const stream = (
+        call(tools, "feed", AbortSignal.timeout(1)) as AsyncIterable<unknown>
+      )[Symbol.asyncIterator]();
+      await stream.next();
+      // Held between two steps until the grace is long gone, as a slow consumer
+      // would hold it.
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      const before = advanced;
+
+      await expect(stream.next()).rejects.toThrow(
+        /^feed did not finish within its time limit/
+      );
+      // Refused without asking the stream for another step, which would have
+      // been work started after the bound.
+      expect(advanced).toBe(before);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("keeps the abandonment error when the stream's own cleanup throws", async () => {
+    const { done, release } = hanging();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // A hand-written iterator, not a generator: nothing makes its `return` a
+    // promise, so it can throw before there is one to catch.
+    const stalling: AsyncIterable<string> = {
+      [Symbol.asyncIterator]: () => ({
+        next: () => done.then((value) => ({ value, done: false })),
+        return: () => {
+          throw new Error("cleanup failed");
+        }
+      })
+    };
+    const tools = boundToolCalls(
+      {
+        feed: tool({
+          description: "Streams from a custom iterator.",
+          inputSchema: z.object({}),
+          execute: () => stalling
+        })
+      },
+      10
+    );
+
+    try {
+      const drain = async () => {
+        const stream = call(
+          tools,
+          "feed",
+          AbortSignal.timeout(1)
+        ) as AsyncIterable<unknown>;
+        for await (const _value of stream) void _value;
+      };
+
+      await expect(drain()).rejects.toThrow(
+        /^feed did not finish within its time limit/
+      );
+    } finally {
+      warn.mockRestore();
+      release();
+    }
+  });
+
   it("leaves a tool with no execute untouched", () => {
     const external = tool({
       description: "Answered outside the loop.",
