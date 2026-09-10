@@ -66,6 +66,29 @@ export interface ModelPair {
   fallbackId: () => string;
 }
 
+/**
+ * ## What a provider owes the loops when a call fails
+ *
+ * One thing, and it is not optional: **a failure worth another attempt is an
+ * `APICallError` carrying `isRetryable`.** That flag is read twice. The SDK
+ * retries it on the same model first, honouring the provider's own
+ * `retry-after`; whatever survives that reaches
+ * {@link file://./inference.ts isTransientAiError}, which throws it out of the
+ * attempt ladder so the Workflow step retries the round instead of spending the
+ * fallback slot on it.
+ *
+ * Those answer different questions, and only one of them is the fallback's: a
+ * `429` says "not yet", while the fallback answers "this model cannot" — and when
+ * both slots sit behind one credential it cannot even answer that. A provider
+ * that rethrows its transport's errors raw gets neither behaviour, because
+ * nothing about a bare `Error` says which question it is answering, so core reads
+ * it as deterministic and spends the fallback proving it.
+ *
+ * Everything else is deterministic, with one exception the loops have to be told
+ * about separately: a refused credential is
+ * {@link file://./errors.ts CredentialRejectedError}, which neither a retry nor a
+ * fallback can clear.
+ */
 export interface ModelRuntime {
   /**
    * Lazily build + memoize a primary/fallback model pair (overridable in tests,

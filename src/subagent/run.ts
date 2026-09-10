@@ -79,11 +79,6 @@ export interface ChunkRunDeps {
    * hardcoded one.
    */
   maxOutputTokens: number;
-  /**
-   * `CoreConfig.model.maxRetries` — retries on *this* model, honouring the
-   * provider's `retry-after`, before the slot hands over to the fallback.
-   */
-  maxRetries: number;
   now: () => number;
   /** Shared sink the tool families push progress events into (fresh per chunk). */
   progress: ProgressEvent[];
@@ -324,9 +319,6 @@ export async function runResumableChunk(
         tools: deps.tools,
         stopWhen: boundaries(),
         maxOutputTokens: deps.maxOutputTokens,
-        // Not a duplicate of the fallback: the fallback answers "this model
-        // cannot do it", and a 429 says "not yet". See `ModelConfig.maxRetries`.
-        maxRetries: deps.maxRetries,
         abortSignal: deps.abortSignal,
         // The recipe's tools get the same ceiling the main agent's do; see the
         // `timeout` on the round's own `generateText` for why only `toolMs`.
@@ -466,9 +458,6 @@ async function summarizeBudget(
         messages,
         stopWhen: isStepCount(1),
         maxOutputTokens: deps.maxOutputTokens,
-        // Retries on this model, honouring `retry-after`, before the fallback.
-        // See `ModelConfig.maxRetries`.
-        maxRetries: deps.maxRetries,
         abortSignal: deps.abortSignal
       });
     } catch (error) {
@@ -542,8 +531,6 @@ export interface RecipeRunDeps {
   toolOutputWindow: number;
   /** `CoreConfig.model.maxOutputTokens`. */
   maxOutputTokens: number;
-  /** `CoreConfig.model.maxRetries`. */
-  maxRetries: number;
 }
 
 /**
@@ -585,7 +572,6 @@ export async function runRecipeExecution(
       toolOutputWindow: deps.toolOutputWindow,
       reportMetrics: recipe.reportMetrics,
       maxOutputTokens: deps.maxOutputTokens,
-      maxRetries: deps.maxRetries,
       now,
       progress: [],
       checkpoint: () => {}

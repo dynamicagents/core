@@ -294,7 +294,6 @@ export abstract class RoundAgentBase<
         types: this.runtime.types,
         maxSubtasks: this.config.maxSubtasks,
         maxOutputTokens: this.config.model.maxOutputTokens,
-        maxRetries: this.config.model.maxRetries,
         instructions: this.instructions,
         partialNote: policy.copy.partialNote,
         // The key carries the round so two rounds of one Task cannot collide on

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { generateText, isStepCount, tool } from "ai";
+import { APICallError, generateText, isStepCount, tool } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 import { z } from "zod";
 import { FINAL_REPLY_TOOL_NAME } from "../agent/final-reply.js";
@@ -140,10 +140,6 @@ function args(overrides: Partial<RunTurnArgs> = {}): RunTurnArgs {
     types,
     maxSubtasks: 8,
     maxOutputTokens: 4096,
-    // Zero, so the ladder specs below count model *calls* the way they mean to:
-    // a retry is invisible to `countingModel` as anything but another call, and
-    // these assertions are about the primary→fallback→repair shape.
-    maxRetries: 0,
     instructions,
     partialNote: policy.copy.partialNote,
     ...overrides
@@ -340,19 +336,17 @@ describe("runTurn", () => {
    * the same limit, the round threw, the Workflow retried, and the pair
    * repeated four more times over three minutes.
    *
-   * The call counts are the assertion. The outcome is a successful reply either
-   * way, so only "which model was asked, and how many times" can tell a waited
-   * retry from a burned fallback.
+   * The waiting is the SDK's own, on its defaults — core configures none. The
+   * call counts are the assertion: the outcome is a successful reply either way,
+   * so only "which model was asked, and how many times" can tell a waited retry
+   * from a burned fallback.
    */
   it("retries a rate-limited model in place instead of burning the fallback", async () => {
     const primary = rateLimitedModel(1, finalReply("the actual answer"));
     const fallback = countingModel(finalReply("should never be reached"));
 
     const outcome = await runTurn(
-      args({
-        maxRetries: 1,
-        models: pair(primary.model, fallback.model)
-      })
+      args({ models: pair(primary.model, fallback.model) })
     );
 
     expect(outcome).toEqual({ status: "replied", reply: "the actual answer" });
@@ -361,21 +355,77 @@ describe("runTurn", () => {
     expect(fallback.calls()).toBe(0);
   });
 
-  /** With retries off, the same 429 spends the slot — the old behaviour. */
-  it("hands a rate limit to the fallback when retries are disabled", async () => {
-    const primary = rateLimitedModel(1, finalReply("unreachable"));
-    const fallback = countingModel(finalReply("fallback answered"));
-
-    const outcome = await runTurn(
-      args({
-        maxRetries: 0,
-        models: pair(primary.model, fallback.model)
-      })
+  /**
+   * A rate limit neither slot outlasts is still "not yet": the round throws so
+   * the Workflow step retries it, rather than failing a Task that another minute
+   * would have answered.
+   *
+   * What the ladder is handed is not the 429 — it is the SDK's wrapper around
+   * every attempt it made, and seeing through that is
+   * {@link file://../agent/inference.ts isTransientAiError}'s job.
+   */
+  it("throws for the step when a rate limit outlasts the retries", async () => {
+    const primary = rateLimitedModel(
+      Number.POSITIVE_INFINITY,
+      finalReply("unreachable")
+    );
+    const fallback = rateLimitedModel(
+      Number.POSITIVE_INFINITY,
+      finalReply("unreachable")
     );
 
-    expect(outcome).toEqual({ status: "replied", reply: "fallback answered" });
-    expect(primary.calls()).toBe(1);
-    expect(fallback.calls()).toBe(1);
+    await expect(
+      runTurn(args({ models: pair(primary.model, fallback.model) }))
+    ).rejects.toThrow();
+
+    // Each slot waited in place before it was given up, which is the half of
+    // this a thrown error alone does not show.
+    //
+    // The exact count is the SDK's own default, and core configures nothing —
+    // which makes it the budget `CHUNK_SOFT_MS`'s headroom is sized against in
+    // src/platform.ts. Pinned here so a release that changes that default fails
+    // a test rather than quietly eating five minutes of a chunk step.
+    expect(primary.calls()).toBe(3);
+    expect(fallback.calls()).toBe(3);
+  });
+
+  /**
+   * The same short-circuit as the credential specs below, reached the way it
+   * actually happens: a rate limit first, so the SDK retried, and what arrives
+   * is its retry error with the rejection inside. Read as-is it is neither
+   * transient nor non-recoverable, and the round spends the fallback slot
+   * presenting the same dead token before throwing for the step to repeat it.
+   */
+  it("sees a credential refused behind a retry, and stops there", async () => {
+    let calls = 0;
+    const primary = new MockLanguageModelV3({
+      doGenerate: async () => {
+        calls += 1;
+        if (calls === 1) {
+          // `retry-after: 0` for the same reason `rateLimitedModel` uses it:
+          // the wait is real seconds and proves nothing here.
+          throw new APICallError({
+            message: "429 Wholesale Rate limited",
+            url: "mock:chat:test",
+            requestBodyValues: {},
+            statusCode: 429,
+            responseHeaders: { "retry-after": "0" }
+          });
+        }
+        throw new CredentialRejectedError("invalid bearer token", {
+          status: 401,
+          source: "provider"
+        });
+      }
+    });
+    const fallback = countingModel(finalReply("the fallback answered"));
+
+    const outcome = await runTurn(
+      args({ models: pair(primary, fallback.model) })
+    );
+
+    expect(outcome).toMatchObject({ status: "failed", kind: "credential" });
+    expect(fallback.calls()).toBe(0);
   });
 
   it("falls back to the second model when the first reaches no ending", async () => {

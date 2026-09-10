@@ -11,17 +11,6 @@
  * The distinction against {@link file://./platform.ts} stays sharp: nothing here
  * is a platform fact, and nothing there is tunable.
  */
-import { STEP_TIMEOUT_MS } from "./platform.js";
-
-/**
- * Ceiling on {@link ModelConfig.maxRetries}.
- *
- * Derived, not chosen: each honoured `retry-after` can be up to 60s and they all
- * run inside one `step.do`, so this holds the worst case to a small fraction of
- * {@link STEP_TIMEOUT_MS} and leaves the round its own time to actually work.
- */
-const MAX_MODEL_RETRIES = 4;
-
 /** Model ids and per-call generation settings. */
 export interface ModelConfig {
   /**
@@ -60,38 +49,6 @@ export interface ModelConfig {
   maxOutputTokens: number;
   /** Reasoning budget forwarded on the binding's `inputs` by workers-ai-provider. */
   reasoningEffort: "low" | "medium" | "high";
-  /**
-   * How many times a single model call is retried **on the same model** before
-   * the round gives up on that slot and moves to the fallback.
-   *
-   * This was hardcoded to `0` for a long time, with a reason that was right for
-   * one case and wrong for the other. The reason: primary→fallback recovery is
-   * ours, so provider-level backoff only adds latency and duplicates it. True
-   * when the two slots are different vendors, which is what
-   * {@link fallbackChatModelId} advises — a 429 on one says nothing about the
-   * other, so falling straight through is the fastest correct move.
-   *
-   * It is false for a rate limit on an agent whose slots share a credential. A
-   * coder running Opus with Sonnet as its step-down burns the fallback proving
-   * the same 429 twice, then throws, then the Workflow retries the whole round
-   * and does it again. Waiting the `retry-after` the provider actually sent is
-   * both cheaper and far more likely to work.
-   *
-   * The AI SDK does the waiting, and it does it properly:
-   * `retryWithExponentialBackoffRespectingRetryHeaders` honours `retry-after-ms`
-   * and `retry-after` and falls back to exponential backoff. It only fires for
-   * an `APICallError` carrying `isRetryable`, so a provider written outside core
-   * has to map its errors into that shape rather than rethrowing them raw, or
-   * none of this fires for it.
-   *
-   * Bounded at 4 by `resolveConfig`. The retries happen *inside*
-   * `step.do("turn:<round>")`, and the SDK caps a single honoured `retry-after`
-   * at 60s, so the worst case is roughly `maxRetries` minutes of waiting before
-   * the round has spent a token of its own — against
-   * {@link file://./platform.ts STEP_TIMEOUT_MS}, which is where that ceiling is
-   * stated and the only place it should be read from.
-   */
-  maxRetries: number;
 }
 
 /**
@@ -240,11 +197,7 @@ export const DEFAULT_CORE_CONFIG: CoreConfigBaseline = {
     // auto-provision behaviour rather than a choice core is making for anyone.
     aiGatewayId: "default",
     maxOutputTokens: 16_384,
-    reasoningEffort: "medium",
-    // Two, which is the AI SDK's own default and enough to ride out the kind of
-    // rate limit that clears in seconds. Raising it trades round latency for
-    // resilience; see {@link ModelConfig.maxRetries} for the ceiling and why.
-    maxRetries: 2
+    reasoningEffort: "medium"
   },
   mainAgentLimits: { maxTurns: 20, maxWallMs: 60 * 60_000 },
   subagentLimits: { maxTurns: 20, maxWallMs: 30 * 60_000 },
@@ -366,23 +319,6 @@ export function resolveConfig(overrides: CoreConfigOverrides): CoreConfig {
     throw new ConfigError(
       `roundObservationWindow must be a non-negative integer, got ` +
         `${config.roundObservationWindow} — 0 carries nothing between rounds`
-    );
-  }
-
-  // Zero is legal (it opts out), so this is not `positive`. The ceiling is the
-  // step timeout: retries happen inside `step.do("turn:<round>")`, and the AI
-  // SDK honours a `retry-after` of up to 60s per attempt — so `maxRetries`
-  // minutes of waiting inside one step, before the round has spent a single
-  // token of its own. The message below reads the real number off `platform.ts`.
-  if (
-    !Number.isInteger(config.model.maxRetries) ||
-    config.model.maxRetries < 0 ||
-    config.model.maxRetries > MAX_MODEL_RETRIES
-  ) {
-    throw new ConfigError(
-      `model.maxRetries must be an integer between 0 and ${MAX_MODEL_RETRIES}, got ` +
-        `${config.model.maxRetries} — retries run inside one Workflow step, and each ` +
-        `honoured retry-after can be up to 60s against a ${STEP_TIMEOUT_MS / 60_000}-minute step timeout`
     );
   }
 

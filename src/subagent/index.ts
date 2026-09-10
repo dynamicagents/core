@@ -47,8 +47,6 @@ export interface SubagentRuntime {
   toolOutputWindow: number;
   /** `CoreConfig.model.maxOutputTokens`. */
   maxOutputTokens: number;
-  /** `CoreConfig.model.maxRetries`. */
-  maxRetries: number;
   /**
    * Build the durable file store over this facet's own SQLite.
    *
@@ -339,7 +337,6 @@ export abstract class RecipeSubagentBase<
         toolOutputWindow: rt.toolOutputWindow,
         reportMetrics: recipe.reportMetrics,
         maxOutputTokens: rt.maxOutputTokens,
-        maxRetries: rt.maxRetries,
         now: () => Date.now(),
         progress,
         checkpoint: (s) => this.saveRunState(fingerprint, s),
