@@ -313,15 +313,18 @@ export abstract class RecipeSubagentBase<
       });
     const workspace = makeWorkspaceHandle(this.workspace());
     const progress: ProgressEvent[] = [];
+    // Before the tools, which close over its signal so a cancel reaches work they
+    // started as well as the model call.
+    const controller = new AbortController();
     const { tools } = buildRecipeTools(recipe.toolFamilies, rt.toolFamilies, {
       workspace,
       emitProgress: (event: ProgressEvent) => progress.push(event),
       params: request.params,
-      runtime
+      runtime,
+      signal: controller.signal
     });
     const { system, prompt } = renderSubagentPrompt({ ...request, recipe });
 
-    const controller = new AbortController();
     this.inflight = controller;
     let outcome, state;
     try {

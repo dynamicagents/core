@@ -79,7 +79,8 @@ export {
   MAX_CHUNKS_PER_BRANCH,
   MAX_TOOL_CALL_MS,
   STEP_TIMEOUT_MS,
-  STEPS_PER_INSTANCE
+  STEPS_PER_INSTANCE,
+  TOOL_CALL_GRACE_MS
 } from "./platform.js";
 
 export type { PluginStore } from "./db/db.js";

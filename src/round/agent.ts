@@ -146,11 +146,17 @@ export abstract class RoundAgentBase<
    * there is something to search, because a tool whose only possible answer is
    * "nothing here yet" costs a call to discover that and costs every round the
    * tokens to describe it.
+   *
+   * Built afresh for every round, because a plugin's tools may close over
+   * `signal` — the round's own, which a cancel of this Task aborts.
    */
-  private async mainAgentTools(session: SessionLike): Promise<ToolSet> {
+  private async mainAgentTools(
+    session: SessionLike,
+    signal: AbortSignal
+  ): Promise<ToolSet> {
     return {
       ...(await session.tools()),
-      ...(await this.runtime.mainAgentTools({ session }))
+      ...(await this.runtime.mainAgentTools({ session, signal }))
     };
   }
 
@@ -276,7 +282,7 @@ export abstract class RoundAgentBase<
         finalReason,
         budget,
         systemSuffix: this.callerContext(identity),
-        tools: await this.mainAgentTools(session),
+        tools: await this.mainAgentTools(session, controller.signal),
         models: this.modelPair(metadata),
         branches: this.compositionBranches(taskId),
         observations: this.db.observations.recent(

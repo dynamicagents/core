@@ -1,15 +1,13 @@
 /**
  * Cancellation for work whose own API has no `AbortSignal`.
  *
- * The AI SDK hands every tool's `execute` a signal, and a tool backed by an API
- * that takes one should pass it straight through — that is what actually stops
- * the work. This is for the other case: a container exec bounded only by its own
- * `timeoutMs`, a poll loop, an RPC with no signal on any method. There the caller
- * can stop *waiting*, and separately ask the remote side to stop, and those are
- * two different things.
- *
- * See {@link file://./platform.ts MAX_TOOL_CALL_MS} for why stopping the wait is
- * only half a bound.
+ * Core already stops *waiting* on a plugin tool whose call is over — see
+ * {@link file://./platform.ts MAX_TOOL_CALL_MS}. Stopping the *work* is the tool's
+ * job, and a tool backed by an API that takes a signal does it by passing the
+ * signal straight through. This is for the other case: a container exec bounded
+ * only by its own `timeoutMs`, a poll loop, an RPC with no signal on any method.
+ * There the caller can stop waiting, and separately ask the remote side to stop,
+ * and those are two different things.
  */
 
 /**

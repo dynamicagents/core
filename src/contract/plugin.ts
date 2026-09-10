@@ -74,6 +74,19 @@ export interface ToolFamilyContext<TRuntime = SubtaskRuntime> {
    * whatever its own {@link AgentPlugin.resolveRuntime} wrote.
    */
   runtime: TRuntime;
+  /**
+   * Aborts when this execution is cancelled, and belongs to the chunk these tools
+   * are built for — a tool must not be kept past it.
+   *
+   * Not needed to bound a call: core stops waiting on every plugin tool at
+   * {@link file://../platform.ts MAX_TOOL_CALL_MS} on its own. Read it to stop work
+   * that would outlive a cancel — a process to kill, a write not yet sent. A tool
+   * that must also stop at its call's deadline reads `execute`'s `abortSignal`
+   * instead, which carries both.
+   *
+   * Absent when families are rebuilt only to run their `abort` hooks.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -111,11 +124,11 @@ export interface EnrichResultContext<TRuntime = SubtaskRuntime> {
 /**
  * What a plugin knows when it builds the *main* agent's tools.
  *
- * Deliberately just the session, and deliberately not the caller's identity. A
- * plugin that needs a per-caller value takes it as config at instantiation, like
- * every other config value — the Durable Object is keyed 1:1 by the verified
- * caller, so that value is constant for its life. Putting it here as well would
- * give a plugin two ways to reach one fact, and the *other* hook that needs it
+ * Deliberately not the caller's identity. A plugin that needs a per-caller value
+ * takes it as config at instantiation, like every other config value — the
+ * Durable Object is keyed 1:1 by the verified caller, so that value is constant
+ * for its life. Putting it here as well would give a plugin two ways to reach one
+ * fact, and the *other* hook that needs it
  * ({@link AgentPlugin.onMessagesDisplaced}) has no context to read it from
  * anyway.
  *
@@ -125,6 +138,12 @@ export interface EnrichResultContext<TRuntime = SubtaskRuntime> {
  */
 export interface MainAgentToolContext {
   session: SessionLike;
+  /**
+   * Aborts when this round's Task is cancelled. The main-agent side of
+   * {@link ToolFamilyContext.signal}, read for the same reasons, and belonging to
+   * one round the same way: tools are built again for the next.
+   */
+  signal?: AbortSignal;
 }
 
 /** What a plugin knows when deciding whether a turn should run at all. */

@@ -1163,10 +1163,10 @@ describe("a cancelled round", () => {
     );
 
     expect(outcome.status).toBe("replied");
-    // Core's half of MAX_TOOL_CALL_MS is that a tool is *given* something to
-    // stop on — the SDK merges the round's signal with the per-tool deadline and
-    // hands the result to `execute`. Whether the tool reads it is the plugin's
-    // half, and no amount of core code can supply it.
+    // A tool is *given* something to stop its work on — the SDK merges the
+    // round's signal with the per-tool deadline and hands the result to
+    // `execute`. Core stops waiting on the call either way; stopping the work is
+    // the tool's to do, and no amount of core code can do it for it.
     expect(toolSignal).toBeInstanceOf(AbortSignal);
     expect(toolSignal?.aborted).toBe(false);
     controller.abort();
@@ -1176,11 +1176,13 @@ describe("a cancelled round", () => {
 
 /**
  * The SDK behaviour core's `timeout.toolMs` depends on, pinned here because
- * depending on it silently is how an upgrade breaks a design — and because the
- * two specs below are the reason core's half of this change is inert on its own.
+ * depending on it silently is how an upgrade breaks a design — and because "does
+ * not stop a tool that ignores its signal" is why core wraps every plugin tool
+ * rather than trusting the signal. The wrapper's own specs are in
+ * `src/runtime/bound-tools.spec.ts`.
  *
- * `MAX_TOOL_CALL_MS` is ten minutes, so neither can go through `runTurn`: they
- * call `generateText` directly with a deadline a spec can wait out.
+ * `MAX_TOOL_CALL_MS` is far too long to wait out, so neither goes through
+ * `runTurn`: they call `generateText` directly with a deadline a spec can.
  */
 describe("the tool deadline the round relies on", () => {
   it("fails a tool that honours its signal, and lets the model answer around it", async () => {
@@ -1253,9 +1255,8 @@ describe("the tool deadline the round relies on", () => {
         new Promise<symbol>((resolve) => setTimeout(() => resolve(marker), 200))
       ]);
 
-      // The whole justification for the plugins half of this work. A deadline
-      // core sets is a deadline only if the tool reads its signal; the constant
-      // stays a contract with the host for every tool that does not.
+      // Why core wraps every plugin tool instead of relying on this signal: a
+      // deadline set through it is a deadline only for a tool that reads it.
       expect(raced).toBe(marker);
     } finally {
       release?.();

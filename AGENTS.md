@@ -169,13 +169,14 @@ headroom therefore has to cover a whole turn — `MAX_TOOL_CALL_MS` plus room fo
 the model — not a nominal minute. `platform.spec.ts` asserts that relationship;
 raise the step timeout before raising the chunk deadline.
 
-`MAX_TOOL_CALL_MS` is enforced on the loop's side only. Every `generateText` passes
-it as the SDK's `timeout.toolMs`, which fails a slow call and lets the loop continue
-— but the SDK aborts the signal it hands `execute` rather than racing the promise, so
-a tool that ignores its `abortSignal` runs on. A host that installs something which
-can block (a shell, a container command, a fetch with no ceiling) must still bound it
-at or below that value and honour the signal, or it reintroduces the step-timeout
-kill invisibly, from inside a plugin. The detail is on the constant in `platform.ts`.
+`MAX_TOOL_CALL_MS` is enforced by core for every plugin tool. Each `generateText`
+fires the call's signal `TOOL_CALL_GRACE_MS` early through the SDK's
+`timeout.toolMs`, and `src/runtime/bound-tools.ts` wraps every plugin tool where core
+assembles it, so a call still running at the bound is abandoned and the loop moves on
+whether or not the tool listened. What core cannot stop is the tool's _work_ — the
+SDK aborts a signal, it does not cancel a promise — so a tool whose work must not
+outlive its call (a container command, a write that must not start late) still reads
+its signal and stops it. The detail is on the constants in `platform.ts`.
 
 ---
 
