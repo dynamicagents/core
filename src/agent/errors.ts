@@ -49,12 +49,12 @@ export type CredentialRejectedBy = "provider" | "gateway" | "unknown";
 /**
  * A credential on the path to the model was rejected (HTTP 401 / 403).
  *
- * Deliberately not an `APICallError`: the AI SDK's classifier treats those as
- * potentially retryable, and this never is.
+ * Deliberately not an `APICallError`: that is the shape a provider uses to say a
+ * failure is worth another attempt, and this one never is.
  * {@link file://./inference.ts nonRecoverableKind} maps it to one of the
  * credential kinds — which one depends on {@link source} — and that is what
- * stops the round before the fallback slot; `isTransientAiError` additionally
- * returns `false` so the message text can never be mistaken for a rate limit.
+ * stops the round before the fallback slot. `isTransientAiError` reads it as
+ * deterministic for the same reason it is not an `APICallError`.
  *
  * The round then fails carrying that kind, and the host supplies the
  * operator-facing copy through `HandleTaskDeps.failureCopy` — core owns the

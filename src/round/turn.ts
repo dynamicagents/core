@@ -445,8 +445,6 @@ export interface RunTurnArgs {
   maxSubtasks: number;
   /** `CoreConfig.model.maxOutputTokens`. */
   maxOutputTokens: number;
-  /** `CoreConfig.model.maxRetries` — retries on *this* model before the fallback. */
-  maxRetries: number;
   /** The prompt suffixes, memoized by the DO. See {@link buildTurnInstructions}. */
   instructions: TurnInstructions;
   /** The note a deterministic join appends when it has to disclose gaps. */
@@ -638,12 +636,6 @@ async function attempt(
         // change here.
         ...control.map((c) => hasToolCall(c.name))
       ],
-      // Retries on *this* model before the slot is given up, honouring the
-      // provider's own `retry-after`. Not a duplicate of the fallback: the
-      // fallback answers "this model cannot do it", and a 429 says "not yet" —
-      // and when both slots share a credential the fallback cannot even answer
-      // that. See `ModelConfig.maxRetries`.
-      maxRetries: args.maxRetries,
       abortSignal: args.abortSignal,
       // When a single tool call's signal fires: a grace ahead of
       // {@link file://../platform.ts MAX_TOOL_CALL_MS}, so a tool that honours it

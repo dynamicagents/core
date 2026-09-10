@@ -5,8 +5,8 @@ import { APICallError, RetryError } from "ai";
 import { CredentialRejectedError } from "./errors.js";
 
 /**
- * Shared Workers-AI plumbing for the agent's inference operations — the pieces
- * every model call needs regardless of *which* operation it belongs to.
+ * Shared plumbing for the agent's inference operations — the pieces every model
+ * call needs regardless of *which* operation it belongs to.
  *
  * The two loops themselves are deliberately separate, not layered on a common
  * one: the main agent's Session-coupled round lives in
@@ -28,23 +28,22 @@ export type OnContent = (
   stepIndex: number
 ) => void | Promise<void>;
 
-/** Workers-AI error codes and message fragments that mean "try again later". */
-const TRANSIENT_MESSAGE_FRAGMENTS = [
-  "3040",
-  "3046",
-  "capacity temporarily exceeded",
-  "request timeout",
-  "rate limit",
-  "too many requests",
-  "overloaded",
-  "service unavailable"
-];
-
-/** HTTP statuses worth another attempt: timeout, conflict, throttle, any 5xx. */
-function isRetryableStatus(status: number | undefined): boolean {
-  if (status === undefined) return false;
-  return status === 408 || status === 409 || status === 429 || status >= 500;
-}
+/**
+ * The attempt a call actually ended on.
+ *
+ * The SDK retries a retryable failure on the same model and, when it gives up,
+ * throws a `RetryError` carrying every attempt it made. What the call ended on
+ * is the last of them, and it need not be retryable at all: `maxRetriesExceeded`
+ * is raised on the attempt count without re-reading the error that arrived with
+ * it. So both classifications below unwrap first, or a malformed request behind
+ * two rate limits reads as a rate limit, and a refused credential behind one
+ * reads as neither.
+ */
+const lastAttempt = (err: unknown): unknown => {
+  let error = err;
+  while (RetryError.isInstance(error)) error = error.lastError;
+  return error;
+};
 
 /**
  * Whether an error is a transient availability condition rather than a
@@ -54,29 +53,24 @@ function isRetryableStatus(status: number | undefined): boolean {
  * so the Workflow step retries the whole round, while everything else burns the
  * model slot and hands over to the fallback. Classifying a capacity blip as
  * deterministic is the expensive mistake — it spends both slots on an outage and
- * fails a Task that would have succeeded a second later.
+ * fails a Task that would have succeeded a second later. The opposite mistake
+ * spends a step's retries on a fault no retry can clear, and ends the Task saying
+ * nothing was decided.
  *
- * Structured signals first: the SDK's own `APICallError.isRetryable`, then the
- * status code, then `RetryError` (raised once the SDK's internal backoff is
- * exhausted). The message fragments stay as the last resort for the Workers-AI
- * error codes, which arrive as prose on a plain `Error`.
+ * The model's own verdict decides it and nothing else: `isRetryable` on the
+ * `APICallError` the call ended on. It is the same flag the SDK's in-place retry
+ * reads, so what waits on this model and what retries the step cannot disagree,
+ * and a failure arriving here has already been waited out as far as the provider
+ * said was worth waiting. See {@link file://./model.ts ModelRuntime} for what a
+ * provider owes this.
+ *
+ * Anything that is not an `APICallError` is deterministic. Reading its message
+ * instead is how a `403` whose text said "service unavailable" — an account
+ * blocked until a human clears it — spent a step's retries and abandoned a Task.
  */
 export function isTransientAiError(err: unknown): boolean {
-  // Checked first because a rejected credential's message can carry "rate
-  // limit"-adjacent prose the fragment scan below would misread as transient.
-  // Note that `false` alone does not protect the fallback slot — see
-  // {@link nonRecoverableKind}, which is what actually stops the ladder.
-  if (nonRecoverableKind(err) !== undefined) return false;
-  if (APICallError.isInstance(err)) {
-    if (err.isRetryable) return true;
-    if (isRetryableStatus(err.statusCode)) return true;
-  }
-  if (RetryError.isInstance(err)) return true;
-  if (!(err instanceof Error)) return false;
-  const message = err.message.toLowerCase();
-  return TRANSIENT_MESSAGE_FRAGMENTS.some((fragment) =>
-    message.includes(fragment)
-  );
+  const error = lastAttempt(err);
+  return APICallError.isInstance(error) && error.isRetryable;
 }
 
 /**
@@ -138,13 +132,16 @@ export type RoundFailureKind = "exhausted" | NonRecoverableKind;
  *
  * Keyed on {@link file://./errors.ts CredentialRejectedError}, which is neutral
  * and structurally matched — so a provider outside core raises one and gets this
- * handling with nothing here to change.
+ * handling with nothing here to change. Read through
+ * {@link lastAttempt}, because a credential refused after a rate limit reaches
+ * the ladder wrapped in the SDK's retry error.
  */
 export function nonRecoverableKind(
   err: unknown
 ): NonRecoverableKind | undefined {
-  if (!CredentialRejectedError.isInstance(err)) return undefined;
-  switch (err.source) {
+  const error = lastAttempt(err);
+  if (!CredentialRejectedError.isInstance(error)) return undefined;
+  switch (error.source) {
     case "provider":
       return "credential";
     case "gateway":

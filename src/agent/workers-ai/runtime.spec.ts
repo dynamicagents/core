@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
+import { APICallError, generateText } from "ai";
 import { createWorkersAIModelRuntime, workersAIModels } from "./runtime.js";
+import { isTransientAiError } from "../inference.js";
 import { resolveConfig } from "../../config.js";
 import { TEST_MODELS } from "../../testing/fixtures.js";
 import type { AiEnv } from "../../env.js";
@@ -70,5 +72,74 @@ describe("workers-ai runtime", () => {
     // built up front.
     expect(pair.primary()).toBe(model);
     expect(pair.fallback()).toBe(model);
+  });
+});
+/**
+ * The other half of what this provider is for: how its failures arrive.
+ *
+ * Core classifies a failed model call on structure alone — `isRetryable` on an
+ * `APICallError`, and nothing else (see
+ * {@link file://../inference.ts isTransientAiError}). The binding does not throw
+ * those. It throws plain `Error`s carrying an internal code, and
+ * `workers-ai-provider` is what maps them onto the documented HTTP status the
+ * flag is derived from.
+ *
+ * So that mapping is load-bearing for every round this package runs, and it
+ * lives in a peer dependency. If a bump ever dropped it, nothing else here would
+ * fail: capacity blips would quietly stop being retried, spend the fallback slot
+ * and fail Tasks that a second's wait would have answered. These two assert the
+ * contract in both directions.
+ */
+describe("workers-ai failures", () => {
+  /** A binding that fails the way the platform does: a code inside a sentence. */
+  const failing = (message: string) =>
+    createWorkersAIModelRuntime({
+      ai: {
+        run: async () => {
+          throw new Error(message);
+        }
+      } as unknown as Ai,
+      config
+    })
+      .createModelPair()
+      .primary();
+
+  /**
+   * `maxRetries: 0` is the SDK's own knob, and this is the only place in the
+   * package that sets it: it is what makes the error arrive as the provider
+   * raised it rather than wrapped in a retry error, and skips a backoff the
+   * binding gives no `retry-after` to shorten. Nothing in the runtime configures
+   * retries at all.
+   */
+  const failure = async (message: string): Promise<unknown> => {
+    try {
+      await generateText({
+        model: failing(message),
+        prompt: "hello",
+        maxRetries: 0
+      });
+    } catch (error) {
+      return error;
+    }
+    throw new Error("expected the model call to fail");
+  };
+
+  it("raises a capacity failure as one core waits out", async () => {
+    const error = await failure(
+      "3040: Capacity temporarily exceeded, please try again."
+    );
+
+    expect(APICallError.isInstance(error)).toBe(true);
+    expect((error as APICallError).statusCode).toBe(429);
+    expect(isTransientAiError(error)).toBe(true);
+  });
+
+  it("raises a blocked account as the deterministic failure it is", async () => {
+    // Its sentence reads like an outage and its status does not. Core reads the
+    // status, so the round fails instead of retrying until the step gives up.
+    const error = await failure("3023: Service unavailable for account");
+
+    expect((error as APICallError).statusCode).toBe(403);
+    expect(isTransientAiError(error)).toBe(false);
   });
 });
