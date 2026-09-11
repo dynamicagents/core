@@ -38,6 +38,7 @@ import {
 } from "../agent/control.js";
 import { FINAL_REPLY_TOOL_NAME } from "../agent/final-reply.js";
 import { stepAllowance, type TurnBudget } from "../agent/budget.js";
+import { withFallback } from "../agent/fallback.js";
 import type { ModelPair } from "../agent/model.js";
 import {
   DELEGATE_TOOL_NAME,
@@ -536,7 +537,23 @@ type Attempt =
    * through spends the second slot on work nobody is waiting for any more.
    */
   | { ok: false; aborted: true }
-  | { ok: false; aborted?: false; error: unknown; rejected?: RejectedCall };
+  | {
+      ok: false;
+      aborted?: false;
+      error: unknown;
+      rejected?: RejectedCall;
+      /**
+       * The **call** failed, rather than coming back with something the round
+       * could not use.
+       *
+       * The model a slot is handed carries its own fallback (see
+       * {@link file://../agent/fallback.ts withFallback}), so a call that threw
+       * has already been offered to both models and the second slot has nothing
+       * left to add. A call that came back without an ending has been seen by
+       * one model only, and that is what the slot below is for.
+       */
+      thrown?: boolean;
+    };
 
 /**
  * One attempt against a single model: let it work, and take whichever ending it
@@ -751,7 +768,7 @@ async function attempt(
         )
       };
     }
-    return { ok: false, error };
+    return { ok: false, error, thrown: true };
   }
 }
 
@@ -922,10 +939,35 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
   // attempt's — a call that ran is a call that ran, whichever attempt made it.
   const seen: ModelMessage[] = [];
 
-  for (const slot of ["primary", "fallback"] as const) {
-    const modelId =
-      slot === "primary" ? models.primaryId() : models.fallbackId();
-    const model = slot === "primary" ? models.primary : models.fallback;
+  /**
+   * Which model the first slot's failure belongs to. The fallback once it has
+   * been reached mid-attempt, the primary until then — the only thing that
+   * distinguishes them once the pair answers as one model.
+   */
+  let answering = models.primaryId();
+
+  /**
+   * The first slot is the pair as one model: a call the primary cannot take is
+   * taken by the second at the **step**, so the round keeps the work it has
+   * already done instead of starting over. What the slot loop is still for is
+   * the failure that wrapper cannot see — a call that came back and reached no
+   * ending, where a second model is worth asking.
+   */
+  const resilient = withFallback(models, {
+    onFallback: ({ modelId, error }) => {
+      answering = models.fallbackId();
+      diagnostics.push(`${modelId}: ${String(error)}`);
+      console.warn("[turn] model call failed, trying the other slot", {
+        taskId,
+        round,
+        model: modelId,
+        error: String(error)
+      });
+    }
+  });
+
+  slots: for (const slot of ["primary", "fallback"] as const) {
+    const model = slot === "primary" ? resilient : models.fallback;
 
     // This slot's own view: the round's messages plus whatever repair exchange it
     // accumulates. A fresh copy per slot, so a fallback that is reached is never
@@ -936,6 +978,7 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
       // Both slots draw on the one `args.budget`, which each attempt reads on entry
       // and charges as it works. A fallback attempt is spend, not a free retry —
       // and so is a repair.
+      if (slot === "primary") answering = models.primaryId();
       const outcome = await attempt(
         args,
         control,
@@ -944,6 +987,7 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
         slotMessages,
         seen
       );
+      const modelId = slot === "primary" ? answering : models.fallbackId();
 
       if (!outcome.ok) {
         // Ahead of every other exit, including the non-recoverable one: a
@@ -999,6 +1043,11 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
             error: String(outcome.error)
           }
         );
+
+        // The call itself failed, so both models have already been asked and
+        // there is no second opinion left to buy. Repairing is just as pointless
+        // — there is no ending to correct.
+        if (outcome.thrown) break slots;
 
         // No rejected call means no ending to correct — the attempt produced
         // nothing, which is the failure the fallback slot exists for.

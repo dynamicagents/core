@@ -35,6 +35,12 @@ export {
 } from "./errors.js";
 
 export {
+  withFallback,
+  type FallbackNotice,
+  type FallbackOptions
+} from "./fallback.js";
+
+export {
   createWorkersAIModelRuntime,
   workersAIModels,
   type WorkersAIRuntimeDeps

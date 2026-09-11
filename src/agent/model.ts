@@ -70,24 +70,24 @@ export interface ModelPair {
  * ## What a provider owes the loops when a call fails
  *
  * One thing, and it is not optional: **a failure worth another attempt is an
- * `APICallError` carrying `isRetryable`.** That flag is read twice. The SDK
- * retries it on the same model first, honouring the provider's own
- * `retry-after`; whatever survives that reaches
- * {@link file://./inference.ts isTransientAiError}, which throws it out of the
- * attempt ladder so the Workflow step retries the round instead of spending the
- * fallback slot on it.
+ * `APICallError` carrying `isRetryable`.** A provider that rethrows its
+ * transport's errors raw gets none of what follows, because nothing about a bare
+ * `Error` says whether waiting would have helped.
  *
- * Those answer different questions, and only one of them is the fallback's: a
- * `429` says "not yet", while the fallback answers "this model cannot" — and when
- * both slots sit behind one credential it cannot even answer that. A provider
- * that rethrows its transport's errors raw gets neither behaviour, because
- * nothing about a bare `Error` says which question it is answering, so core reads
- * it as deterministic and spends the fallback proving it.
+ * A failed call is offered to the **other slot** first — the two are different
+ * models, and the second may have capacity the first does not. Only a pair that
+ * both failed reaches {@link file://./inference.ts isTransientAiError}, which
+ * reads the flag again to decide between retrying the whole round and giving up
+ * on it. So the flag answers two different questions at two different levels,
+ * and the same value answers both: see
+ * {@link file://./fallback.ts withFallback} for the first and `isTransientAiError`
+ * for the second.
  *
  * Everything else is deterministic, with one exception the loops have to be told
  * about separately: a refused credential is
- * {@link file://./errors.ts CredentialRejectedError}, which neither a retry nor a
- * fallback can clear.
+ * {@link file://./errors.ts CredentialRejectedError}. Neither slot can clear it —
+ * they sit behind one credential — so it is the one failure that is never offered
+ * to the second.
  */
 export interface ModelRuntime {
   /**
