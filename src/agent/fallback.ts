@@ -46,8 +46,8 @@ export interface FallbackOptions {
 /**
  * A model id is a string the SDK resolves through its gateway when the call is
  * made — after the point where a wrapper would have to exist. There is nothing
- * to wrap, so say so here rather than at the first failure, when the fallback
- * would silently not be there.
+ * to wrap, so each slot says so as it is resolved, rather than leaving a
+ * fallback that was never there to look like one that did not help.
  */
 function built(model: LanguageModel, slot: string) {
   if (typeof model === "string")
@@ -92,16 +92,25 @@ export function withFallback(
   options: FallbackOptions = {}
 ): () => LanguageModel {
   return () => {
-    // Normalized through an empty wrap because `doGenerate` is called directly
-    // below and the SDK's own upgrade helper is not exported. This is what lets
-    // a pair built against an older specification version — every mock in
-    // `/testing`, among others — serve the fallback slot.
-    const fallback = wrapLanguageModel({
-      model: built(pair.fallback(), "fallback"),
-      middleware: {}
-    });
     const fallbackId = pair.fallbackId();
     const primaryId = pair.primaryId();
+
+    /**
+     * The second slot, resolved no earlier than the first call that needs it —
+     * a slot that cannot be built at all must not stop the other one from
+     * answering, which is the whole reason `ModelPair` hands out thunks.
+     *
+     * Normalized through an empty wrap because `doGenerate` is called directly
+     * below and the SDK's own upgrade helper is not exported. That is also what
+     * lets a model built against an older specification version — every mock in
+     * `/testing`, among others — serve this slot.
+     */
+    let resolved: ReturnType<typeof wrapLanguageModel> | undefined;
+    const fallback = () =>
+      (resolved ??= wrapLanguageModel({
+        model: built(pair.fallback(), "fallback"),
+        middleware: {}
+      }));
 
     /**
      * Which model answered, for the caller's diagnostics — and in the pair's own
@@ -111,8 +120,8 @@ export function withFallback(
      * whichever slot served the step. A provider that sets an id of its own is
      * left alone — it knows which revision answered, and the slot does not.
      */
-    const served = (
-      result: Awaited<ReturnType<typeof fallback.doGenerate>>,
+    const served = <T extends { response?: { modelId?: string } }>(
+      result: T,
       modelId: string
     ) => ({
       ...result,
@@ -135,7 +144,7 @@ export function withFallback(
 
           options.onFallback?.({ modelId: primaryId, error });
           try {
-            return served(await fallback.doGenerate(params), fallbackId);
+            return served(await fallback().doGenerate(params), fallbackId);
           } catch (fallbackError) {
             // A credential the second slot refused outranks a blip on the
             // first. Nothing clears it, and preferring the transient error

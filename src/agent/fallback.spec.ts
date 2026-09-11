@@ -293,6 +293,27 @@ describe("withFallback", () => {
     expect(APICallError.isInstance(seen[0]?.error)).toBe(true);
   });
 
+  it("answers from a working primary when the other slot cannot be built", async () => {
+    const primary = countingModel(finalReply("the primary was fine"));
+
+    const result = await generateText({
+      model: withFallback({
+        primary: () => primary.model,
+        fallback: () => {
+          throw new Error("no binding for the fallback slot");
+        },
+        primaryId: () => TEST_MODELS.chatModelId,
+        fallbackId: () => TEST_MODELS.fallbackChatModelId
+      } as unknown as ModelPair)(),
+      prompt: "hello"
+    });
+
+    // Resolving a model can throw — a missing binding, a bad id — and a slot
+    // nobody has needed yet must not take the other one down with it.
+    expect(result.toolCalls[0]?.toolName).toBe("final_reply");
+    expect(primary.calls()).toBe(1);
+  });
+
   it("refuses a slot that hands back a model id instead of a model", async () => {
     const idOnly = {
       primary: () => "some-provider/some-model",
