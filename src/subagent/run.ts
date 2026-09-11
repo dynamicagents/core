@@ -44,7 +44,17 @@ export interface ChunkRunState {
   messages: ModelMessage[];
   /** Total model turns (tool-loop steps) across every chunk — bounds `maxTurns`. */
   turns: number;
-  /** Total `generateText` invocations (including fallbacks and summarization). */
+  /**
+   * Total `generateText` invocations — every attempt this runner made, its
+   * second-model attempts and its budget summary included.
+   *
+   * Invocations, not provider calls, and the gap is not small: one invocation
+   * covers the SDK's retries and whichever model slot ends up serving each step
+   * (see {@link file://../agent/fallback.ts withFallback}). Counting those would
+   * mean instrumenting every `doGenerate`, and this number is read by a human in
+   * the metrics footer, where "how many times the runner asked" is the useful
+   * question.
+   */
   llmCalls: number;
   /** Wall-clock start of the whole execution (for the metrics footer). */
   startedAtMs: number;
@@ -327,15 +337,23 @@ export async function runResumableChunk(
    * fallback, at the step rather than by re-running the chunk. Built per chunk
    * so the count below belongs to this chunk's state.
    */
+  /**
+   * The slot a failed call should be attributed to. Set as each attempt starts
+   * and corrected by the pair, which knows whose error it is finally reporting
+   * — a credential the second slot refused must not send an operator to rotate
+   * the first one's token.
+   */
+  let failedSlot = deps.models.primaryId();
+
   const resilient = withFallback(deps.models, {
     onFallback: ({ modelId, error }) => {
-      // The fallback's call is spend the metrics footer has to count, and
-      // nothing else sees it — a step the fallback rescues returns normally.
-      state.llmCalls += 1;
       console.warn("[recipe-runner] model call failed, trying the other slot", {
         model: modelId,
         error: String(error)
       });
+    },
+    onFailure: ({ modelId }) => {
+      failedSlot = modelId;
     }
   });
 
@@ -349,6 +367,7 @@ export async function runResumableChunk(
     slotId: string
   ): Promise<ChunkAttempt> => {
     state.llmCalls += 1;
+    failedSlot = slotId;
     let result: Awaited<ReturnType<typeof generateText>>;
     try {
       result = await generateText({
@@ -373,7 +392,7 @@ export async function runResumableChunk(
         kind: "failed",
         diagnostic: String(error),
         error,
-        modelId: slotId,
+        modelId: failedSlot,
         thrown: true
       };
     }
@@ -499,9 +518,11 @@ async function summarizeBudget(
     }
   ];
 
+  /** The slot a failed call belongs to — see the work loop's own. */
+  let failedSlot = deps.models.primaryId();
+
   const resilient = withFallback(deps.models, {
     onFallback: ({ modelId, error }) => {
-      state.llmCalls += 1;
       console.warn(
         "[recipe-runner] summary call failed, trying the other slot",
         {
@@ -509,6 +530,9 @@ async function summarizeBudget(
           error: String(error)
         }
       );
+    },
+    onFailure: ({ modelId }) => {
+      failedSlot = modelId;
     }
   });
 
@@ -517,6 +541,7 @@ async function summarizeBudget(
     slotId: string
   ): Promise<ChunkAttempt> => {
     state.llmCalls += 1;
+    failedSlot = slotId;
     let result: Awaited<ReturnType<typeof generateText>>;
     try {
       result = await generateText({
@@ -533,7 +558,7 @@ async function summarizeBudget(
         kind: "failed",
         diagnostic: String(error),
         error,
-        modelId: slotId,
+        modelId: failedSlot,
         thrown: true
       };
     }

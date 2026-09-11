@@ -15,14 +15,17 @@ import {
 import { TEST_MODELS } from "../testing/fixtures.js";
 
 /**
- * The subagent runner's attempt ladder — the chunk loop's and the budget
+ * The subagent runner's attempt ladders — the chunk loop's and the budget
  * summary's.
  *
- * Both shipped from a published package with no coverage at all, which is how
- * the second came to be a near-verbatim copy of the first: nothing failed when
- * they drifted. What these pin is the half a model wrapper cannot own — a call
- * that **succeeded** and produced nothing usable, and the credential that must
- * not reach the second slot.
+ * What they pin is the half a model wrapper cannot own: a call that
+ * **succeeded** and produced nothing usable — truncated at the ceiling, or
+ * empty — where the other model is worth asking. Plus the two failures that
+ * must reach neither slot twice, and which model a failure is reported against.
+ *
+ * The summary ladder is the same decision over a single no-tools call, and it
+ * is covered on its own because a rule that holds in one and not the other
+ * makes a run end differently depending on whether its budget ran out.
  */
 
 const NOW = 1_700_000_000_000;
@@ -95,9 +98,10 @@ describe("the chunk loop's ladder", () => {
       status: "completed",
       modelId: TEST_MODELS.fallbackChatModelId
     });
-    // Every provider call the chunk made, which is what the metrics footer
-    // reports — a spent primary is spend whether or not it produced anything.
-    expect(state.llmCalls).toBe(2);
+    // One invocation, not two: the slot changed inside a single call, which is
+    // the whole point of it. See the field's own doc for why the footer counts
+    // what the runner asked for rather than what the providers were sent.
+    expect(state.llmCalls).toBe(1);
   });
 
   it("reaches the second model when the first answers with nothing", async () => {
@@ -164,6 +168,28 @@ describe("the chunk loop's ladder", () => {
       error: expect.stringContaining("credential")
     });
     expect(fallback.calls()).toBe(0);
+  });
+
+  it("blames the slot that refused the credential, not the one that blipped", async () => {
+    const primary = throwingModel(rateLimit());
+    const fallback = throwingModel(
+      new CredentialRejectedError("invalid bearer token", {
+        source: "provider",
+        status: 401
+      })
+    );
+
+    const { outcome } = await runResumableChunk(
+      null,
+      deps({ models: pair(primary.model, fallback.model) })
+    );
+
+    // `RecipeExecutionResult.modelId` is read by a human deciding which secret
+    // to rotate. Naming the model the chunk *started* on names a working one.
+    expect(outcome.done && outcome.result).toMatchObject({
+      status: "failed",
+      modelId: TEST_MODELS.fallbackChatModelId
+    });
   });
 
   it("throws a transient fault for the step to retry", async () => {

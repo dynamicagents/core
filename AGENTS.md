@@ -227,7 +227,7 @@ ships one implementation inline reads as _the_ runtime with an escape hatch
 rather than as one of N. `src/agent/errors.ts` is its neutral companion: a
 rejected credential is a fact about the path to a model, not about any vendor.
 
-Three rules follow, and they are what keep a third provider cheap:
+The rules that follow are what keep a third provider cheap:
 
 - **Nothing neutral may import a provider directory.** `inference.ts` classifies
   a dead credential by `CredentialRejectedError`, which is structurally matched,

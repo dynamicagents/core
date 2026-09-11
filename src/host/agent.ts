@@ -286,10 +286,10 @@ export abstract class DynamicAgent<
     const { session, model } = this.config;
     return (this.session ??= buildAgentSession(
       this,
-      // The pair, not the primary. Compaction is the one model call in the DO
-      // with no ladder of its own — it runs inside the Session, where there is
-      // nowhere to put one — so a primary that cannot take it used to fail the
-      // compaction outright and leave the history unshortened.
+      // The pair, not the primary. Compaction runs inside the Session, where
+      // there is nowhere to put an attempt ladder, so the second slot reaches it
+      // through the model or not at all — and a compaction that fails leaves the
+      // history unshortened, to be attempted again with more of it.
       withFallback(this.modelPair(), {
         onFallback: ({ modelId, error }) => {
           console.warn(

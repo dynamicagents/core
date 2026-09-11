@@ -4,21 +4,19 @@ import { isTransientAiError, nonRecoverableKind } from "./inference.js";
 import type { ModelPair } from "./model.js";
 
 /**
- * The fallback slot, moved inside the model.
+ * The fallback slot, inside the model.
  *
- * Every loop in the train used to write its own primary→fallback ladder, and the
- * error half of each was the same three lines. Worse, two of them could only
- * recover by *restarting*: the round handed the fallback the messages it began
- * with, so a primary that cloned a repository and then failed made the fallback
- * clone it again. A model that carries its own fallback recovers at the step
- * instead — the SDK hands the fallback the same call the primary was given, with
- * every completed step and tool result already in it, and the loop above never
- * learns that the slot changed.
+ * A pair wrapped here recovers at the **step**: the SDK hands the second slot
+ * the same call the first was given, with every completed step and tool result
+ * already in it, and the loop above never learns the slot changed. Recovering a
+ * level up cannot do that. It can only run the call again from the top, which
+ * repeats every side effect the first attempt already had — a round that cloned
+ * a repository and then lost its model clones it twice.
  *
- * What that leaves each ladder is the failure a second model genuinely answers
- * and this cannot: a call that **succeeded** and produced nothing usable — no
- * control call, output cut off at the token ceiling, an empty summary. Those
- * never reach `doGenerate`'s rejection, so they are still the loop's to handle.
+ * What that leaves a loop's own ladder is the failure a second model genuinely
+ * answers and this one cannot: a call that **succeeded** and produced nothing
+ * usable — no control call, output cut off at the token ceiling, an empty
+ * summary. None of those reaches `doGenerate`'s rejection.
  */
 
 /** The model that failed, and what it failed with, for the caller to log. */
@@ -41,6 +39,19 @@ export interface FallbackOptions {
    * all.
    */
   onFallback?: (notice: FallbackNotice) => void;
+  /**
+   * Fires with the error the call is about to throw, and the slot it came from
+   * — which is not always the slot that was asked first.
+   *
+   * A caller that labels a failure with the model it *started* on will name the
+   * primary for a credential the fallback refused, and send an operator to
+   * rotate a working secret. That is the misdiagnosis
+   * {@link file://./errors.ts CredentialRejectedBy} exists to prevent, so the
+   * slot has to travel with the error rather than be inferred from the call.
+   *
+   * Silent on a cancelled call: nothing failed.
+   */
+  onFailure?: (notice: FallbackNotice) => void;
 }
 
 /**
@@ -131,6 +142,12 @@ export function withFallback(
       }
     });
 
+    /** Announce whose error won, then hand it back to be thrown. */
+    const failed = (modelId: string, error: unknown) => {
+      options.onFailure?.({ modelId, error });
+      return error;
+    };
+
     const middleware: LanguageModelMiddleware = {
       wrapGenerate: async ({ doGenerate, params }) => {
         try {
@@ -140,7 +157,7 @@ export function withFallback(
           // a rejection, and spending the second slot on work nobody is waiting
           // for is exactly what cancelling asked us not to do.
           if (params.abortSignal?.aborted) throw error;
-          if (nonRecoverableKind(error)) throw error;
+          if (nonRecoverableKind(error)) throw failed(primaryId, error);
 
           options.onFallback?.({ modelId: primaryId, error });
           try {
@@ -150,10 +167,12 @@ export function withFallback(
             // first. Nothing clears it, and preferring the transient error
             // would send the step back to retry a token that is already dead —
             // exactly the spend {@link nonRecoverableKind} exists to prevent.
-            if (nonRecoverableKind(fallbackError)) throw fallbackError;
-            if (isTransientAiError(fallbackError)) throw fallbackError;
-            if (isTransientAiError(error)) throw error;
-            throw fallbackError;
+            if (nonRecoverableKind(fallbackError))
+              throw failed(fallbackId, fallbackError);
+            if (isTransientAiError(fallbackError))
+              throw failed(fallbackId, fallbackError);
+            if (isTransientAiError(error)) throw failed(primaryId, error);
+            throw failed(fallbackId, fallbackError);
           }
         }
       }

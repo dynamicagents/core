@@ -136,7 +136,8 @@ describe("withFallback", () => {
 
   it("hands a fallback reached mid-call the work the primary already did", async () => {
     let pings = 0;
-    // Works once, then fails: the shape that used to cost a round its progress.
+    // Works once, then fails: the shape where recovering a level up would run
+    // the whole call again, tool included.
     const primary = scripted("tool-call", badRequest());
     const fallback = scripted("reply");
 
@@ -233,6 +234,46 @@ describe("withFallback", () => {
     // sends the step back to present a token that is already dead — once per
     // retry — and ends the task saying capacity was the problem.
     expect(CredentialRejectedError.isInstance(error)).toBe(true);
+  });
+
+  it("names the slot whose error it reports, not the one it started on", async () => {
+    const seen: Array<{ modelId: string; error: unknown }> = [];
+    const primary = throwingModel(rateLimit());
+    const fallback = throwingModel(
+      new CredentialRejectedError("invalid bearer token", {
+        source: "provider",
+        status: 401
+      })
+    );
+
+    await generateText({
+      model: withFallback(pair(primary.model, fallback.model), {
+        onFailure: (notice) => seen.push(notice)
+      })(),
+      prompt: "hello"
+    }).catch(() => undefined);
+
+    // A caller that labelled this with the model it asked first would send an
+    // operator to rotate the primary's token, which is working.
+    expect(seen.at(-1)?.modelId).toBe(TEST_MODELS.fallbackChatModelId);
+  });
+
+  it("names the primary when the primary's error is the one reported", async () => {
+    const seen: Array<{ modelId: string; error: unknown }> = [];
+    const primary = throwingModel(rateLimit());
+    const fallback = throwingModel(badRequest());
+
+    await generateText({
+      model: withFallback(pair(primary.model, fallback.model), {
+        onFailure: (notice) => seen.push(notice)
+      })(),
+      prompt: "hello",
+      maxRetries: 0
+    }).catch(() => undefined);
+
+    // The transient one wins here, and it is the first slot's — so the slot has
+    // to travel with the error rather than be inferred from the order.
+    expect(seen.at(-1)?.modelId).toBe(TEST_MODELS.chatModelId);
   });
 
   it("leaves the fallback unspent on a refused credential", async () => {

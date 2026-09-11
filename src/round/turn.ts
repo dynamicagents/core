@@ -963,6 +963,11 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
         model: modelId,
         error: String(error)
       });
+    },
+    // Last word, and it can point back at the primary: the error a failed pair
+    // reports is the one worth acting on, not the one that happened last.
+    onFailure: ({ modelId }) => {
+      answering = modelId;
     }
   });
 
