@@ -8,7 +8,7 @@ import {
 } from "drizzle-orm/sqlite-core";
 
 /**
- * Core's three tables. All live in the caller's agent DO SQLite
+ * Core's tables. All live in the caller's agent DO SQLite
  * (`this.ctx.storage`), so a row is unreachable from any other caller by
  * construction.
  *
@@ -134,5 +134,45 @@ export const roundObservations = sqliteTable(
   (table) => [
     primaryKey({ columns: [table.taskId, table.round] }),
     index("idx_round_observations_created_at").on(table.createdAt)
+  ]
+);
+
+/**
+ * A question a round put to the person the Task is for, and what came back.
+ *
+ * One row per `(task_id, round)`, because asking ends the round that asks. It is
+ * written when the round decides to ask, stamped when the question is posted, and
+ * closed by whichever of an answer, an expiry or a cancel lands first — every
+ * transition out of `awaiting` is guarded on it, so the others find it closed.
+ *
+ * Here rather than on the Workflow event, because the event only wakes the run.
+ * A gatekeeper may deliver the same answer twice, and a wake could be lost, so
+ * this row is the one place that says what the answer was.
+ */
+export const humanRequests = sqliteTable(
+  "human_requests",
+  {
+    /** The gatekeeper's correlation key too: its answer names this id. */
+    requestId: text("request_id").primaryKey(),
+    taskId: text("task_id").notNull(),
+    /** Main-agent round that asked (0-based). */
+    round: integer("round").notNull(),
+    /** JSON `HitlRequestData` — exactly what the person is shown. */
+    requestJson: text("request_json").notNull(),
+    /** `awaiting` until an answer, an expiry or a cancel closes it. */
+    status: text("status").notNull(),
+    /** JSON of the answer as the gatekeeper sent it; null until answered. */
+    answerJson: text("answer_json"),
+    /** The message that answered, so its retry is known for the same one. */
+    answerMessageId: text("answer_message_id"),
+    /** When the question was posted: where the uncharged wait begins. */
+    parkedAt: integer("parked_at"),
+    /** When an answer or an expiry closed it. */
+    closedAt: integer("closed_at"),
+    createdAt: integer("created_at").notNull()
+  },
+  (table) => [
+    uniqueIndex("idx_human_requests_task_round").on(table.taskId, table.round),
+    index("idx_human_requests_created_at").on(table.createdAt)
   ]
 );

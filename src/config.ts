@@ -78,11 +78,11 @@ export interface AgentLimits {
    */
   maxTurns: number;
   /**
-   * Measured from the first durable step. Note for whoever implements
-   * escalation: this must be **rebased** after a `step.waitForEvent(...)`
-   * returns, or a human's thinking time is charged to the agent and a task that
-   * asks a question at minute 5 is dead before the answer arrives. Turns need no
-   * such care — waiting costs none.
+   * Measured from the first durable step, **less the time the Task spent waiting
+   * on a person's answer**. That time is the person's: charged to the agent, a
+   * Task that asks a question at minute 5 would be dead before the answer
+   * arrived. Turns need no such care — waiting spends none. The subtraction is
+   * in {@link file://./round/workflow.ts runHandleTask}.
    */
   maxWallMs: number;
 }

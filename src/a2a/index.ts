@@ -8,8 +8,8 @@
  *
  * ## The wire values come from `@dynamicagents/g2a-protocol`
  *
- * Claim names, the algorithm, the well-known paths and the audience rule are a
- * two-sided contract with a token issuer, and the issuer — slack-gatekeeper — is
+ * Claim names, the algorithm, the well-known paths, the audience rule and the
+ * human-in-the-loop part names are a two-sided contract with a token issuer, and the issuer — slack-gatekeeper — is
  * not an agent and must not import this package. They live in a zero-dependency
  * leaf both sides depend on, and are re-exported here so an agent's imports are
  * unchanged: `IDENTITY_CLAIM`, `TENANT_CLAIM`, `A2A_RPC_PATH` and
@@ -23,8 +23,29 @@ export {
   A2A_JWS_ALG,
   audienceFor,
   endpointUrl,
-  jwksUrl
+  jwksUrl,
+  HITL_APPROVE_OPTION_ID,
+  HITL_REJECT_OPTION_ID,
+  HITL_REQUEST_KINDS,
+  HITL_REQUEST_TYPE,
+  HITL_RESPONSE_TYPE,
+  HITL_TIMEOUT_TYPE,
+  type HitlOption,
+  type HitlRequestData,
+  type HitlRequestKind,
+  type HitlResponseData,
+  type HitlTimeoutData
 } from "@dynamicagents/g2a-protocol";
+
+export {
+  buildInputRequiredTask,
+  humanEventType,
+  humanRequestId,
+  readHumanReply,
+  type HumanAnswer,
+  type HumanReply,
+  type TurnWake
+} from "./hitl.js";
 
 export {
   IDENTITY_CLAIM,
@@ -92,6 +113,7 @@ export {
 
 export {
   textPart,
+  dataPart,
   partsText,
   textOf,
   agentTextMessage,
@@ -110,11 +132,13 @@ export {
   ignoreAlreadyExists,
   type AcceptedTurn,
   type ExecutorConfig,
+  type TurnResumer,
   type TurnStarter
 } from "./executor.js";
 
 export type {
   AgentResolver,
+  AnsweredTask,
   TaskAgent,
   TaskListPage,
   TaskListQuery

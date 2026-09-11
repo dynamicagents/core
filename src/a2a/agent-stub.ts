@@ -1,6 +1,7 @@
 import type { Task, TaskState } from "@a2a-js/sdk";
 import type { GatekeeperIdentity } from "./verify.js";
 import type { PlainTask } from "./task.js";
+import type { HumanReply, TurnWake } from "./hitl.js";
 
 /**
  * The task-lifecycle surface core calls on an agent Durable Object, declared
@@ -38,6 +39,33 @@ export interface TaskAgent {
   cancelTask(taskId: string): Promise<PlainTask | null>;
 
   listTasks?(query: TaskListQuery): Promise<TaskListPage>;
+
+  /**
+   * Record a person's reply to a question one of this caller's Tasks asked, and
+   * say which run to wake. Idempotent on `messageId`: the gatekeeper retries a
+   * continuation like any other message.
+   *
+   * Optional, like `listTasks`. An agent whose Tasks never ask leaves it out.
+   */
+  answerTask?(input: {
+    taskId: string;
+    messageId: string;
+    reply: HumanReply;
+  }): Promise<AnsweredTask>;
+
+  /**
+   * The run to wake for a Task canceled while it waited on a question, or `null`
+   * when it was not waiting. Optional for the same reason as `answerTask`.
+   */
+  humanWake?(taskId: string): Promise<TurnWake | null>;
+}
+
+/** What recording a reply did, for the executor to act on. */
+export interface AnsweredTask {
+  /** The Task as it now stands — what the continuation is answered with. */
+  task: PlainTask | null;
+  /** The run to wake, or `null` when the reply named no question of this Task. */
+  wake: TurnWake | null;
 }
 
 export interface TaskListQuery {

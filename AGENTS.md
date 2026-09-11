@@ -135,7 +135,7 @@ cannot strand in-flight runs.
 
 ### The migration journal
 
-`src/db/schema.ts` holds core's three tables and **only** core's — the journal is
+`src/db/schema.ts` holds core's tables and **only** core's — the journal is
 a flat integer sequence over one shared `__drizzle_migrations` table, and two
 independently-versioned packages writing to it will collide. A plugin owns its
 tables through `PluginStore`.

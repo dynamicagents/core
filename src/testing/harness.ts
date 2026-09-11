@@ -1,6 +1,8 @@
 import { A2A_PROTOCOL_VERSION } from "@a2a-js/sdk";
 import {
   A2A_RPC_PATH,
+  HITL_RESPONSE_TYPE,
+  HITL_TIMEOUT_TYPE,
   NOTIFICATION_TOKEN_HEADER,
   endpointUrl,
   jwksUrl
@@ -87,6 +89,23 @@ export interface AgentHarness {
    * `undefined`. Use {@link rpc} for the refusal cases.
    */
   send(text: string, options?: { taskId?: string }): Promise<PlainTask>;
+  /**
+   * Answer a question a Task asked, the way the gatekeeper does once a person
+   * picks an option or types a reply, and return the Task the agent hands back.
+   *
+   * The message id is derived as the gatekeeper derives an answer's, so calling
+   * this twice is the gatekeeper retrying, not a second answer. Throws on a
+   * JSON-RPC error, like {@link send}.
+   */
+  answer(
+    taskId: string,
+    requestId: string,
+    answer:
+      { optionId: string; text?: string } | { optionId?: string; text: string },
+    options?: { answeredBy?: string }
+  ): Promise<PlainTask>;
+  /** Tell a Task its question expired unanswered, as the gatekeeper does. */
+  timeout(taskId: string, requestId: string): Promise<PlainTask>;
   /**
    * One raw JSON-RPC call with a valid gatekeeper token, returning the `Response`.
    * For specs about what the edge *refuses*.
@@ -176,6 +195,58 @@ export function createAgentHarness<TEnv>(
       options.env
     ) as Promise<Response>;
 
+  /**
+   * One `SendMessage` carrying this harness's push config, returning the Task
+   * the agent accepted it with — or throwing with the agent's own refusal.
+   */
+  const sendMessage = async (
+    message: Record<string, unknown>
+  ): Promise<PlainTask> => {
+    const res = await rpc({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "SendMessage",
+      // `SendMessageRequest` is **flat**: `tenant`, `message`, `configuration`,
+      // `metadata`. There is no `request` wrapper, and wrapping is silent when
+      // you do it — `fromJSON` drops unknown keys rather than rejecting them,
+      // so the whole turn decodes to an empty message with no push config and
+      // the agent refuses it for "missing" fields the caller did send.
+      //
+      // This harness shipped with exactly that envelope. Nothing caught it,
+      // because nothing in this package drove the harness against a real
+      // Worker until `harness.spec.ts` — which is the argument for that spec
+      // existing, made by the code it tests.
+      params: {
+        tenant,
+        message,
+        configuration: {
+          // Required by the accept-and-notify contract: an agent that replies
+          // out of band and is given nowhere to call back has accepted a turn
+          // it can never answer.
+          taskPushNotificationConfig: { url: pushUrl, token: pushToken }
+        }
+      }
+    });
+
+    const envelope = await res.json<{
+      error?: { code: number; message: string };
+      result?: { task?: PlainTask } & PlainTask;
+    }>();
+    if (envelope.error) {
+      throw new Error(
+        `SendMessage was refused (${envelope.error.code}): ${envelope.error.message}`
+      );
+    }
+    const result = envelope.result;
+    const task = (result?.task ?? result) as PlainTask | undefined;
+    if (!task) {
+      throw new Error(
+        `SendMessage returned no task: ${JSON.stringify(envelope)}`
+      );
+    }
+    return task;
+  };
+
   return {
     endpoint,
     pushUrl,
@@ -183,60 +254,52 @@ export function createAgentHarness<TEnv>(
     token,
     rpc,
 
-    async send(text, sendOptions = {}) {
-      const messageId = crypto.randomUUID();
-      const res = await rpc({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "SendMessage",
-        // `SendMessageRequest` is **flat**: `tenant`, `message`, `configuration`,
-        // `metadata`. There is no `request` wrapper, and wrapping is silent when
-        // you do it — `fromJSON` drops unknown keys rather than rejecting them,
-        // so the whole turn decodes to an empty message with no push config and
-        // the agent refuses it for "missing" fields the caller did send.
-        //
-        // This harness shipped with exactly that envelope. Nothing caught it,
-        // because nothing in this package drove the harness against a real
-        // Worker until `harness.spec.ts` — which is the argument for that spec
-        // existing, made by the code it tests.
-        params: {
-          tenant,
-          message: {
-            messageId,
-            role: "ROLE_USER",
-            // `parts`, not `content`. The decoded `Message` exposes `parts`, and
-            // `fromJSON` silently yields an empty list for anything else — so a
-            // turn sent under the wrong key arrives as a message with no text
-            // and the agent answers a blank prompt.
-            parts: [{ text }],
-            ...(sendOptions.taskId ? { taskId: sendOptions.taskId } : {})
-          },
-          configuration: {
-            // Required by the accept-and-notify contract: an agent that replies
-            // out of band and is given nowhere to call back has accepted a turn
-            // it can never answer.
-            taskPushNotificationConfig: { url: pushUrl, token: pushToken }
-          }
-        }
+    send(text, sendOptions = {}) {
+      return sendMessage({
+        messageId: crypto.randomUUID(),
+        role: "ROLE_USER",
+        // `parts`, not `content`. The decoded `Message` exposes `parts`, and
+        // `fromJSON` silently yields an empty list for anything else — so a
+        // turn sent under the wrong key arrives as a message with no text and
+        // the agent answers a blank prompt.
+        parts: [{ text }],
+        ...(sendOptions.taskId ? { taskId: sendOptions.taskId } : {})
       });
+    },
 
-      const envelope = await res.json<{
-        error?: { code: number; message: string };
-        result?: { task?: PlainTask } & PlainTask;
-      }>();
-      if (envelope.error) {
-        throw new Error(
-          `SendMessage was refused (${envelope.error.code}): ${envelope.error.message}`
-        );
-      }
-      const result = envelope.result;
-      const task = (result?.task ?? result) as PlainTask | undefined;
-      if (!task) {
-        throw new Error(
-          `SendMessage returned no task: ${JSON.stringify(envelope)}`
-        );
-      }
-      return task;
+    answer(taskId, requestId, answer, answerOptions = {}) {
+      return sendMessage({
+        messageId: `${pushToken}:r:${requestId}`,
+        role: "ROLE_USER",
+        taskId,
+        parts: [
+          { text: answer.text ?? answer.optionId },
+          {
+            data: {
+              type: HITL_RESPONSE_TYPE,
+              requestId,
+              ...answer,
+              answeredBy: answerOptions.answeredBy ?? "harness-person"
+            },
+            mediaType: "application/json"
+          }
+        ]
+      });
+    },
+
+    timeout(taskId, requestId) {
+      return sendMessage({
+        messageId: `${pushToken}:t:${requestId}`,
+        role: "ROLE_USER",
+        taskId,
+        parts: [
+          { text: "(No response was received within the allotted time.)" },
+          {
+            data: { type: HITL_TIMEOUT_TYPE, requestId },
+            mediaType: "application/json"
+          }
+        ]
+      });
     },
 
     interceptGatekeeper() {

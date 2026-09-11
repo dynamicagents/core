@@ -20,6 +20,7 @@ import {
   finalReplyMessageId,
   parseRoundAckMessageId,
   roundAckMessageId,
+  roundAskMessageId,
   sessionText,
   taskUserMessageId
 } from "../agent/history.js";
@@ -76,13 +77,12 @@ import {
  *   results. Every round gets them except the one the budget forced — looking
  *   something up before answering is ordinary work, not a special phase, right up
  *   until there is nothing left to spend on it (see {@link RoundMode}).
- * - **Control tools** — `delegate` and `final_reply` — have no `execute`. The call
- *   *is* the round's output: the loop halts on it, and for `delegate` the Workflow
- *   performs it durably. Because the loop halts, the SDK never validates their
- *   input either, so each one checks its own and the round repairs what it rejects
- *   — see `agent/control.ts`. A future `escalate` (ask the human) is the same
- *   shape: another entry there, another variant of {@link TurnDecision}, another
- *   `case` in the Workflow's switch.
+ * - **Control tools** — `delegate`, `final_reply`, and `ask_user` where the
+ *   agent may ask — have no `execute`. The call *is* the round's output: the loop
+ *   halts on it, and for `delegate` and `ask_user` the Workflow performs it
+ *   durably. Because the loop halts, the SDK never validates their input either,
+ *   so each one checks its own and the round repairs what it rejects — see
+ *   `agent/control.ts`.
  *
  * Nothing forces the *choice*, and that is deliberate. An earlier design pinned
  * `toolChoice` to a specific tool to force delegation in one phase and forbid it in
@@ -153,7 +153,8 @@ export function buildTurnInstructions(
   });
   const open =
     policy.roundContract({ typeKeys: types.keys, maxSubtasks }) +
-    (guidance ? `\n\n${guidance}` : "");
+    (guidance ? `\n\n${guidance}` : "") +
+    (policy.human?.askGuidance ?? "");
   return {
     open,
     final: {
@@ -258,6 +259,10 @@ function delegationPair(
  * them a round inherits only its predecessors' claims, which is how thirteen
  * rounds each re-discovered that an SSH clone URL is refused.
  *
+ * A round that **asked** is anchored the same way on its question, since it has
+ * no acknowledgment: its observations come just before the question, and the
+ * answer follows it as the person's own turn.
+ *
  * Everything here is ephemeral — scaffolding for this call only. Reference text is
  * snapshotted from the catalog, so no `[ref N]` prefix ever reaches a Subtask, and
  * the Session never sees any of this markup.
@@ -283,6 +288,12 @@ export function renderTurnMessages(
   const ackIds = new Map(
     [...carried].map((round) => [roundAckMessageId(taskId, round), round])
   );
+  const askIds = new Map(
+    [...observations.keys()].map((round) => [
+      roundAskMessageId(taskId, round),
+      round
+    ])
+  );
 
   const catalog: ReferenceCatalogEntry[] = [];
   const messages: ModelMessage[] = [];
@@ -292,6 +303,14 @@ export function renderTurnMessages(
     if (message.role !== "user" && message.role !== "assistant") continue;
     const role = message.role;
     const text = sessionText(message);
+
+    // In front of the question, then on to render the question itself: it is
+    // conversation the person saw and answered, not scaffolding.
+    const asked = askIds.get(message.id);
+    if (asked !== undefined) {
+      anchored.add(asked);
+      messages.push(...(observations.get(asked) ?? []));
+    }
 
     const round = ackIds.get(message.id);
     if (round !== undefined) {
@@ -444,6 +463,11 @@ export interface RunTurnArgs {
   types: SubtaskTypeRegistry;
   /** `CoreConfig.maxSubtasks`, the per-round fan-out bound. */
   maxSubtasks: number;
+  /**
+   * Whether this agent may stop a round to ask the person — its policy's
+   * `human`. Never on a `final` round, whatever this says. Absent means no.
+   */
+  canAsk?: boolean;
   /** `CoreConfig.model.maxOutputTokens`. */
   maxOutputTokens: number;
   /** The prompt suffixes, memoized by the DO. See {@link buildTurnInstructions}. */
@@ -500,6 +524,17 @@ export type RunTurnOutcome =
       observations: ModelMessage[];
     }
   | { status: "failed"; kind: RoundFailureKind; error: string }
+  /**
+   * The round asked the person something and ended there. Nothing goes into the
+   * Session yet — the question is appended together with its answer — so the
+   * caller keeps the question and the observations, and the Workflow asks.
+   */
+  | {
+      status: "parked";
+      question: string;
+      options?: string[];
+      observations: ModelMessage[];
+    }
   /**
    * The round was cancelled while a model call was in flight. Separate from
    * `failed` because the models did nothing wrong and a human is owed no
@@ -615,10 +650,10 @@ async function attempt(
   // `delegate` and `final_reply` stay on either way — they *are* endings.
   const workTools: ToolSet = final || stepBudget <= 1 ? {} : args.tools;
   const content = args.onContent
-    ? buildIntermediateContentHandler(args.onContent, [
-        DELEGATE_TOOL_NAME,
-        FINAL_REPLY_TOOL_NAME
-      ])
+    ? buildIntermediateContentHandler(
+        args.onContent,
+        control.map((c) => c.name)
+      )
     : undefined;
 
   try {
@@ -916,6 +951,7 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
   const control = controlTools({
     catalog,
     delegable: args.mode !== "final",
+    askable: args.canAsk === true && args.mode !== "final",
     types: args.types,
     maxSubtasks: args.maxSubtasks
   });
@@ -1098,6 +1134,20 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
           )
         );
         return { status: "replied", reply };
+      }
+
+      if (outcome.decision.kind === "ask") {
+        return {
+          status: "parked",
+          question: outcome.decision.question,
+          ...(outcome.decision.options
+            ? { options: outcome.decision.options }
+            : {}),
+          observations: captureObservations(seen, {
+            round,
+            controlNames: control.map((c) => c.name)
+          })
+        };
       }
 
       const stored = await appendOnce(

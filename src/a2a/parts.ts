@@ -18,6 +18,9 @@ import type { PlainMessage, PlainPart } from "./task.js";
 /** Media type stamped on the text parts this agent emits. */
 const TEXT_MEDIA_TYPE = "text/plain";
 
+/** Media type stamped on the structured parts this agent emits. */
+const DATA_MEDIA_TYPE = "application/json";
+
 /**
  * A `text` part carrying `text`. Typed as the narrowed {@link PlainPart} (which
  * widens to `Part` for free) so a message built here can cross the DO RPC
@@ -29,6 +32,23 @@ export function textPart(text: string): PlainPart {
     metadata: undefined,
     filename: "",
     mediaType: TEXT_MEDIA_TYPE
+  };
+}
+
+/**
+ * A `data` part carrying a structured value.
+ *
+ * The SDK's own `Part`, not {@link PlainPart}: that one admits only text, which
+ * is what lets a Task cross Durable Object RPC typed (see
+ * {@link file://./task.ts}). Whatever carries one of these is built and sent from
+ * inside the object that holds it.
+ */
+export function dataPart(value: object): Part {
+  return {
+    content: { $case: "data", value },
+    metadata: undefined,
+    filename: "",
+    mediaType: DATA_MEDIA_TYPE
   };
 }
 

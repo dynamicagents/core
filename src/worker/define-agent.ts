@@ -6,6 +6,7 @@ import {
   workflowIdForMessage,
   type AcceptedTurn
 } from "../a2a/executor.js";
+import type { TurnWake } from "../a2a/hitl.js";
 
 /**
  * One agent's wiring, declared once.
@@ -72,6 +73,7 @@ export interface MountedAgent<TEnv> {
   manifest: AgentManifest;
   resolveAgent(env: TEnv, identity: GatekeeperIdentity): TaskAgent;
   startTurn(env: TEnv, turn: AcceptedTurn): Promise<void>;
+  resumeTurn?(env: TEnv, wake: TurnWake): Promise<void>;
 }
 
 /**
@@ -140,6 +142,15 @@ export interface AgentDefinition<
    * exactly that race and rethrows everything else.
    */
   startTurn(env: TEnv, turn: AcceptedTurn): Promise<void>;
+  /**
+   * Wake this agent's run for a Task parked on a question.
+   *
+   * The instance id comes from the same message id {@link startTurn} created it
+   * under, so this cannot wake a run other than the one that asked. The event
+   * carries nothing: the Durable Object holds the answer, and the run reads it
+   * from there.
+   */
+  resumeTurn(env: TEnv, wake: TurnWake): Promise<void>;
 }
 
 export function defineAgent<TEnv, TAgent extends Rpc.DurableObjectBranded>(
@@ -164,6 +175,13 @@ export function defineAgent<TEnv, TAgent extends Rpc.DurableObjectBranded>(
           params: { ...turn }
         })
       );
+    },
+
+    async resumeTurn(env, wake) {
+      const instance = await options
+        .workflow(env)
+        .get(workflowIdForMessage(wake.messageId));
+      await instance.sendEvent({ type: wake.eventType, payload: {} });
     }
   };
 }
