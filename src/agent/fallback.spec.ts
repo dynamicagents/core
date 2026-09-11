@@ -315,6 +315,32 @@ describe("withFallback", () => {
     expect(fallback.calls()).toBe(0);
   });
 
+  it("reports a cancel on the fallback as a cancel, not as the primary's blip", async () => {
+    const seen: unknown[] = [];
+    const controller = new AbortController();
+    const primary = throwingModel(rateLimit());
+    const fallback = new MockLanguageModelV3({
+      doGenerate: async () => {
+        controller.abort();
+        throw new DOMException("aborted", "AbortError");
+      }
+    });
+
+    const error = await generateText({
+      model: withFallback(pair(primary.model, fallback), {
+        onFailure: (notice) => seen.push(notice)
+      })(),
+      prompt: "hello",
+      abortSignal: controller.signal
+    }).catch((e: unknown) => e);
+
+    // Ranked like a failure, the cancel loses to the primary's 429 — which says
+    // "worth retrying", so work nobody is waiting for gets asked for again.
+    expect(APICallError.isInstance(error)).toBe(false);
+    expect(seen).toHaveLength(0);
+    expect(primary.calls()).toBe(1);
+  });
+
   it("reports the spent primary, which nothing else records", async () => {
     const seen: Array<{ modelId: string; error: unknown }> = [];
     const primary = throwingModel(badRequest());
@@ -353,6 +379,34 @@ describe("withFallback", () => {
     // nobody has needed yet must not take the other one down with it.
     expect(result.toolCalls[0]?.toolName).toBe("final_reply");
     expect(primary.calls()).toBe(1);
+  });
+
+  it("hands a primary that cannot be built to the fallback", async () => {
+    const seen: string[] = [];
+    const fallback = countingModel(finalReply("the fallback answered"));
+
+    const result = await generateText({
+      model: withFallback(
+        {
+          primary: () => {
+            throw new Error("no binding for the primary slot");
+          },
+          fallback: () => fallback.model,
+          primaryId: () => TEST_MODELS.chatModelId,
+          fallbackId: () => TEST_MODELS.fallbackChatModelId
+        } as unknown as ModelPair,
+        { onFallback: ({ modelId }) => seen.push(modelId) }
+      )(),
+      prompt: "hello"
+    });
+
+    // A slot that cannot be built is a slot that failed, and the other one is
+    // asked — the same rule, whichever of the two it is.
+    expect(fallback.calls()).toBe(1);
+    expect(result.finalStep.response.modelId).toBe(
+      TEST_MODELS.fallbackChatModelId
+    );
+    expect(seen).toEqual([TEST_MODELS.chatModelId]);
   });
 
   it("refuses a slot that hands back a model id instead of a model", async () => {

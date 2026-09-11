@@ -127,17 +127,6 @@ type ChunkAttempt =
       diagnostic: string;
       error?: unknown;
       modelId: string;
-      /**
-       * The **call** failed, rather than returning something unusable.
-       *
-       * That is the whole of what decides whether a second attempt is worth
-       * making. The model this runner is handed carries its own fallback (see
-       * {@link file://../agent/fallback.ts withFallback}), so a call that threw
-       * has already been offered to both slots and there is no second opinion
-       * left to buy. A call that came back truncated or empty has been seen by
-       * one model only.
-       */
-      thrown?: boolean;
     };
 
 // The window mechanics live in `/agent` now: `/round` needs the identical rules
@@ -333,11 +322,6 @@ export async function runResumableChunk(
   ];
 
   /**
-   * The pair as one model: a call the primary cannot take is taken by the
-   * fallback, at the step rather than by re-running the chunk. Built per chunk
-   * so the count below belongs to this chunk's state.
-   */
-  /**
    * The slot a failed call should be attributed to. Set as each attempt starts
    * and corrected by the pair, which knows whose error it is finally reporting
    * — a credential the second slot refused must not send an operator to rotate
@@ -345,8 +329,20 @@ export async function runResumableChunk(
    */
   let failedSlot = deps.models.primaryId();
 
+  /**
+   * The primary's failures the pair covered for during the attempt under way,
+   * by handing the call to the fallback. Reset as each attempt starts, and read
+   * by the ladder below to tell whether the fallback has been asked already.
+   */
+  let absorbed: unknown[] = [];
+
+  /**
+   * The pair as one model: a call the primary cannot take is taken by the
+   * fallback, at the step rather than by re-running the chunk.
+   */
   const resilient = withFallback(deps.models, {
     onFallback: ({ modelId, error }) => {
+      absorbed.push(error);
       console.warn("[recipe-runner] model call failed, trying the other slot", {
         model: modelId,
         error: String(error)
@@ -368,6 +364,7 @@ export async function runResumableChunk(
   ): Promise<ChunkAttempt> => {
     state.llmCalls += 1;
     failedSlot = slotId;
+    absorbed = [];
     let result: Awaited<ReturnType<typeof generateText>>;
     try {
       result = await generateText({
@@ -392,8 +389,7 @@ export async function runResumableChunk(
         kind: "failed",
         diagnostic: String(error),
         error,
-        modelId: failedSlot,
-        thrown: true
+        modelId: failedSlot
       };
     }
     if (deps.abortSignal?.aborted) return { kind: "aborted" };
@@ -444,10 +440,12 @@ export async function runResumableChunk(
     }
 
     const first = a;
-    // A call that came back and produced nothing usable has been seen by one
-    // model only, and the other may do better with it. A call that *threw* has
-    // been offered to both already.
-    if (!first.thrown) {
+    // Captured before a second attempt resets it.
+    const coveredFor = absorbed;
+    // The other model is worth asking only if it has not been asked. If the pair
+    // already handed this attempt to the fallback, a standalone attempt puts the
+    // same question to the same model.
+    if (coveredFor.length === 0) {
       console.warn("[recipe-runner] unusable output, trying the other model", {
         model: first.modelId,
         diagnostic: first.diagnostic
@@ -458,22 +456,23 @@ export async function runResumableChunk(
 
     if (a.kind === "failed") {
       // A transient fault anywhere means a retry could succeed — throw it for
-      // the Workflow step (most recent first).
-      for (const failed of [a, first]) {
-        if (failed.error !== undefined && isTransientAiError(failed.error)) {
-          throw failed.error;
-        }
+      // the Workflow step, most recent first. That includes one the fallback
+      // covered for with an unusable answer: the primary may have capacity
+      // again by the time the step runs.
+      for (const error of [a.error, first.error, ...coveredFor]) {
+        if (error !== undefined && isTransientAiError(error)) throw error;
       }
+      const tried = [
+        ...coveredFor.map((e) => `${deps.models.primaryId()}: ${String(e)}`),
+        `${first.modelId}: ${first.diagnostic}`,
+        ...(a === first ? [] : [`${a.modelId}: ${a.diagnostic}`])
+      ];
       return {
         outcome: {
           done: true,
           result: {
             status: "failed",
-            error:
-              a === first
-                ? `recipe exhausted: ${first.modelId}: ${first.diagnostic}`
-                : `recipe exhausted: ${first.modelId}: ${first.diagnostic}; ` +
-                  `${a.modelId}: ${a.diagnostic}`,
+            error: `recipe exhausted: ${tried.join("; ")}`,
             modelId: a.modelId
           },
           progress: deps.progress
@@ -520,9 +519,12 @@ async function summarizeBudget(
 
   /** The slot a failed call belongs to — see the work loop's own. */
   let failedSlot = deps.models.primaryId();
+  /** What the pair covered for in the attempt under way — as in the work loop. */
+  let absorbed: unknown[] = [];
 
   const resilient = withFallback(deps.models, {
     onFallback: ({ modelId, error }) => {
+      absorbed.push(error);
       console.warn(
         "[recipe-runner] summary call failed, trying the other slot",
         {
@@ -542,6 +544,7 @@ async function summarizeBudget(
   ): Promise<ChunkAttempt> => {
     state.llmCalls += 1;
     failedSlot = slotId;
+    absorbed = [];
     let result: Awaited<ReturnType<typeof generateText>>;
     try {
       result = await generateText({
@@ -558,8 +561,7 @@ async function summarizeBudget(
         kind: "failed",
         diagnostic: String(error),
         error,
-        modelId: failedSlot,
-        thrown: true
+        modelId: failedSlot
       };
     }
     if (deps.abortSignal?.aborted) return { kind: "aborted" };
@@ -595,17 +597,16 @@ async function summarizeBudget(
     }
 
     const first = a;
-    // As in the work loop: only an answer that came back empty is worth showing
-    // to the other model. A call that threw has been offered to both.
-    if (!first.thrown) {
+    const coveredFor = absorbed;
+    // As in the work loop: only a model that has not been asked yet is worth
+    // asking, and a transient fault the fallback covered for still counts.
+    if (coveredFor.length === 0) {
       a = await summarize(deps.models.fallback, deps.models.fallbackId());
       if (a.kind === "aborted") return yielded();
     }
     if (a.kind === "failed") {
-      for (const failed of [a, first]) {
-        if (failed.error !== undefined && isTransientAiError(failed.error)) {
-          throw failed.error;
-        }
+      for (const error of [a.error, first.error, ...coveredFor]) {
+        if (error !== undefined && isTransientAiError(error)) throw error;
       }
       // Even the summary failed: return a plain budget-exhausted notice.
       const text =

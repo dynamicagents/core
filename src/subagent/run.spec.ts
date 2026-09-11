@@ -192,6 +192,36 @@ describe("the chunk loop's ladder", () => {
     });
   });
 
+  it("does not ask the fallback again once it has answered with nothing", async () => {
+    const primary = throwingModel(badRequest());
+    const fallback = countingModel({ text: "" });
+
+    const { outcome } = await runResumableChunk(
+      null,
+      deps({ models: pair(primary.model, fallback.model) })
+    );
+
+    // It already had the call, inside the pair. A standalone attempt would put
+    // the same question to the same model.
+    expect(outcome.done && outcome.result.status).toBe("failed");
+    expect(fallback.calls()).toBe(1);
+  });
+
+  it("throws a rate limit the fallback covered with an unusable answer", async () => {
+    const primary = throwingModel(rateLimit());
+    const fallback = countingModel({ text: "" });
+
+    // The empty answer is the fallback's, given because the primary had no
+    // capacity; the rate limit is still the fault a retry could clear.
+    await expect(
+      runResumableChunk(
+        null,
+        deps({ models: pair(primary.model, fallback.model) })
+      )
+    ).rejects.toThrow();
+    expect(fallback.calls()).toBe(1);
+  });
+
   it("throws a transient fault for the step to retry", async () => {
     const primary = throwingModel(rateLimit());
     const fallback = throwingModel(rateLimit());
@@ -219,6 +249,19 @@ describe("the budget summary's ladder", () => {
       status: "completed",
       modelId: TEST_MODELS.fallbackChatModelId
     });
+  });
+
+  it("throws a rate limit the fallback covered with an empty report", async () => {
+    const primary = throwingModel(rateLimit());
+    const fallback = countingModel({ text: "" });
+
+    await expect(
+      runResumableChunk(
+        spent(),
+        deps({ models: pair(primary.model, fallback.model) })
+      )
+    ).rejects.toThrow();
+    expect(fallback.calls()).toBe(1);
   });
 
   it("still returns a notice when neither model writes the report", async () => {

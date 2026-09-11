@@ -438,6 +438,65 @@ describe("runTurn", () => {
     expect(outcome).toEqual({ status: "replied", reply: "the actual answer" });
   });
 
+  /**
+   * The second slot is for a model the round has not asked yet. Once the pair
+   * has handed the round's calls to the fallback, that model has seen the round,
+   * and asking it again from the top would repeat every tool call since.
+   */
+  it("does not ask the fallback again once it has taken the round over", async () => {
+    const primary = throwingModel(
+      new APICallError({
+        message: "400 malformed request",
+        url: "mock:chat:test",
+        requestBodyValues: {},
+        statusCode: 400
+      })
+    );
+    const fallback = countingModel({ text: "narrating instead of acting" });
+
+    const outcome = await runTurn(
+      args({ models: pair(primary.model, fallback.model) })
+    );
+
+    expect(outcome).toMatchObject({ status: "failed", kind: "exhausted" });
+    expect(fallback.calls()).toBe(1);
+  });
+
+  it("retries the round for a rate limit the fallback covered with no ending", async () => {
+    const primary = rateLimitedModel(
+      Number.POSITIVE_INFINITY,
+      finalReply("never reached")
+    );
+    const fallback = countingModel({ text: "narrating instead of acting" });
+
+    // The narration is the fallback's, produced because the primary had no
+    // capacity — which a retry of the round may well have again.
+    await expect(
+      runTurn(args({ models: pair(primary.model, fallback.model) }))
+    ).rejects.toThrow();
+    expect(fallback.calls()).toBe(1);
+  });
+
+  it("gives the fallback its turn when the primary cannot be built", async () => {
+    const fallback = countingModel(finalReply("the fallback answered"));
+    const models = {
+      primary: () => {
+        throw new Error("no binding for the primary slot");
+      },
+      fallback: () => fallback.model,
+      primaryId: () => TEST_MODELS.chatModelId,
+      fallbackId: () => TEST_MODELS.fallbackChatModelId
+    } as unknown as ModelPair;
+
+    const outcome = await runTurn(args({ models }));
+
+    expect(outcome).toEqual({
+      status: "replied",
+      reply: "the fallback answered"
+    });
+    expect(fallback.calls()).toBe(1);
+  });
+
   it("delivers durable branch results when both models fail", async () => {
     // The work is done and the user asked for it; failing the task because the
     // *answering* model is down would throw away good results.

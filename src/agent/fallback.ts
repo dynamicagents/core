@@ -31,7 +31,8 @@ export interface FallbackOptions {
   /**
    * Fires when the primary has failed and the fallback is about to be asked —
    * once per step that falls through, since no step is bound to the slot the
-   * last one used.
+   * last one used. Or once for the whole call, when the primary could not be
+   * built at all: every step of that call goes the same way.
    *
    * It is the only account of a spent primary the caller gets. The error the
    * call finally throws is the one worth classifying, which is not always the
@@ -53,6 +54,15 @@ export interface FallbackOptions {
    */
   onFailure?: (notice: FallbackNotice) => void;
 }
+
+/**
+ * What a middleware is handed for one call, derived from the exported middleware
+ * type rather than imported: the named type lives in `@ai-sdk/provider`, which
+ * core does not declare.
+ */
+type CallOptions = Parameters<
+  NonNullable<LanguageModelMiddleware["wrapGenerate"]>
+>[0]["params"];
 
 /**
  * A model id is a string the SDK resolves through its gateway when the call is
@@ -94,9 +104,10 @@ function built(model: LanguageModel, slot: string) {
  * wasted call per step while it stays broken, which the `onFallback` warning
  * makes visible.
  *
- * Lazy, like the pair it wraps: resolving a model can throw (a missing binding,
- * a bad id), and that has to count as the attempt failing rather than as the
- * loop above crashing.
+ * Lazy, like the pair it wraps, and for the same reason: resolving a model can
+ * throw (a missing binding, a bad id). A primary that cannot be resolved is a
+ * primary that failed, and its calls go to the fallback like any other; a
+ * fallback that cannot be resolved fails only the calls that reach it.
  */
 export function withFallback(
   pair: ModelPair,
@@ -148,6 +159,53 @@ export function withFallback(
       return error;
     };
 
+    /**
+     * Put a call the primary could not take to the fallback, and pick which of
+     * the two errors to throw when the fallback cannot take it either.
+     */
+    const fromFallback = async (params: CallOptions, error: unknown) => {
+      try {
+        return served(await fallback().doGenerate(params), fallbackId);
+      } catch (fallbackError) {
+        // Before any ranking. A cancel is not a verdict on the fallback, and
+        // ranked like one it can lose to the primary's rate limit — which says
+        // "worth retrying" about work nobody is waiting for any more.
+        if (params.abortSignal?.aborted) throw fallbackError;
+        // A credential the second slot refused outranks a blip on the first.
+        // Nothing clears it, and preferring the transient error would send the
+        // step back to retry a token that is already dead — exactly the spend
+        // {@link nonRecoverableKind} exists to prevent.
+        if (nonRecoverableKind(fallbackError))
+          throw failed(fallbackId, fallbackError);
+        if (isTransientAiError(fallbackError))
+          throw failed(fallbackId, fallbackError);
+        if (isTransientAiError(error)) throw failed(primaryId, error);
+        throw failed(fallbackId, fallbackError);
+      }
+    };
+
+    let primary: ReturnType<typeof built>;
+    try {
+      primary = built(pair.primary(), "primary");
+    } catch (error) {
+      // A primary that cannot be built is a primary that failed, and the rule
+      // for that does not depend on how it failed. Announced here, once, since
+      // every step of this call will go the same way.
+      options.onFallback?.({ modelId: primaryId, error });
+      let model: ReturnType<typeof fallback>;
+      try {
+        model = fallback();
+      } catch (fallbackError) {
+        throw failed(fallbackId, fallbackError);
+      }
+      return wrapLanguageModel({
+        model,
+        middleware: {
+          wrapGenerate: ({ params }) => fromFallback(params, error)
+        }
+      });
+    }
+
     const middleware: LanguageModelMiddleware = {
       wrapGenerate: async ({ doGenerate, params }) => {
         try {
@@ -160,27 +218,11 @@ export function withFallback(
           if (nonRecoverableKind(error)) throw failed(primaryId, error);
 
           options.onFallback?.({ modelId: primaryId, error });
-          try {
-            return served(await fallback().doGenerate(params), fallbackId);
-          } catch (fallbackError) {
-            // A credential the second slot refused outranks a blip on the
-            // first. Nothing clears it, and preferring the transient error
-            // would send the step back to retry a token that is already dead —
-            // exactly the spend {@link nonRecoverableKind} exists to prevent.
-            if (nonRecoverableKind(fallbackError))
-              throw failed(fallbackId, fallbackError);
-            if (isTransientAiError(fallbackError))
-              throw failed(fallbackId, fallbackError);
-            if (isTransientAiError(error)) throw failed(primaryId, error);
-            throw failed(fallbackId, fallbackError);
-          }
+          return fromFallback(params, error);
         }
       }
     };
 
-    return wrapLanguageModel({
-      model: built(pair.primary(), "primary"),
-      middleware
-    });
+    return wrapLanguageModel({ model: primary, middleware });
   };
 }
