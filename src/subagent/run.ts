@@ -12,6 +12,7 @@ import {
   type NonRecoverableKind
 } from "../agent/inference.js";
 import { validateRecipe, type RecipePolicy } from "../contract/validation.js";
+import { withFallback } from "../agent/fallback.js";
 import type { ModelPair } from "../agent/model.js";
 import type {
   ProgressEvent,
@@ -43,7 +44,17 @@ export interface ChunkRunState {
   messages: ModelMessage[];
   /** Total model turns (tool-loop steps) across every chunk — bounds `maxTurns`. */
   turns: number;
-  /** Total `generateText` invocations (including fallbacks and summarization). */
+  /**
+   * Total `generateText` invocations — every attempt this runner made, its
+   * second-model attempts and its budget summary included.
+   *
+   * Invocations, not provider calls, and the gap is not small: one invocation
+   * covers the SDK's retries and whichever model slot ends up serving each step
+   * (see {@link file://../agent/fallback.ts withFallback}). Counting those would
+   * mean instrumenting every `doGenerate`, and this number is read by a human in
+   * the metrics footer, where "how many times the runner asked" is the useful
+   * question.
+   */
   llmCalls: number;
   /** Wall-clock start of the whole execution (for the metrics footer). */
   startedAtMs: number;
@@ -111,7 +122,12 @@ type ChunkAttempt =
   | { kind: "completed"; text: string; modelId: string }
   | { kind: "yield" }
   | { kind: "aborted" }
-  | { kind: "failed"; diagnostic: string; error?: unknown; modelId: string };
+  | {
+      kind: "failed";
+      diagnostic: string;
+      error?: unknown;
+      modelId: string;
+    };
 
 // The window mechanics live in `/agent` now: `/round` needs the identical rules
 // for the exchanges it carries between rounds, and two copies of "which tool
@@ -305,11 +321,50 @@ export async function runResumableChunk(
     () => deps.progress.length > 0
   ];
 
+  /**
+   * The slot a failed call should be attributed to. Set as each attempt starts
+   * and corrected by the pair, which knows whose error it is finally reporting
+   * — a credential the second slot refused must not send an operator to rotate
+   * the first one's token.
+   */
+  let failedSlot = deps.models.primaryId();
+
+  /**
+   * The primary's failures the pair covered for during the attempt under way,
+   * by handing the call to the fallback. Reset as each attempt starts, and read
+   * by the ladder below to tell whether the fallback has been asked already.
+   */
+  let absorbed: unknown[] = [];
+
+  /**
+   * The pair as one model: a call the primary cannot take is taken by the
+   * fallback, at the step rather than by re-running the chunk.
+   */
+  const resilient = withFallback(deps.models, {
+    onFallback: ({ modelId, error }) => {
+      absorbed.push(error);
+      console.warn("[recipe-runner] model call failed, trying the other slot", {
+        model: modelId,
+        error: String(error)
+      });
+    },
+    onFailure: ({ modelId }) => {
+      failedSlot = modelId;
+    }
+  });
+
+  /**
+   * `slotId` labels a call that never came back. A call that did reports the
+   * model that actually answered it, which is not always the slot that was
+   * asked — see {@link file://../agent/fallback.ts withFallback}.
+   */
   const attempt = async (
     model: () => LanguageModel,
-    modelId: string
+    slotId: string
   ): Promise<ChunkAttempt> => {
     state.llmCalls += 1;
+    failedSlot = slotId;
+    absorbed = [];
     let result: Awaited<ReturnType<typeof generateText>>;
     try {
       result = await generateText({
@@ -330,9 +385,15 @@ export async function runResumableChunk(
       // reading it as bad model output would spend the fallback and cache a
       // failure for work that was cancelled on purpose.
       if (deps.abortSignal?.aborted) return { kind: "aborted" };
-      return { kind: "failed", diagnostic: String(error), error, modelId };
+      return {
+        kind: "failed",
+        diagnostic: String(error),
+        error,
+        modelId: failedSlot
+      };
     }
     if (deps.abortSignal?.aborted) return { kind: "aborted" };
+    const modelId = result.finalStep.response.modelId;
     if (result.finishReason === "length") {
       // Its own warning, not just a diagnostic string: hitting the output ceiling
       // is a tuning signal about `config.model.maxOutputTokens`, distinct from the
@@ -359,13 +420,14 @@ export async function runResumableChunk(
     return { kind: "yield" };
   };
 
-  let a = await attempt(deps.models.primary, deps.models.primaryId());
+  let a = await attempt(resilient, deps.models.primaryId());
   if (a.kind === "aborted") return yielded();
   if (a.kind === "failed") {
-    // Checked before the fallback, not after: the second slot would present the
-    // same rejected credential. Returned rather than thrown — a throw here is
-    // retried by the Workflow step, which is the other cost this avoids. The
-    // chunk fails, and the parent's next round classifies it properly.
+    // Checked before anything else: neither slot can clear a refused credential,
+    // and the model wrapper has already declined to spend the second on it.
+    // Returned rather than thrown — a throw here is retried by the Workflow
+    // step, which is the other cost this avoids. The chunk fails, and the
+    // parent's next round classifies it properly.
     const blocked = nonRecoverableKind(a.error);
     if (blocked) {
       return nonRecoverableOutcome(
@@ -377,30 +439,40 @@ export async function runResumableChunk(
       );
     }
 
-    console.warn("[recipe-runner] primary attempt failed, trying fallback", {
-      model: a.modelId,
-      diagnostic: a.diagnostic
-    });
-    const primaryFailure = a;
-    a = await attempt(deps.models.fallback, deps.models.fallbackId());
-    if (a.kind === "aborted") return yielded();
+    const first = a;
+    // Captured before a second attempt resets it.
+    const coveredFor = absorbed;
+    // The other model is worth asking only if it has not been asked. If the pair
+    // already handed this attempt to the fallback, a standalone attempt puts the
+    // same question to the same model.
+    if (coveredFor.length === 0) {
+      console.warn("[recipe-runner] unusable output, trying the other model", {
+        model: first.modelId,
+        diagnostic: first.diagnostic
+      });
+      a = await attempt(deps.models.fallback, deps.models.fallbackId());
+      if (a.kind === "aborted") return yielded();
+    }
 
     if (a.kind === "failed") {
-      // Both attempts failed. A transient fault anywhere means a retry could
-      // succeed — throw it for the Workflow step (most recent first).
-      for (const failed of [a, primaryFailure]) {
-        if (failed.error !== undefined && isTransientAiError(failed.error)) {
-          throw failed.error;
-        }
+      // A transient fault anywhere means a retry could succeed — throw it for
+      // the Workflow step, most recent first. That includes one the fallback
+      // covered for with an unusable answer: the primary may have capacity
+      // again by the time the step runs.
+      for (const error of [a.error, first.error, ...coveredFor]) {
+        if (error !== undefined && isTransientAiError(error)) throw error;
       }
+      const tried = [
+        ...coveredFor.map((e) => `${deps.models.primaryId()}: ${String(e)}`),
+        `${first.modelId}: ${first.diagnostic}`,
+        ...(a === first ? [] : [`${a.modelId}: ${a.diagnostic}`])
+      ];
       return {
         outcome: {
           done: true,
           result: {
             status: "failed",
-            error:
-              `recipe exhausted: primary (${primaryFailure.modelId}): ` +
-              `${primaryFailure.diagnostic}; fallback (${a.modelId}): ${a.diagnostic}`,
+            error: `recipe exhausted: ${tried.join("; ")}`,
             modelId: a.modelId
           },
           progress: deps.progress
@@ -445,11 +517,34 @@ async function summarizeBudget(
     }
   ];
 
+  /** The slot a failed call belongs to — see the work loop's own. */
+  let failedSlot = deps.models.primaryId();
+  /** What the pair covered for in the attempt under way — as in the work loop. */
+  let absorbed: unknown[] = [];
+
+  const resilient = withFallback(deps.models, {
+    onFallback: ({ modelId, error }) => {
+      absorbed.push(error);
+      console.warn(
+        "[recipe-runner] summary call failed, trying the other slot",
+        {
+          model: modelId,
+          error: String(error)
+        }
+      );
+    },
+    onFailure: ({ modelId }) => {
+      failedSlot = modelId;
+    }
+  });
+
   const summarize = async (
     model: () => LanguageModel,
-    modelId: string
+    slotId: string
   ): Promise<ChunkAttempt> => {
     state.llmCalls += 1;
+    failedSlot = slotId;
+    absorbed = [];
     let result: Awaited<ReturnType<typeof generateText>>;
     try {
       result = await generateText({
@@ -462,9 +557,15 @@ async function summarizeBudget(
       });
     } catch (error) {
       if (deps.abortSignal?.aborted) return { kind: "aborted" };
-      return { kind: "failed", diagnostic: String(error), error, modelId };
+      return {
+        kind: "failed",
+        diagnostic: String(error),
+        error,
+        modelId: failedSlot
+      };
     }
     if (deps.abortSignal?.aborted) return { kind: "aborted" };
+    const modelId = result.finalStep.response.modelId;
     const text = result.text.trim();
     return text === ""
       ? { kind: "failed", diagnostic: "empty summary", modelId }
@@ -478,11 +579,12 @@ async function summarizeBudget(
     state
   });
 
-  let a = await summarize(deps.models.primary, deps.models.primaryId());
+  let a = await summarize(resilient, deps.models.primaryId());
   if (a.kind === "aborted") return yielded();
   if (a.kind === "failed") {
-    // Same rule as the work loop: no fallback on a credential the API already
-    // rejected. A summary is the cheapest call in the run, but it is not free.
+    // Same rule as the work loop: no second slot on a credential the API
+    // already rejected. A summary is the cheapest call in the run, but it is
+    // not free.
     const blocked = nonRecoverableKind(a.error);
     if (blocked) {
       return nonRecoverableOutcome(
@@ -494,14 +596,17 @@ async function summarizeBudget(
       );
     }
 
-    const primaryFailure = a;
-    a = await summarize(deps.models.fallback, deps.models.fallbackId());
-    if (a.kind === "aborted") return yielded();
+    const first = a;
+    const coveredFor = absorbed;
+    // As in the work loop: only a model that has not been asked yet is worth
+    // asking, and a transient fault the fallback covered for still counts.
+    if (coveredFor.length === 0) {
+      a = await summarize(deps.models.fallback, deps.models.fallbackId());
+      if (a.kind === "aborted") return yielded();
+    }
     if (a.kind === "failed") {
-      for (const failed of [a, primaryFailure]) {
-        if (failed.error !== undefined && isTransientAiError(failed.error)) {
-          throw failed.error;
-        }
+      for (const error of [a.error, first.error, ...coveredFor]) {
+        if (error !== undefined && isTransientAiError(error)) throw error;
       }
       // Even the summary failed: return a plain budget-exhausted notice.
       const text =

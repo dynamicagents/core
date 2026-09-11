@@ -38,6 +38,7 @@ import {
 } from "../agent/control.js";
 import { FINAL_REPLY_TOOL_NAME } from "../agent/final-reply.js";
 import { stepAllowance, type TurnBudget } from "../agent/budget.js";
+import { withFallback } from "../agent/fallback.js";
 import type { ModelPair } from "../agent/model.js";
 import {
   DELEGATE_TOOL_NAME,
@@ -536,7 +537,12 @@ type Attempt =
    * through spends the second slot on work nobody is waiting for any more.
    */
   | { ok: false; aborted: true }
-  | { ok: false; aborted?: false; error: unknown; rejected?: RejectedCall };
+  | {
+      ok: false;
+      aborted?: false;
+      error: unknown;
+      rejected?: RejectedCall;
+    };
 
 /**
  * One attempt against a single model: let it work, and take whichever ending it
@@ -922,10 +928,48 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
   // attempt's — a call that ran is a call that ran, whichever attempt made it.
   const seen: ModelMessage[] = [];
 
-  for (const slot of ["primary", "fallback"] as const) {
-    const modelId =
-      slot === "primary" ? models.primaryId() : models.fallbackId();
-    const model = slot === "primary" ? models.primary : models.fallback;
+  /**
+   * Which model the first slot's failure belongs to. The fallback once it has
+   * been reached mid-attempt, the primary until then — the only thing that
+   * distinguishes them once the pair answers as one model.
+   */
+  let answering = models.primaryId();
+
+  /**
+   * The primary's failures the pair covered for during the attempt under way, by
+   * handing the call to the fallback. Non-empty means that model has worked on
+   * this round already — see where the first slot gives way to the second.
+   */
+  let absorbed: unknown[] = [];
+
+  /**
+   * The first slot is the pair as one model: a call the primary cannot take is
+   * taken by the second at the **step**, so the round keeps the work it has
+   * already done instead of starting over. What the slot loop is still for is
+   * the failure that wrapper cannot see — a call that came back and reached no
+   * ending, where a model the round has not asked yet is worth asking.
+   */
+  const resilient = withFallback(models, {
+    onFallback: ({ modelId, error }) => {
+      answering = models.fallbackId();
+      absorbed.push(error);
+      diagnostics.push(`${modelId}: ${String(error)}`);
+      console.warn("[turn] model call failed, trying the other slot", {
+        taskId,
+        round,
+        model: modelId,
+        error: String(error)
+      });
+    },
+    // Last word, and it can point back at the primary: the error a failed pair
+    // reports is the one worth acting on, not the one that happened last.
+    onFailure: ({ modelId }) => {
+      answering = modelId;
+    }
+  });
+
+  slots: for (const slot of ["primary", "fallback"] as const) {
+    const model = slot === "primary" ? resilient : models.fallback;
 
     // This slot's own view: the round's messages plus whatever repair exchange it
     // accumulates. A fresh copy per slot, so a fallback that is reached is never
@@ -933,6 +977,11 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
     const slotMessages = [...messages];
 
     for (let repair = 0; repair <= MAX_REPAIR_ATTEMPTS; repair += 1) {
+      // Per attempt, not per slot: a repair is a fresh call, and which model
+      // takes it is decided again from the top.
+      if (slot === "primary") answering = models.primaryId();
+      absorbed = [];
+
       // Both slots draw on the one `args.budget`, which each attempt reads on entry
       // and charges as it works. A fallback attempt is spend, not a free retry —
       // and so is a repair.
@@ -944,6 +993,7 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
         slotMessages,
         seen
       );
+      const modelId = slot === "primary" ? answering : models.fallbackId();
 
       if (!outcome.ok) {
         // Ahead of every other exit, including the non-recoverable one: a
@@ -1020,6 +1070,19 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
             )
           );
           continue;
+        }
+
+        // The second slot is for a model the round has not asked yet. If the pair
+        // already handed this attempt's calls to the fallback, that model has
+        // seen the round, and asking it again from the top would repeat every
+        // tool call made since.
+        //
+        // What the pair covered for joins the round's own failures: a capacity
+        // fault the fallback absorbed is still evidence a retry could succeed,
+        // and nothing else carries it once that slot has answered.
+        if (absorbed.length > 0) {
+          errors.push(...absorbed);
+          break slots;
         }
         break;
       }

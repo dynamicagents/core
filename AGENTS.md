@@ -227,12 +227,17 @@ ships one implementation inline reads as _the_ runtime with an escape hatch
 rather than as one of N. `src/agent/errors.ts` is its neutral companion: a
 rejected credential is a fact about the path to a model, not about any vendor.
 
-Three rules follow, and they are what keep a third provider cheap:
+The rules that follow are what keep a third provider cheap:
 
 - **Nothing neutral may import a provider directory.** `inference.ts` classifies
   a dead credential by `CredentialRejectedError`, which is structurally matched,
   so a provider written _outside_ core raises one and gets the same
   fallback-skipping treatment with nothing in core to change.
+- **A provider supplies two models; which one answers a given step is core's.**
+  `withFallback` in `src/agent/fallback.ts` wraps the pair into one model, so a
+  call the primary cannot take is taken by the second at the step rather than by
+  re-running the round. A runtime that builds its own fallback inside a single
+  model hides that decision from the loops, and from the budget that pays for it.
 - **A subpath only when the peer is optional.** `workers-ai` has none because
   `workers-ai-provider` is a required peer and every consumer's graph holds it
   already. A provider behind an _optional_ peer gets its own subpath instead, so

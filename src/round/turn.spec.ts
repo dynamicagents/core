@@ -338,21 +338,26 @@ describe("runTurn", () => {
    *
    * The waiting is the SDK's own, on its defaults — core configures none. The
    * call counts are the assertion: the outcome is a successful reply either way,
-   * so only "which model was asked, and how many times" can tell a waited retry
-   * from a burned fallback.
+   * so only "which model was asked, and how many times" can tell one slot's
+   * answer from the other's.
    */
-  it("retries a rate-limited model in place instead of burning the fallback", async () => {
-    const primary = rateLimitedModel(1, finalReply("the actual answer"));
-    const fallback = countingModel(finalReply("should never be reached"));
+  it("offers a rate limit to the other model rather than waiting it out", async () => {
+    const primary = rateLimitedModel(1, finalReply("never reached"));
+    const fallback = countingModel(finalReply("the other slot had capacity"));
 
     const outcome = await runTurn(
       args({ models: pair(primary.model, fallback.model) })
     );
 
-    expect(outcome).toEqual({ status: "replied", reply: "the actual answer" });
-    // Once refused, once honoured — inside a single slot.
-    expect(primary.calls()).toBe(2);
-    expect(fallback.calls()).toBe(0);
+    // The two slots are different models, and the second may have capacity the
+    // first does not — so it is asked before the SDK spends a step's retries
+    // waiting on the model that hit the limit.
+    expect(outcome).toEqual({
+      status: "replied",
+      reply: "the other slot had capacity"
+    });
+    expect(primary.calls()).toBe(1);
+    expect(fallback.calls()).toBe(1);
   });
 
   /**
@@ -378,8 +383,9 @@ describe("runTurn", () => {
       runTurn(args({ models: pair(primary.model, fallback.model) }))
     ).rejects.toThrow();
 
-    // Each slot waited in place before it was given up, which is the half of
-    // this a thrown error alone does not show.
+    // Every attempt the SDK made cost *both* slots, because the retry wraps the
+    // pair rather than sitting inside it — which is the half of this a thrown
+    // error alone does not show.
     //
     // The exact count is the SDK's own default, and core configures nothing —
     // which makes it the budget `CHUNK_SOFT_MS`'s headroom is sized against in
@@ -391,41 +397,33 @@ describe("runTurn", () => {
 
   /**
    * The same short-circuit as the credential specs below, reached the way it
-   * actually happens: a rate limit first, so the SDK retried, and what arrives
-   * is its retry error with the rejection inside. Read as-is it is neither
-   * transient nor non-recoverable, and the round spends the fallback slot
-   * presenting the same dead token before throwing for the step to repeat it.
+   * actually happens once a rate limit moves the call to the other slot: the
+   * blip is transient and the rejection behind it is not, and only one of the
+   * two can be reported.
+   *
+   * Reporting the blip would send the Workflow step back to present the same
+   * dead token, once per retry, and end the Task saying capacity was the
+   * problem.
    */
-  it("sees a credential refused behind a retry, and stops there", async () => {
-    let calls = 0;
-    const primary = new MockLanguageModelV3({
-      doGenerate: async () => {
-        calls += 1;
-        if (calls === 1) {
-          // `retry-after: 0` for the same reason `rateLimitedModel` uses it:
-          // the wait is real seconds and proves nothing here.
-          throw new APICallError({
-            message: "429 Wholesale Rate limited",
-            url: "mock:chat:test",
-            requestBodyValues: {},
-            statusCode: 429,
-            responseHeaders: { "retry-after": "0" }
-          });
-        }
-        throw new CredentialRejectedError("invalid bearer token", {
-          status: 401,
-          source: "provider"
-        });
-      }
-    });
-    const fallback = countingModel(finalReply("the fallback answered"));
+  it("reports a credential the second slot refused, not the blip that got there", async () => {
+    const primary = rateLimitedModel(
+      Number.POSITIVE_INFINITY,
+      finalReply("never reached")
+    );
+    const fallback = throwingModel(
+      new CredentialRejectedError("invalid bearer token", {
+        status: 401,
+        source: "provider"
+      })
+    );
 
     const outcome = await runTurn(
-      args({ models: pair(primary, fallback.model) })
+      args({ models: pair(primary.model, fallback.model) })
     );
 
     expect(outcome).toMatchObject({ status: "failed", kind: "credential" });
-    expect(fallback.calls()).toBe(0);
+    // Refused once, and not presented again by a retry or by the slot loop.
+    expect(fallback.calls()).toBe(1);
   });
 
   it("falls back to the second model when the first reaches no ending", async () => {
@@ -438,6 +436,65 @@ describe("runTurn", () => {
       })
     );
     expect(outcome).toEqual({ status: "replied", reply: "the actual answer" });
+  });
+
+  /**
+   * The second slot is for a model the round has not asked yet. Once the pair
+   * has handed the round's calls to the fallback, that model has seen the round,
+   * and asking it again from the top would repeat every tool call since.
+   */
+  it("does not ask the fallback again once it has taken the round over", async () => {
+    const primary = throwingModel(
+      new APICallError({
+        message: "400 malformed request",
+        url: "mock:chat:test",
+        requestBodyValues: {},
+        statusCode: 400
+      })
+    );
+    const fallback = countingModel({ text: "narrating instead of acting" });
+
+    const outcome = await runTurn(
+      args({ models: pair(primary.model, fallback.model) })
+    );
+
+    expect(outcome).toMatchObject({ status: "failed", kind: "exhausted" });
+    expect(fallback.calls()).toBe(1);
+  });
+
+  it("retries the round for a rate limit the fallback covered with no ending", async () => {
+    const primary = rateLimitedModel(
+      Number.POSITIVE_INFINITY,
+      finalReply("never reached")
+    );
+    const fallback = countingModel({ text: "narrating instead of acting" });
+
+    // The narration is the fallback's, produced because the primary had no
+    // capacity — which a retry of the round may well have again.
+    await expect(
+      runTurn(args({ models: pair(primary.model, fallback.model) }))
+    ).rejects.toThrow();
+    expect(fallback.calls()).toBe(1);
+  });
+
+  it("gives the fallback its turn when the primary cannot be built", async () => {
+    const fallback = countingModel(finalReply("the fallback answered"));
+    const models = {
+      primary: () => {
+        throw new Error("no binding for the primary slot");
+      },
+      fallback: () => fallback.model,
+      primaryId: () => TEST_MODELS.chatModelId,
+      fallbackId: () => TEST_MODELS.fallbackChatModelId
+    } as unknown as ModelPair;
+
+    const outcome = await runTurn(args({ models }));
+
+    expect(outcome).toEqual({
+      status: "replied",
+      reply: "the fallback answered"
+    });
+    expect(fallback.calls()).toBe(1);
   });
 
   it("delivers durable branch results when both models fail", async () => {
@@ -888,6 +945,67 @@ describe("what a round carries to the next one", () => {
     );
 
     expect(outcome.status).toBe("delegated");
+    const observed = JSON.stringify(
+      outcome.status === "delegated" ? outcome.observations : []
+    );
+    expect(observed).toContain("reused the existing checkout");
+  });
+
+  /**
+   * The same rule one level in: a call the primary cannot finish is finished by
+   * the other model **from where it got to**, not from the top of the round.
+   *
+   * The concrete case is the expensive one. A primary clones the repository and
+   * its next call fails outright. A round that started the fallback over would
+   * hand it the round's opening messages, and the clone would run a second time
+   * — real work, really repeated, for a fault that had nothing to do with it.
+   */
+  it("finishes on the other model from where the first got to", async () => {
+    let clones = 0;
+    const counted = {
+      repo_clone: tool({
+        description: "clone a repository",
+        inputSchema: z.object({ url: z.string() }),
+        execute: async () => {
+          clones += 1;
+          return "reused the existing checkout at /workspace/SpikeResearch";
+        }
+      })
+    };
+
+    // Clones, and then cannot make its next call at all. The step shape comes
+    // from `mockModel` so only the failure is spelled out here.
+    const cloned = mockModel({
+      toolCall: {
+        toolName: "repo_clone",
+        input: { url: "https://github.com/o/r" }
+      }
+    });
+    let calls = 0;
+    const primary = new MockLanguageModelV3({
+      doGenerate: async (options) => {
+        calls += 1;
+        if (calls > 1)
+          throw new APICallError({
+            message: "400 malformed request",
+            url: "mock:chat:test",
+            requestBodyValues: {},
+            statusCode: 400
+          });
+        return cloned.doGenerate(options);
+      }
+    });
+
+    const outcome = await runTurn(
+      args({
+        tools: counted,
+        models: pair(primary as never, mockModel(delegated("on it")))
+      })
+    );
+
+    expect(outcome.status).toBe("delegated");
+    // Once. A ladder one level up makes it twice.
+    expect(clones).toBe(1);
     const observed = JSON.stringify(
       outcome.status === "delegated" ? outcome.observations : []
     );

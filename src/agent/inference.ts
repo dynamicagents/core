@@ -66,19 +66,22 @@ const saysRetry = (err: unknown): boolean =>
  * Whether an error is a transient availability condition rather than a
  * deterministic bad-output one.
  *
- * The distinction decides who handles it: transient throws out of the attempt loop
- * so the Workflow step retries the whole round, while everything else burns the
- * model slot and hands over to the fallback. Classifying a capacity blip as
- * deterministic is the expensive mistake — it spends both slots on an outage and
- * fails a Task that would have succeeded a second later. The opposite mistake
- * spends a step's retries on a fault no retry can clear, and ends the Task saying
- * nothing was decided.
+ * Read **after** both model slots have already failed, which is the level that
+ * gives it its meaning: see {@link file://./fallback.ts withFallback} for the
+ * question asked before this one. What is left to decide is whether the whole
+ * round is worth running again — transient throws out of the attempt loop so the
+ * Workflow step retries it, while everything else ends the round.
+ *
+ * Classifying a capacity blip as deterministic is the expensive mistake: it fails
+ * a Task that would have succeeded a second later. The opposite mistake spends a
+ * step's retries on a fault no retry can clear, and ends the Task saying nothing
+ * was decided.
  *
  * The model's own verdict decides it and nothing else: `isRetryable` on the
  * error the call ended on, read by {@link saysRetry}. It is the same flag the
- * SDK's in-place retry reads, so what waits on this model and what retries the
- * step cannot disagree, and a failure arriving here has already been waited out
- * as far as the provider said was worth waiting. See
+ * SDK's in-place retry reads and the same one the other slot was offered on, so
+ * no two levels can disagree about it — and a failure arriving here has already
+ * been waited out as far as the provider said was worth waiting. See
  * {@link file://./model.ts ModelRuntime} for what a provider owes this.
  *
  * An error that carries no such flag is deterministic. Reading its message
@@ -136,15 +139,16 @@ export type RoundFailureKind = "exhausted" | NonRecoverableKind;
  * Whether an error is one that **no** further attempt can clear, and the reason.
  *
  * This is the third classification, and the one the other two cannot express.
- * {@link isTransientAiError} splits failures into "retry the step" (`true`) and
- * "burn this slot, try the fallback" (`false`) — and for a rejected credential
- * *both* are wrong. Retrying spends the Workflow's budget on a request that can
- * never succeed; falling back spends the second slot presenting the *same* dead
- * token. Returning `false` from the transient check only avoids the first.
+ * {@link isTransientAiError} decides whether the round is worth running again,
+ * and a rejected credential is worth neither that nor the other slot: retrying
+ * spends the Workflow's budget on a request that can never succeed, and the
+ * second slot can only present the *same* dead token, since both sit behind it.
  *
- * So the attempt ladders check this **before** entering the fallback slot and
- * stop there, and `runHandleTask` ends the Task with copy the host supplies.
- * Nothing is retried and nothing is spent proving the obvious twice.
+ * So this is read twice and stops the call both times — by
+ * {@link file://./fallback.ts withFallback} before the other slot is offered
+ * anything, and by the attempt ladders before they repair or spend a second
+ * slot of their own. `runHandleTask` then ends the Task with copy the host
+ * supplies. Nothing is retried and nothing is spent proving the obvious twice.
  *
  * Keyed on {@link file://./errors.ts CredentialRejectedError}, which is neutral
  * and structurally matched — so a provider outside core raises one and gets this

@@ -21,6 +21,7 @@ import {
 } from "../a2a/push.js";
 import { SelfOrigin } from "../a2a/self-origin.js";
 import { buildAgentSession, type SessionLike } from "../agent/session.js";
+import { withFallback } from "../agent/fallback.js";
 import type {
   AiGatewayMetadata,
   ModelPair,
@@ -285,7 +286,21 @@ export abstract class DynamicAgent<
     const { session, model } = this.config;
     return (this.session ??= buildAgentSession(
       this,
-      this.modelPair().primary(),
+      // The pair, not the primary. Compaction runs inside the Session, where
+      // there is nowhere to put an attempt ladder, so the second slot reaches it
+      // through the model or not at all — and a compaction that fails leaves the
+      // history unshortened, to be attempted again with more of it.
+      withFallback(this.modelPair(), {
+        onFallback: ({ modelId, error }) => {
+          console.warn(
+            "[agent] compaction model failed, trying the other slot",
+            {
+              model: modelId,
+              error: String(error)
+            }
+          );
+        }
+      })(),
       {
         soul: () => this.agentSoul(this.runtime.renderCapabilities()),
         memoryDescription: session.memoryDescription,
