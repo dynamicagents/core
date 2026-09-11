@@ -124,7 +124,8 @@ export interface RoundPolicy {
 
   /**
    * Present on an agent whose rounds may stop, ask the person the Task is for,
-   * and wait for the answer. Absent, no round is offered `ask_user` — which is
+   * and wait for the answer. Absent, no round is offered `ask_user`, and a call a
+   * plugin's rule would have held for the person is refused instead of run —
    * right for an agent behind a gatekeeper that cannot put a question to anyone.
    */
   human?: {
@@ -134,5 +135,22 @@ export interface RoundPolicy {
      * other prompt strings here.
      */
     askGuidance: string;
+    /**
+     * What the person reads when a round holds calls for their approval: every
+     * call in the step that a plugin's rule sent to them, each with the words the
+     * rule gave. One prompt for all of them, since they are answered together —
+     * the model decided them together.
+     */
+    approvalPrompt(calls: readonly ApprovalCall[]): string;
   };
+}
+
+/** A call a plugin's rule held for a person's approval. See `RoundPolicy.human`. */
+export interface ApprovalCall {
+  /** The tool the model called. */
+  toolName: string;
+  /** What it called the tool with, as the tool validated it. */
+  input: unknown;
+  /** The words the rule gave for this call, when it gave any. */
+  reason?: string;
 }

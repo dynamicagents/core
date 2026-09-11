@@ -9,6 +9,7 @@ import { buildRecipeTools, collectToolFamilies } from "./tool-families.js";
 import {
   definePlugin,
   restrictMainAgentTools,
+  withoutToolApproval,
   PLUGIN_CONTRACT_VERSION,
   type AgentPlugin,
   type MainAgentToolContext,
@@ -876,5 +877,131 @@ describe("restrictMainAgentTools", () => {
     expect(Object.keys(await original.mainAgentTools!(toolCtx()))).toHaveLength(
       3
     );
+  });
+});
+
+describe("the approval rules a runtime composes", () => {
+  const gated = (
+    key: string,
+    names: string[],
+    rules: Record<string, "user-approval" | "denied">
+  ): AgentPlugin =>
+    definePlugin({
+      key,
+      mainAgentTools: () =>
+        Object.fromEntries(
+          names.map((name) => [
+            name,
+            tool({ description: name, inputSchema: z.object({}) })
+          ])
+        ),
+      mainAgentToolApproval: () => rules
+    });
+
+  it("hands back each rule beside the tool it governs", async () => {
+    const runtime = createAgentRuntime({
+      config: { model: TEST_MODELS },
+      plugins: [
+        gated("repo", ["repo_push", "repo_status"], {
+          repo_push: "user-approval"
+        })
+      ]
+    });
+
+    const surface = await runtime.mainAgentSurface(toolCtx());
+
+    expect(Object.keys(surface.tools)).toEqual(["repo_push", "repo_status"]);
+    expect(surface.toolApproval).toEqual({ repo_push: "user-approval" });
+  });
+
+  it("drops a rule for a tool its plugin does not offer, and names both", async () => {
+    // A rule that governs nothing is a tool running unasked that its plugin
+    // meant to gate — the typo is worth a log line, not a silent pass.
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const runtime = createAgentRuntime({
+      config: { model: TEST_MODELS },
+      plugins: [gated("repo", ["repo_push"], { repo_psuh: "user-approval" })]
+    });
+
+    const surface = await runtime.mainAgentSurface(toolCtx());
+
+    expect(surface.toolApproval).toEqual({});
+    expect(String(error.mock.calls[0]?.[0])).toMatch(/"repo".*"repo_psuh"/);
+    error.mockRestore();
+  });
+
+  it("does not let one plugin's rule govern another plugin's tool", async () => {
+    // A later plugin offering the same name replaced the tool, and the rule was
+    // about the one it replaced.
+    const runtime = createAgentRuntime({
+      config: { model: TEST_MODELS },
+      plugins: [
+        gated("first", ["shared"], { shared: "user-approval" }),
+        definePlugin({
+          key: "second",
+          mainAgentTools: () => ({
+            shared: tool({ description: "another", inputSchema: z.object({}) })
+          })
+        })
+      ]
+    });
+
+    const surface = await runtime.mainAgentSurface(toolCtx());
+
+    expect(surface.toolApproval).toEqual({});
+  });
+});
+
+describe("withoutToolApproval", () => {
+  const repo = (): AgentPlugin =>
+    definePlugin({
+      key: "repo",
+      mainAgentTools: () => ({
+        repo_push: tool({ description: "push", inputSchema: z.object({}) }),
+        repo_open_pr: tool({ description: "open", inputSchema: z.object({}) })
+      }),
+      mainAgentToolApproval: () => ({
+        repo_push: "user-approval",
+        repo_open_pr: "user-approval"
+      }),
+      capability: "You can push.",
+      requires: { secrets: ["GITHUB_TOKEN"] }
+    });
+
+  it("releases every rule when no tools are named, and nothing else", () => {
+    const released = withoutToolApproval(repo());
+
+    expect(released.mainAgentToolApproval).toBeUndefined();
+    expect(released.capability).toBe("You can push.");
+    expect(released.requires).toEqual({ secrets: ["GITHUB_TOKEN"] });
+  });
+
+  it("releases only the tools it names", async () => {
+    const runtime = createAgentRuntime({
+      config: { model: TEST_MODELS },
+      plugins: [withoutToolApproval(repo(), { tools: ["repo_open_pr"] })]
+    });
+
+    expect((await runtime.mainAgentSurface(toolCtx())).toolApproval).toEqual({
+      repo_push: "user-approval"
+    });
+  });
+
+  it("logs a name that matches none of the plugin's rules", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const released = withoutToolApproval(repo(), { tools: ["repo_pusj"] });
+
+    await released.mainAgentToolApproval?.(toolCtx());
+
+    expect(String(error.mock.calls[0]?.[0])).toMatch(/"repo".*"repo_pusj"/);
+    error.mockRestore();
+  });
+
+  it("does not change the plugin it was given", () => {
+    const original = repo();
+
+    withoutToolApproval(original);
+
+    expect(original.mainAgentToolApproval).toBeDefined();
   });
 });

@@ -1,4 +1,4 @@
-import type { ToolSet } from "ai";
+import type { ModelMessage, ToolApprovalStatus, ToolSet } from "ai";
 import type { SessionMessage } from "agents/experimental/memory/session";
 import type { SessionLike } from "../agent/session.js";
 import type { PluginStore } from "../db/db.js";
@@ -157,6 +157,24 @@ export interface TurnGateContext {
   history: SessionMessage[];
 }
 
+/**
+ * Approval rules for main-agent tools, by tool name. See
+ * {@link AgentPlugin.mainAgentToolApproval}.
+ */
+export type MainAgentToolApproval = Record<
+  string,
+  ToolApprovalStatus | MainAgentToolApprovalRule
+>;
+
+/**
+ * A rule decided per call, from what the call was asked to do: its validated
+ * input, and the conversation it came out of.
+ */
+export type MainAgentToolApprovalRule = (
+  input: unknown,
+  options: { toolCallId: string; messages: ModelMessage[] }
+) => ToolApprovalStatus | PromiseLike<ToolApprovalStatus>;
+
 /** Bindings and secrets a plugin needs the *host* to provide in `wrangler.jsonc`. */
 export interface PluginRequirements {
   /** Secret names, e.g. `["ARC_API_KEY"]`. */
@@ -201,6 +219,26 @@ export interface AgentPlugin<TRuntime = SubtaskRuntime> {
    * find that out, and costs every round the tokens to describe it.
    */
   mainAgentTools?: (ctx: MainAgentToolContext) => ToolSet | Promise<ToolSet>;
+  /**
+   * Which of this plugin's main-agent tools need a person's say before they run,
+   * by tool name.
+   *
+   * A rule is a status, or a function of the call returning one.
+   * `"user-approval"` stops the round and asks the person, and its object form's
+   * `reason` is the words they read about the call; `"denied"`, `"approved"` and
+   * `undefined` decide without asking anyone. See `RoundPolicy.human` for what a
+   * round does with a call that waits.
+   *
+   * **The main agent's calls only.** A subagent runs unattended, so a recipe
+   * naming this plugin's tool family gets these tools with no rules at all.
+   *
+   * A rule is never a way around its tool: an agent with nobody to ask has every
+   * call a rule would have held refused, not run. An agent that wants a tool to
+   * run without asking removes the rule — see {@link withoutToolApproval}.
+   */
+  mainAgentToolApproval?: (
+    ctx: MainAgentToolContext
+  ) => MainAgentToolApproval | Promise<MainAgentToolApproval>;
   /**
    * What the main agent is told it can do with this domain, rendered into its
    * soul alongside the other capability blocks.
@@ -437,4 +475,53 @@ export function restrictMainAgentTools<TRuntime = SubtaskRuntime>(
   else restricted.capability = options.capability;
 
   return restricted;
+}
+
+/** See {@link withoutToolApproval}. */
+export interface WithoutToolApprovalOptions {
+  /**
+   * The tools whose rules go. Omit it to drop every rule the plugin declares.
+   *
+   * Names, for the reason {@link RestrictMainAgentToolsOptions.allow} gives: the
+   * install site is where a reader should see which calls run without asking.
+   */
+  tools?: readonly string[];
+}
+
+/**
+ * A plugin whose main-agent tools run without asking anyone — all of them, or
+ * the ones named.
+ *
+ * For an agent that has decided nobody needs to approve these calls: one whose
+ * gatekeeper cannot put a question to a person, or whose every Task is already a
+ * person's instruction to make them. Everything else about the plugin passes
+ * through untouched, as with {@link restrictMainAgentTools}, and a name that
+ * matches no rule is logged rather than thrown, for the reason that helper gives.
+ */
+export function withoutToolApproval<TRuntime = SubtaskRuntime>(
+  plugin: AgentPlugin<TRuntime>,
+  options: WithoutToolApprovalOptions = {}
+): AgentPlugin<TRuntime> {
+  const released: AgentPlugin<TRuntime> = { ...plugin };
+  const inner = plugin.mainAgentToolApproval;
+  if (!inner || options.tools === undefined) {
+    delete released.mainAgentToolApproval;
+    return released;
+  }
+
+  const drop = new Set(options.tools);
+  released.mainAgentToolApproval = async (ctx) => {
+    const rules = { ...(await inner(ctx)) };
+    for (const name of drop) {
+      if (Object.hasOwn(rules, name)) delete rules[name];
+      else
+        console.error(
+          `[plugin] "${plugin.key}" declares no approval rule for "${name}" — ` +
+            "the name matches none of its rules, so nothing was released. " +
+            "Check for a rename."
+        );
+    }
+    return rules;
+  };
+  return released;
 }
