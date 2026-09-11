@@ -975,10 +975,13 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
     const slotMessages = [...messages];
 
     for (let repair = 0; repair <= MAX_REPAIR_ATTEMPTS; repair += 1) {
+      // Per attempt, not per slot: a repair is a fresh call, and which model
+      // takes it is decided again from the top.
+      if (slot === "primary") answering = models.primaryId();
+
       // Both slots draw on the one `args.budget`, which each attempt reads on entry
       // and charges as it works. A fallback attempt is spend, not a free retry —
       // and so is a repair.
-      if (slot === "primary") answering = models.primaryId();
       const outcome = await attempt(
         args,
         control,
