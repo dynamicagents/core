@@ -44,6 +44,12 @@ const dbMigrations: MigrationConfig = {
         when: 1789148198330,
         tag: "0003_human_requests",
         breakpoints: true
+      },
+      {
+        idx: 4,
+        when: 1789150136450,
+        tag: "0004_approval_exchanges",
+        breakpoints: true
       }
     ]
   },
@@ -110,7 +116,9 @@ CREATE INDEX \`idx_round_observations_created_at\` ON \`round_observations\` (\`
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX \`idx_human_requests_task_round\` ON \`human_requests\` (\`task_id\`,\`round\`);--> statement-breakpoint
-CREATE INDEX \`idx_human_requests_created_at\` ON \`human_requests\` (\`created_at\`);`
+CREATE INDEX \`idx_human_requests_created_at\` ON \`human_requests\` (\`created_at\`);`,
+    m0004: `ALTER TABLE \`human_requests\` ADD \`pending_json\` text;--> statement-breakpoint
+ALTER TABLE \`human_requests\` ADD \`results_json\` text;`
   }
 };
 

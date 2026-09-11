@@ -138,7 +138,8 @@ export const roundObservations = sqliteTable(
 );
 
 /**
- * A question a round put to the person the Task is for, and what came back.
+ * What a round stopped to ask the person the Task is for — a question, or
+ * calls to approve — and what came back.
  *
  * One row per `(task_id, round)`, because asking ends the round that asks. It is
  * written when the round decides to ask, stamped when the question is posted, and
@@ -159,6 +160,16 @@ export const humanRequests = sqliteTable(
     round: integer("round").notNull(),
     /** JSON `HitlRequestData` — exactly what the person is shown. */
     requestJson: text("request_json").notNull(),
+    /**
+     * JSON `ModelMessage[]` — for calls held for approval, the step the round
+     * stopped on, replayed to the round after the answer. Null for a question.
+     */
+    pendingJson: text("pending_json"),
+    /**
+     * JSON of held calls' outputs, by tool call id, kept the moment each lands,
+     * so no later attempt at the round replaying them runs one again.
+     */
+    resultsJson: text("results_json"),
     /** `awaiting` until an answer, an expiry or a cancel closes it. */
     status: text("status").notNull(),
     /** JSON of the answer as the gatekeeper sent it; null until answered. */

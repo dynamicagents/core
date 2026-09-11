@@ -1,6 +1,7 @@
-import type { ToolSet } from "ai";
+import type { ToolApprovalResponse, ToolSet } from "ai";
 import { TaskState } from "@a2a-js/sdk";
 import {
+  HITL_APPROVE_OPTION_ID,
   HITL_REQUEST_TYPE,
   type HitlRequestData
 } from "@dynamicagents/g2a-protocol";
@@ -39,10 +40,13 @@ import type {
 } from "../subtasks/types.js";
 import { DynamicAgent } from "../host/agent.js";
 import type { SubagentClass } from "./subagent.js";
-import type { FinalRoundReason, RoundPolicy } from "./policy.js";
+import type { ApprovalCall, FinalRoundReason, RoundPolicy } from "./policy.js";
+import type { MainAgentToolApproval } from "../contract/plugin.js";
 import {
   buildTurnInstructions,
+  heldCalls,
   runTurn,
+  type ApprovalReplay,
   type RoundMode,
   type RunTurnOutcome,
   type TurnInstructions
@@ -144,6 +148,30 @@ function answerText(request: HumanRequest): string {
     .join("\n\n");
 }
 
+/**
+ * Calls held for a person's approval, as the gatekeeper renders them: the
+ * policy's words over them, under the approve and reject the protocol names.
+ */
+function approvalFor(
+  requestId: string,
+  policy: RoundPolicy,
+  calls: readonly ApprovalCall[]
+): HitlRequestData {
+  // Unreachable: a round holds calls only for an agent whose policy can ask.
+  if (!policy.human) {
+    throw new Error("a round held calls for approval with no policy to ask in");
+  }
+  return {
+    type: HITL_REQUEST_TYPE,
+    requestId,
+    requestKind: "approval",
+    prompt: policy.human.approvalPrompt(calls)
+  };
+}
+
+/** What the model reads for a held call the person did not approve. */
+const DECLINED = "The person asked declined this call, and it did not run.";
+
 export abstract class RoundAgentBase<
   TEnv extends Cloudflare.Env & AiEnv & A2ASecretsEnv = Cloudflare.Env &
     AiEnv &
@@ -212,15 +240,17 @@ export abstract class RoundAgentBase<
    * tokens to describe it.
    *
    * Built afresh for every round, because a plugin's tools may close over
-   * `signal` — the round's own, which a cancel of this Task aborts.
+   * `signal` — the round's own, which a cancel of this Task aborts. The approval
+   * rules the plugins declare come with them, from the same pass.
    */
-  private async mainAgentTools(
+  private async mainAgentSurface(
     session: SessionLike,
     signal: AbortSignal
-  ): Promise<ToolSet> {
+  ): Promise<{ tools: ToolSet; toolApproval: MainAgentToolApproval }> {
+    const surface = await this.runtime.mainAgentSurface({ session, signal });
     return {
-      ...(await session.tools()),
-      ...(await this.runtime.mainAgentTools({ session, signal }))
+      tools: { ...(await session.tools()), ...surface.tools },
+      toolApproval: surface.toolApproval
     };
   }
 
@@ -354,7 +384,8 @@ export abstract class RoundAgentBase<
         finalReason,
         budget,
         systemSuffix: this.callerContext(identity),
-        tools: await this.mainAgentTools(session, controller.signal),
+        ...(await this.mainAgentSurface(session, controller.signal)),
+        approval: this.approvalReplay(taskId, round),
         models: this.modelPair(metadata),
         branches: this.compositionBranches(taskId),
         observations: this.db.observations.recent(
@@ -396,6 +427,7 @@ export abstract class RoundAgentBase<
 
     if (outcome.status === "parked") {
       const requestId = humanRequestId(taskId, round);
+      const { asked } = outcome;
       // Before the question, which is the opposite order to the delegating path
       // below, for the reason that path gives inverted. The question is what
       // `decideRound` recovers on: once it exists, a re-run of this round
@@ -407,7 +439,12 @@ export abstract class RoundAgentBase<
         requestId,
         taskId,
         round,
-        request: questionFor(requestId, outcome.question, outcome.options)
+        ...(asked.kind === "question"
+          ? { request: questionFor(requestId, asked.question, asked.options) }
+          : {
+              request: approvalFor(requestId, policy, asked.calls),
+              pending: asked.pending
+            })
       });
       return { status: "parked" };
     }
@@ -429,6 +466,54 @@ export abstract class RoundAgentBase<
     this.db.observations.put(taskId, round, outcome.observations);
     await channel?.working(outcome.reply, `ack:${round}`);
     return { status: "delegated", reply: outcome.reply, subtasks };
+  }
+
+  /**
+   * The calls the previous round held for a person, with the person's decision,
+   * for this round to run or refuse before anything else — or `undefined` when
+   * that round held nothing, or has no answer yet.
+   *
+   * Only for the round straight after. It carries the replayed calls among its
+   * own observations, and every later round reads them from there.
+   */
+  private approvalReplay(
+    taskId: string,
+    round: number
+  ): ApprovalReplay | undefined {
+    if (round === 0) return undefined;
+    const held = this.db.humanRequests.forRound(taskId, round - 1);
+    if (!held?.pending || held.status !== "answered" || !held.answer) {
+      return undefined;
+    }
+    const approved = held.answer.optionId === HITL_APPROVE_OPTION_ID;
+    const reason = approved ? undefined : (held.answer.text ?? DECLINED);
+    const results = { ...held.results };
+    const responses: ToolApprovalResponse[] = [];
+    for (const call of heldCalls(held.pending)) {
+      responses.push({
+        type: "tool-approval-response",
+        approvalId: call.approvalId,
+        approved,
+        ...(reason ? { reason } : {})
+      });
+      // A declined call gets its output now. The SDK writes one only when the
+      // decision is the last message, and a repair can follow it there.
+      if (!approved) {
+        results[call.toolCallId] ??= {
+          type: "tool-result",
+          toolCallId: call.toolCallId,
+          toolName: call.toolName,
+          output: { type: "execution-denied", ...(reason ? { reason } : {}) }
+        };
+      }
+    }
+    return {
+      pending: held.pending,
+      responses,
+      results,
+      onResult: (part) =>
+        this.db.humanRequests.recordResult(held.requestId, part)
+    };
   }
 
   /**
@@ -509,6 +594,11 @@ export abstract class RoundAgentBase<
     const request = this.db.humanRequests.get(asked.requestId) ?? asked;
     switch (request.status) {
       case "answered": {
+        // Calls held for approval stay out of the conversation: the round after
+        // replays them, with their outputs — see `approvalReplay`.
+        if (request.request.requestKind === "approval") {
+          return { status: "answered", at: request.closedAt ?? Date.now() };
+        }
         const session = this.getSession(identity);
         await appendOnce(
           session,

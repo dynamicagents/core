@@ -21,7 +21,7 @@
 // `FinalRoundReason` rides with the policy: it is the second argument of
 // `finalRoundNote`, and a host writing that note should not have to guess the
 // union its own words are selected by.
-export type { FinalRoundReason, RoundPolicy } from "./policy.js";
+export type { ApprovalCall, FinalRoundReason, RoundPolicy } from "./policy.js";
 
 export {
   RoundAgentBase,
@@ -59,6 +59,8 @@ export {
   joinSuccessfulBranches,
   renderTurnMessages,
   runTurn,
+  type ApprovalReplay,
+  type ParkedOn,
   type RoundMode,
   type RunTurnArgs,
   type RunTurnOutcome,
