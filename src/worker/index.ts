@@ -33,6 +33,7 @@ import {
   type TurnStarter
 } from "../a2a/executor.js";
 import { readHumanReply } from "../a2a/hitl.js";
+import { inboundTextError } from "../a2a/parts.js";
 import { DurableTaskStore } from "../a2a/task-store.js";
 import type { AgentResolver } from "../a2a/agent-stub.js";
 import { parseGatekeeperOrigins, type A2ASecretsEnv } from "../env.js";
@@ -322,6 +323,32 @@ function pushConfigError(rpcBody: {
     return `configuration.taskPushNotificationConfig.url is not a valid URL: ${pushConfig.url}`;
   }
   return undefined;
+}
+
+/**
+ * Why a `SendMessage`'s text is refused for its size, or `undefined` when it may
+ * go on. Applies to a message that begins a Task and to one answering a question
+ * alike: the bound is on any text crossing the link.
+ *
+ * Here rather than at the executor for the reason {@link continuationError}
+ * gives, and for one more. The text of a message that begins a Task goes into a
+ * Workflow's parameters, which the platform caps: past this point the failure is
+ * an instance that will not start, reported against a Task the caller was told
+ * it had. The same sentence, said here, is a caller that can send a shorter one.
+ */
+function messageTextError(rpcBody: {
+  method?: string;
+  params?: unknown;
+}): string | undefined {
+  if (rpcBody.method !== SEND_MESSAGE_METHOD) return undefined;
+  let params: SendMessageRequest;
+  try {
+    params = SendMessageRequest.fromJSON(rpcBody.params);
+  } catch {
+    // A malformed request is the handler's to refuse, with its own message.
+    return undefined;
+  }
+  return params.message ? inboundTextError(params.message) : undefined;
 }
 
 /**
@@ -676,6 +703,14 @@ export function createA2AWorker<TEnv extends object>(
             toJsonRpcError(new RequestMalformedError(contractError))
           );
         }
+      }
+
+      const oversize = messageTextError(rpcBody);
+      if (oversize) {
+        return jsonRpcErrorResponse(
+          body,
+          toJsonRpcError(new RequestMalformedError(oversize))
+        );
       }
 
       const continuation = continuationError(

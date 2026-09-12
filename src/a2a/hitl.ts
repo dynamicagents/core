@@ -2,11 +2,12 @@ import { Role, TaskState, type Message, type Task } from "@a2a-js/sdk";
 import {
   HITL_RESPONSE_TYPE,
   HITL_TIMEOUT_TYPE,
+  MAX_MESSAGE_TEXT_BYTES,
   type HitlRequestData,
   type HitlResponseData
 } from "@dynamicagents/g2a-protocol";
 import { z } from "zod";
-import { dataPart, MAX_INBOUND_TEXT_BYTES, textPart } from "./parts.js";
+import { dataPart, textPart } from "./parts.js";
 
 /**
  * Asking a person something through the gatekeeper, on the wire.
@@ -128,11 +129,14 @@ const answerSchema = z
     message: "an answer carries an optionId, a text, or both"
   })
   // The same bound a turn's own text is held to, for the same reason: this text
-  // is appended to the Session and read by every round after it.
+  // is appended to the Session and read by every round after it. Measured on the
+  // field rather than on the message, because this is what is kept — the text
+  // part beside it is the gatekeeper's rendering of the same answer, and the
+  // Worker holds the message as a whole to the same bound.
   .refine(
     (d) =>
       d.text === undefined ||
-      encoder.encode(d.text).byteLength <= MAX_INBOUND_TEXT_BYTES,
+      encoder.encode(d.text).byteLength <= MAX_MESSAGE_TEXT_BYTES,
     { message: "answer text exceeds the size limit" }
   );
 

@@ -263,10 +263,10 @@ export interface CompositionBranch {
  * cancellation probe — one round trip, and no gap between asking and acting.
  *
  * Ids and nothing else, deliberately: a Workflow step return is capped at 1 MiB
- * and a Subtask carries verbatim history snapshots bounded only by
- * `MAX_INBOUND_TEXT_BYTES`, so a scan returning rows would overflow on a large
- * task. The durable rows are the source of truth; the Workflow carries
- * references to them and re-reads through the parent when it needs more.
+ * and a Subtask carries verbatim history snapshots bounded only by the message
+ * text limit the protocol package sets, so a scan returning rows would overflow
+ * on a large task. The durable rows are the source of truth; the Workflow
+ * carries references to them and re-reads through the parent when it needs more.
  */
 export type SubtaskScan =
   { canceled: true } | { canceled: false; ids: SubtaskId[] };

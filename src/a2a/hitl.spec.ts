@@ -4,6 +4,7 @@ import {
   HITL_REQUEST_TYPE,
   HITL_RESPONSE_TYPE,
   HITL_TIMEOUT_TYPE,
+  MAX_MESSAGE_TEXT_BYTES,
   type HitlRequestData
 } from "@dynamicagents/g2a-protocol";
 import {
@@ -12,7 +13,6 @@ import {
   humanRequestId,
   readHumanReply
 } from "./hitl.js";
-import { MAX_INBOUND_TEXT_BYTES } from "./parts.js";
 
 /**
  * Core's half of asking a person something: the question it posts, and what it
@@ -204,7 +204,7 @@ describe("reading a reply", () => {
           data({
             type: HITL_RESPONSE_TYPE,
             requestId: question.requestId,
-            text: "x".repeat(MAX_INBOUND_TEXT_BYTES + 1),
+            text: "x".repeat(MAX_MESSAGE_TEXT_BYTES + 1),
             answeredBy: "U123"
           })
         )

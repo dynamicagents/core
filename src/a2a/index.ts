@@ -118,8 +118,8 @@ export {
   textOf,
   agentTextMessage,
   inboundText,
-  InboundPartError,
-  MAX_INBOUND_TEXT_BYTES
+  inboundTextError,
+  InboundPartError
 } from "./parts.js";
 
 export { buildCallContext, extensionHeaders } from "./context.js";
