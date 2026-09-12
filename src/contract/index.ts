@@ -11,6 +11,8 @@ export {
   type AgentPlugin,
   type EmitProgress,
   type EnrichResultContext,
+  type MainAgentToolApproval,
+  type MainAgentToolApprovalRule,
   type MainAgentToolContext,
   type PluginRequirements,
   type RecipeToolSet,

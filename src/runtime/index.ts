@@ -9,6 +9,7 @@ import {
   PLUGIN_CONTRACT_VERSION,
   type AgentPlugin,
   type EnrichResultContext,
+  type MainAgentToolApproval,
   type MainAgentToolContext,
   type ResolveRuntimeContext,
   type ToolFamilyBuilder,
@@ -88,6 +89,20 @@ export interface AgentRuntime {
    * cancel has made pointless.
    */
   mainAgentTools(ctx: MainAgentToolContext): Promise<ToolSet>;
+  /**
+   * {@link mainAgentTools}, together with the approval rules the plugins declare
+   * for those tools — from one pass, so the rules and the tools they govern come
+   * from the same call.
+   *
+   * A rule stands only for a tool its own plugin offers, and a later plugin
+   * offering the same name takes the rule away with the tool it replaced. A rule
+   * naming a tool its plugin does not offer is logged and dropped, as
+   * `restrictMainAgentTools` logs a missing name.
+   */
+  mainAgentSurface(ctx: MainAgentToolContext): Promise<{
+    tools: ToolSet;
+    toolApproval: MainAgentToolApproval;
+  }>;
   /**
    * The capability blocks for the main agent's soul, in plugin declaration
    * order: each plugin's own {@link AgentPlugin.capability} and the one on its
@@ -288,6 +303,30 @@ export function createAgentRuntime(
           Object.assign(tools, await plugin.mainAgentTools(ctx));
       }
       return boundToolCalls(tools);
+    },
+
+    async mainAgentSurface(ctx: MainAgentToolContext) {
+      const tools: ToolSet = {};
+      const toolApproval: MainAgentToolApproval = {};
+      for (const plugin of plugins) {
+        const offered = plugin.mainAgentTools
+          ? await plugin.mainAgentTools(ctx)
+          : {};
+        for (const name of Object.keys(offered)) delete toolApproval[name];
+        Object.assign(tools, offered);
+        if (!plugin.mainAgentToolApproval) continue;
+        const rules = await plugin.mainAgentToolApproval(ctx);
+        for (const [name, rule] of Object.entries(rules)) {
+          if (Object.hasOwn(offered, name)) toolApproval[name] = rule;
+          else
+            console.error(
+              `[plugin] "${plugin.key}" declares an approval rule for "${name}", ` +
+                "which is not one of its main-agent tools — the rule is dropped. " +
+                "Check for a rename."
+            );
+        }
+      }
+      return { tools: boundToolCalls(tools), toolApproval };
     },
 
     renderCapabilities(): string {

@@ -1,4 +1,5 @@
 import { and, desc, eq, isNull, lt } from "drizzle-orm";
+import type { ModelMessage, ToolResultPart } from "ai";
 import type { HitlRequestData } from "@dynamicagents/g2a-protocol";
 import type { HumanAnswer } from "../../a2a/hitl.js";
 import { humanRequests } from "../schema.js";
@@ -30,6 +31,10 @@ export interface HumanRequest {
   parkedAt: number | null;
   /** When an answer or an expiry closed it. */
   closedAt: number | null;
+  /** The step a round stopped on to have calls approved; `null` for a question. */
+  pending: ModelMessage[] | null;
+  /** Held calls' outputs, by tool call id, as each landed. */
+  results: Record<string, ToolResultPart>;
 }
 
 /**
@@ -54,7 +59,13 @@ export function makeHumanRequests(db: DB) {
     status: row.status as HumanRequestStatus,
     answer: row.answerJson ? (JSON.parse(row.answerJson) as HumanAnswer) : null,
     parkedAt: row.parkedAt,
-    closedAt: row.closedAt
+    closedAt: row.closedAt,
+    pending: row.pendingJson
+      ? (JSON.parse(row.pendingJson) as ModelMessage[])
+      : null,
+    results: row.resultsJson
+      ? (JSON.parse(row.resultsJson) as Record<string, ToolResultPart>)
+      : {}
   });
 
   const readRow = (requestId: string): HumanRequestRow | undefined =>
@@ -96,6 +107,8 @@ export function makeHumanRequests(db: DB) {
       taskId: string;
       round: number;
       request: HitlRequestData;
+      /** For calls held for approval: the step to replay with the answer. */
+      pending?: ModelMessage[];
     }): HumanRequest {
       db.insert(humanRequests)
         .values({
@@ -103,6 +116,7 @@ export function makeHumanRequests(db: DB) {
           taskId: input.taskId,
           round: input.round,
           requestJson: JSON.stringify(input.request),
+          pendingJson: input.pending ? JSON.stringify(input.pending) : null,
           status: "awaiting",
           createdAt: Date.now()
         })
@@ -180,6 +194,25 @@ export function makeHumanRequests(db: DB) {
       const row = readRow(requestId);
       if (!row) return "unknown";
       return row.answerMessageId === input.messageId ? "repeated" : "closed";
+    },
+
+    /**
+     * Keep a held call's output the moment it lands. The first output kept for a
+     * call stands: it is what the call did when it ran, and a second run — the
+     * crash window this exists to narrow — only did it again.
+     */
+    recordResult(requestId: string, part: ToolResultPart): void {
+      const row = readRow(requestId);
+      if (!row) return;
+      const results = row.resultsJson
+        ? (JSON.parse(row.resultsJson) as Record<string, ToolResultPart>)
+        : {};
+      if (Object.hasOwn(results, part.toolCallId)) return;
+      results[part.toolCallId] = part;
+      db.update(humanRequests)
+        .set({ resultsJson: JSON.stringify(results) })
+        .where(eq(humanRequests.requestId, requestId))
+        .run();
     },
 
     /** Close a question nobody answered in time. `false` if already closed. */

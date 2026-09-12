@@ -15,7 +15,7 @@ import { buildInputRequiredTask } from "../a2a/hitl.js";
 import type { PluginStore } from "./db.js";
 import type { TaskListQuery } from "./models/tasks.js";
 import type { SubtaskDraft } from "../subtasks/types.js";
-import type { ModelMessage } from "ai";
+import type { ModelMessage, ToolResultPart } from "ai";
 
 /**
  * The durable layer, exercised inside a real Durable Object.
@@ -866,6 +866,57 @@ describe("the questions a task asks", () => {
       latest: "canceled",
       earlier: "answered",
       other: "awaiting"
+    });
+  });
+});
+
+describe("the calls a task holds for approval", () => {
+  it("keeps the held step, and the first output each call lands", async () => {
+    // A second output for the same call is a second run of it, and the first is
+    // what the call did when the person approved it.
+    const result = await withDb("hr-results", async (db) => {
+      await db.ensureReady();
+      const pending: ModelMessage[] = [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "held_r0_0",
+              toolName: "repo_push",
+              input: { branch: "fix" }
+            }
+          ]
+        }
+      ];
+      db.humanRequests.open({
+        requestId: "q-approve",
+        taskId: "t1",
+        round: 0,
+        request: {
+          type: HITL_REQUEST_TYPE,
+          requestId: "q-approve",
+          requestKind: "approval",
+          prompt: "Push fix?"
+        },
+        pending
+      });
+      const output = (value: string): ToolResultPart => ({
+        type: "tool-result",
+        toolCallId: "held_r0_0",
+        toolName: "repo_push",
+        output: { type: "text", value }
+      });
+      db.humanRequests.recordResult("q-approve", output("pushed"));
+      db.humanRequests.recordResult("q-approve", output("pushed again"));
+      return db.humanRequests.get("q-approve");
+    });
+
+    expect(result?.pending).toHaveLength(1);
+    expect(result?.results).toEqual({
+      held_r0_0: expect.objectContaining({
+        output: { type: "text", value: "pushed" }
+      })
     });
   });
 });
