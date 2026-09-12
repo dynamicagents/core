@@ -197,8 +197,10 @@ export class A2AExecutor implements AgentExecutor {
     const reply = readHumanReply(requestContext.userMessage);
 
     let current: Task = parked;
-    // Refused at the Worker when either is missing; checked again because the
-    // price of a throw here is the Task.
+    // The Worker refuses a continuation to an agent that cannot wake a run, but
+    // recording the answer and waking it are separate capabilities and only the
+    // second is visible there. Both are checked here, together, because acting
+    // on one without the other is what would lose the answer silently.
     if (reply && stub.answerTask && this.config.resumeTurn) {
       const answered = await stub.answerTask({
         taskId: parked.id,
@@ -216,6 +218,15 @@ export class A2AExecutor implements AgentExecutor {
           });
         }
       }
+    } else if (reply) {
+      // An agent that answers for a capability it does not have. Logged rather
+      // than thrown, like the failed wake above: the price of a throw is the
+      // Task the person was answering.
+      console.error("[executor] a reply reached an agent that cannot take it", {
+        taskId: parked.id,
+        canRecord: Boolean(stub.answerTask),
+        canWake: Boolean(this.config.resumeTurn)
+      });
     }
 
     eventBus.publish(AgentEvent.task(current));

@@ -396,15 +396,19 @@ export abstract class RoundAgentBase<
 
     if (outcome.status === "parked") {
       const requestId = humanRequestId(taskId, round);
+      // Before the question, which is the opposite order to the delegating path
+      // below, for the reason that path gives inverted. The question is what
+      // `decideRound` recovers on: once it exists, a re-run of this round
+      // reports `parked` without inferring again, so anything written after it
+      // is written only by the attempt that got that far. The put is an upsert,
+      // so the attempt that does reach the question rewrites the same row.
+      this.db.observations.put(taskId, round, outcome.observations);
       this.db.humanRequests.open({
         requestId,
         taskId,
         round,
         request: questionFor(requestId, outcome.question, outcome.options)
       });
-      // Beside the question, as the delegating path writes them beside its rows:
-      // the round after the answer should see the work that led to asking.
-      this.db.observations.put(taskId, round, outcome.observations);
       return { status: "parked" };
     }
 

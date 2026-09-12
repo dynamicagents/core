@@ -149,8 +149,13 @@ export interface AgentDefinition<
    * under, so this cannot wake a run other than the one that asked. The event
    * carries nothing: the Durable Object holds the answer, and the run reads it
    * from there.
+   *
+   * Optional on the interface, and always supplied by {@link defineAgent}. A
+   * definition written by hand without it is an agent whose Tasks never park,
+   * and the Worker refuses a continuation to one rather than accepting a reply
+   * no run is waiting for.
    */
-  resumeTurn(env: TEnv, wake: TurnWake): Promise<void>;
+  resumeTurn?(env: TEnv, wake: TurnWake): Promise<void>;
 }
 
 export function defineAgent<TEnv, TAgent extends Rpc.DurableObjectBranded>(
