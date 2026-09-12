@@ -191,9 +191,9 @@ export function makeTasks(db: DB) {
      * and `notify` steps — separate, independently-retried steps — could flip
      * storage to canceled while `deliver()` still posts the cached completed
      * task it already built, the exact race this guard exists to close. Writing
-     * `canceled` onto a `submitted`/`working` row, or re-writing it onto an
-     * already-`canceled` one, stays allowed: that is how the a2a-js handler's own
-     * cancel branch records the cancellation.
+     * `canceled` onto a `submitted`, `working` or `input-required` row, or
+     * re-writing it onto an already-`canceled` one, stays allowed: that is how the
+     * a2a-js handler's own cancel branch records the cancellation.
      *
      * **And no terminal row may be replaced by a *different* terminal state.**
      * The two rules above were written about cancellation and between them left
@@ -226,6 +226,7 @@ export function makeTasks(db: DB) {
         incomingState === TaskState.TASK_STATE_CANCELED &&
         existingState !== TaskState.TASK_STATE_SUBMITTED &&
         existingState !== TaskState.TASK_STATE_WORKING &&
+        existingState !== TaskState.TASK_STATE_INPUT_REQUIRED &&
         existingState !== TaskState.TASK_STATE_CANCELED
       ) {
         return false;
@@ -265,7 +266,8 @@ export function makeTasks(db: DB) {
 
     /**
      * Flip the task to `canceled` and return it, or `null` if the row is not
-     * eligible — unknown, or already past `submitted`/`working`. Guarding the
+     * eligible — unknown, or already finished. A Task parked on a question is
+     * eligible: it is waiting, and a cancel is how it stops waiting. Guarding the
      * source state (not just the destination, as {@link save} does) matters
      * because `complete`/`notify` are separate Workflow steps: without this, a
      * cancellation landing between them would flip an already-`completed` or
@@ -280,7 +282,8 @@ export function makeTasks(db: DB) {
       const state = stateOf(task);
       if (
         state !== TaskState.TASK_STATE_SUBMITTED &&
-        state !== TaskState.TASK_STATE_WORKING
+        state !== TaskState.TASK_STATE_WORKING &&
+        state !== TaskState.TASK_STATE_INPUT_REQUIRED
       ) {
         return null;
       }
@@ -292,6 +295,64 @@ export function makeTasks(db: DB) {
       };
       upsert(task);
       return task;
+    },
+
+    /**
+     * Park a `working` Task on a question for a person, by writing the
+     * `input-required` Task that carries it. Returns whether the write applied.
+     *
+     * Only from `working`, or from `input-required` itself — the same park re-run.
+     * A Task that is canceled or finished has nobody left to take the answer, and
+     * one still `submitted` has not run a round that could have asked.
+     */
+    park(task: Task): boolean {
+      const existing = readOne(task.id);
+      if (!existing) return false;
+      const state = stateOf(existing);
+      if (
+        state !== TaskState.TASK_STATE_WORKING &&
+        state !== TaskState.TASK_STATE_INPUT_REQUIRED
+      ) {
+        return false;
+      }
+      upsert(task);
+      return true;
+    },
+
+    /**
+     * Take a parked Task back to `working` once its question is answered, and
+     * return it — or `null` when it is not parked, which is what a retried answer
+     * finds after the first one resumed it.
+     *
+     * The question leaves with the state: the Task handed back says only that the
+     * agent is working again, and the question was already shown.
+     */
+    resume(taskId: string): PlainTask | null {
+      const task = readOne(taskId);
+      if (!task || stateOf(task) !== TaskState.TASK_STATE_INPUT_REQUIRED) {
+        return null;
+      }
+      task.status = {
+        state: TaskState.TASK_STATE_WORKING,
+        message: undefined,
+        timestamp: nowIso()
+      };
+      upsert(task);
+      return task;
+    },
+
+    /**
+     * The gatekeeper message a Task was accepted on, which also names the
+     * Workflow instance running it. `null` for a Task not accepted through
+     * {@link begin}.
+     */
+    messageIdOf(taskId: string): string | null {
+      const row = db
+        .select({ messageId: notifyTasks.messageId })
+        .from(notifyTasks)
+        .where(eq(notifyTasks.taskId, taskId))
+        .get();
+      return row?.messageId ?? null;
     },
 
     /** Delete all tasks older than 30 days (called by the maintenance cron). */

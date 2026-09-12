@@ -22,6 +22,13 @@
       "when": 1788817590937,
       "tag": "0002_round_observations",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1789148198330,
+      "tag": "0003_human_requests",
+      "breakpoints": true
     }
   ]
 }

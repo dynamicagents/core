@@ -1,11 +1,13 @@
 import type { WorkflowStep, WorkflowStepConfig } from "cloudflare:workers";
 import {
   CHUNK_STEP,
+  HUMAN_WAIT_MS,
   MAX_CHUNKS_PER_BRANCH,
   STEP_TIMEOUT_MS
 } from "../platform.js";
 import type { CoreConfig } from "../config.js";
 import { buildCompletedTask, buildFailedTask } from "../a2a/notify.js";
+import { humanEventType, humanRequestId } from "../a2a/hitl.js";
 import type { TurnPushContext } from "../a2a/push.js";
 import { deliverAbandonedTask, deliverTerminalTask } from "../a2a/deliver.js";
 import type { GatekeeperIdentity } from "../a2a/verify.js";
@@ -24,9 +26,9 @@ import type { RoundMode } from "./turn.js";
  * The shape is a **round loop**, not a fixed sequence of phases:
  *
  * 0. **Pre-work** — resolve the caller's agent, mark the Task working.
- * 1. **Round** — one main-agent inference that either answers the user (the Task
- *    is done) or delegates durable Subtasks plus the acknowledgment the user sees
- *    while they run.
+ * 1. **Round** — one main-agent inference that answers the user (the Task is
+ *    done), delegates durable Subtasks plus the acknowledgment the user sees while
+ *    they run, or asks the person a question and waits for the answer.
  * 2. **Execute** — a delegating round's Subtasks all run at once, each in an
  *    isolated managed subagent. Then the loop returns to 1, where the model sees
  *    the results and decides again — answer, or delegate once more. Sequencing
@@ -42,9 +44,9 @@ import type { RoundMode } from "./turn.js";
  * decided to end.
  *
  * Why a Workflow (not a DO alarm or `waitUntil`): `step.do(...)` gives durable,
- * independently-retried steps that survive isolate eviction, and a future
- * `escalate` decision (ask the human, then continue) slots in cleanly as another
- * branch of the loop built on `step.waitForEvent(...)`.
+ * independently-retried steps that survive isolate eviction, and a round that
+ * asks the person something parks the loop on `step.waitForEvent(...)` for as long
+ * as the answer takes, holding nothing while it waits.
  *
  * A Workflow is a separate entrypoint and cannot touch the agent DO's SQLite
  * directly, so: the task inputs travel as the workflow **payload**, and the agent
@@ -72,6 +74,13 @@ export interface HandleTaskParams {
   /** This agent's card-signing JWKS URL — the callback JWT `jku` (pinned key). */
   jku: string;
 }
+
+/**
+ * Why a Task ended with no answer: every reason a round can fail with, and the
+ * one a round cannot — a question the Task put to the person that nobody
+ * answered. Kept apart from {@link RoundFailureKind}, which is about the models.
+ */
+export type TaskFailureKind = RoundFailureKind | "unanswered";
 
 /**
  * What a finished run of this workflow actually did.
@@ -108,12 +117,13 @@ export type TaskVerdict =
   /** A round answered the user. The ordinary ending. */
   | { outcome: "replied"; rounds: number; turns: number }
   /**
-   * Both model slots produced nothing usable and no durable work stood behind
-   * them. `kind` is the difference between "the models could not do it" and a
-   * credential only a human can clear — the same distinction `failureCopy`
-   * turns into words.
+   * No answer reached the user. Usually both model slots produced nothing usable
+   * with no durable work behind them; `unanswered` is the other way, a question
+   * put to the person that nobody answered. `kind` tells those apart, and "the
+   * models could not do it" from a credential only a human can clear — the
+   * distinction `failureCopy` turns into words.
    */
-  | { outcome: "failed"; kind: RoundFailureKind; rounds: number; turns: number }
+  | { outcome: "failed"; kind: TaskFailureKind; rounds: number; turns: number }
   /** The caller gave up: before the first round, or while one was running. */
   | { outcome: "canceled"; rounds: number; turns: number }
   /**
@@ -152,9 +162,9 @@ export interface HandleTaskDeps {
   /** The user-facing copy. Only `copy.taskFailed` is read out here. */
   policy: RoundPolicy;
   /**
-   * Terminal copy for a round that produced no answer, by {@link
-   * RoundFailureKind} — an expired credential, models that could not do it, and
-   * whatever that union grows to cover.
+   * Terminal copy for a Task that ended with no answer, by {@link
+   * TaskFailureKind} — an expired credential, models that could not do it, a
+   * question nobody answered, and whatever that union grows to cover.
    *
    * A hook rather than more `RoundPolicy` copy, because the useful words are
    * deployment-specific ("run `claude setup-token`, then
@@ -166,7 +176,7 @@ export interface HandleTaskDeps {
    * Core still owns the delivery: this supplies only the message, so the
    * guarded write that doubles as the cancellation check stays in one place.
    */
-  failureCopy?: (kind: RoundFailureKind, detail: string) => string | undefined;
+  failureCopy?: (kind: TaskFailureKind, detail: string) => string | undefined;
   /**
    * The deployment's Ed25519 private JWK, for the terminal callback. Passed
    * rather than read off a module-scope `env` so this stays a pure function of
@@ -399,7 +409,7 @@ const NO_PROGRESS_ROUNDS = 3;
  *
  * **Step names are durable cache keys.** Everything inside the round loop carries
  * its round for that reason: `turn:<round>`, `deadline:<round>`, `scan:<round>`,
- * `cancel:<round>`. Renaming one silently re-runs its effect on replay — and the
+ * `cancel:<round>`, `park:<round>`. Renaming one silently re-runs its effect on replay — and the
  * recovery path in {@link runHandleTask} runs under its own prefix for the same
  * reason, so a second delivery cannot be handed this one's cached results.
  */
@@ -449,11 +459,12 @@ async function orchestrate(
   // than restarting the clock — otherwise a Workflow that retried its way through
   // the night would never observe the deadline it had long since passed.
   //
-  // When escalation lands, this is the line that needs care: a Task suspended on
-  // `step.waitForEvent(...)` must **rebase** it on resume, or a human's thinking
-  // time is charged to the agent and a Task that asked a question is dead before
-  // the answer arrives. `turnsUsed` needs no such handling — waiting costs none.
+  // Time spent waiting on a person's answer is theirs, not the agent's, so the
+  // deadline below subtracts it — summed from cached step returns like
+  // `turnsUsed`, so a replay reconstructs the same total. Charged, a Task that
+  // asked a question would be dead before the answer arrived.
   const startedAtMs = await step.do("started", async () => Date.now());
+  let waitedMs = 0;
 
   // At most one round per turn of the budget, **plus one**: an `open` round always
   // spends at least one turn, so `maxTurns` of them exhaust the budget — and the
@@ -468,7 +479,7 @@ async function orchestrate(
     // `turnsUsed` does not.
     const overdue = await step.do(
       `deadline:${round}`,
-      async () => Date.now() - startedAtMs >= limits.maxWallMs
+      async () => Date.now() - startedAtMs - waitedMs >= limits.maxWallMs
     );
 
     // Out of turns or out of time ⇒ this round gets no tools at all and must
@@ -591,6 +602,33 @@ async function orchestrate(
         : { outcome: "canceled", rounds, turns: turnsUsed };
     }
 
+    // The round asked the person something: post it, wait, and let the next
+    // round read the answer.
+    if (turn.status === "parked") {
+      const asked = await askHuman(p, step, agent, round, push, tag);
+      if (asked.status === "canceled")
+        return { outcome: "canceled", rounds, turns: turnsUsed };
+      if (asked.status === "unanswered") {
+        console.warn(`[${tag}] question went unanswered`, {
+          taskId: p.taskId,
+          round
+        });
+        const told = await deliver(p, step, agent, null, deps, {
+          kind: "unanswered",
+          detail: `the question round ${round} asked went unanswered`
+        });
+        return told
+          ? { outcome: "failed", kind: "unanswered", rounds, turns: turnsUsed }
+          : { outcome: "canceled", rounds, turns: turnsUsed };
+      }
+      waitedMs += asked.waitedMs;
+      // Asking is progress: whatever wall the rounds before it kept hitting, the
+      // person has now had a say in how to get past it.
+      repeated = 0;
+      lastFailures = "";
+      continue;
+    }
+
     // Delegated: run this round's Subtasks, then loop and let the model decide
     // again.
     const executed = await executeSubtasks(p, step, agent, round, push, tag);
@@ -631,6 +669,83 @@ async function orchestrate(
         turns: turnsUsed
       }
     : { outcome: "canceled", rounds: limits.maxTurns + 1, turns: turnsUsed };
+}
+
+/**
+ * Post a round's question, wait for the answer, and say what became of it.
+ *
+ * The wait is `step.waitForEvent`, not a step of work: the instance sleeps for as
+ * long as the person takes, holds no concurrency, and survives deploys. What wakes
+ * it carries nothing. The Durable Object holds the answer, so a wake that finds
+ * none yet waits again on what is left of the question's time, and a lost wake is
+ * covered by that time running out.
+ *
+ * Each result is projected to a plain object, for the reason the `turn:` step
+ * gives. A wait after the first carries its count in its step names, which are
+ * cache keys — see {@link orchestrate}.
+ */
+async function askHuman(
+  p: HandleTaskParams,
+  step: WorkflowStep,
+  agent: ResolveAgent,
+  round: number,
+  push: TurnPushContext,
+  /** The agent's log prefix — see the note where it is resolved. */
+  tag: string
+): Promise<
+  | { status: "answered"; waitedMs: number }
+  | { status: "unanswered" }
+  | { status: "canceled" }
+> {
+  const parked = await step.do(`park:${round}`, async () => {
+    const result = await agent().parkTask({ taskId: p.taskId, round, push });
+    return result.status === "parked"
+      ? { status: "parked" as const, at: result.at }
+      : { status: "canceled" as const };
+  });
+  if (parked.status === "canceled") return parked;
+
+  const type = humanEventType(humanRequestId(p.taskId, round));
+  let timeout = HUMAN_WAIT_MS;
+  for (let wake = 0; ; wake++) {
+    const suffix = wake === 0 ? "" : `:${wake}`;
+    let timedOut = false;
+    try {
+      await step.waitForEvent(`wait:${round}${suffix}`, { type, timeout });
+    } catch (err) {
+      // How a wait that runs out ends. The Durable Object closes the question,
+      // unless an answer got there first.
+      timedOut = true;
+      console.warn(`[${tag}] wait for an answer ended without one`, {
+        taskId: p.taskId,
+        round,
+        err: String(err)
+      });
+    }
+
+    const answer = await step.do(`answer:${round}${suffix}`, async () => {
+      const result = await agent().takeAnswer({
+        taskId: p.taskId,
+        identity: p.identity,
+        round,
+        timedOut
+      });
+      if (result.status === "answered")
+        return { status: "answered" as const, at: result.at };
+      if (result.status === "awaiting")
+        return { status: "awaiting" as const, at: result.at };
+      return { status: result.status };
+    });
+    if (answer.status === "answered")
+      return {
+        status: "answered",
+        waitedMs: Math.max(0, answer.at - parked.at)
+      };
+    if (answer.status !== "awaiting") return answer;
+    // Workflows refuses a wait under a second, and a question already past its
+    // time is closed when that short wait runs out.
+    timeout = Math.max(1_000, HUMAN_WAIT_MS - (answer.at - parked.at));
+  }
 }
 
 /**
@@ -774,8 +889,8 @@ async function runBranch(
  * logged. Given a `failure`, the host's {@link HandleTaskDeps.failureCopy} may
  * replace that text — same delivery, different words.
  *
- * `failure` is optional because only a round's own inference carries a kind. The
- * other path here — a budget that ran out mid-delegation — is not a model failure
+ * `failure` is optional because only a failed round, or a question nobody
+ * answered, carries a kind. The other path here — a budget that ran out mid-delegation — is not a model failure
  * and is deliberately not given a kind of its own until something needs to tell
  * it apart.
  *
@@ -789,7 +904,7 @@ async function deliver(
   agent: ResolveAgent,
   reply: string | null,
   deps: HandleTaskDeps,
-  failure?: { kind: RoundFailureKind; detail: string }
+  failure?: { kind: TaskFailureKind; detail: string }
 ): Promise<boolean> {
   // Resolved outside the step body so a replay cannot take a different branch
   // than the write it is replaying.

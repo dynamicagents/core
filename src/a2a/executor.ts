@@ -8,6 +8,7 @@ import type { Task } from "@a2a-js/sdk";
 import type { GatekeeperIdentity } from "./verify.js";
 import type { AgentResolver } from "./agent-stub.js";
 import { textOf } from "./parts.js";
+import { readHumanReply, type TurnWake } from "./hitl.js";
 
 /**
  * Derive a deterministic workflow instance id for a turn. Keyed on the gatekeeper's
@@ -53,12 +54,27 @@ export interface AcceptedTurn {
  */
 export type TurnStarter = (turn: AcceptedTurn) => Promise<void>;
 
+/**
+ * Wake the run a Task is parked in, once its question has an answer or can no
+ * longer get one.
+ *
+ * **Must tolerate a wake nobody needed** — a retried answer, a question already
+ * closed — because the run reads what happened from the Durable Object, never
+ * from the event.
+ */
+export type TurnResumer = (wake: TurnWake) => Promise<void>;
+
 export interface ExecutorConfig {
   identity: GatekeeperIdentity;
   /** This agent's card-signing JWKS URL — the callback JWT `jku`. */
   jku: string;
   resolveAgent: AgentResolver;
   startTurn: TurnStarter;
+  /**
+   * Wake a Task's run once a question it asked is answered. Absent on an agent
+   * whose Tasks never ask, and the Worker refuses a message on one of them.
+   */
+  resumeTurn?: TurnResumer;
 }
 
 /**
@@ -117,6 +133,14 @@ export class A2AExecutor implements AgentExecutor {
       throw new Error("taskPushNotificationConfig url and token are required");
     }
 
+    // A message naming a Task that exists is a reply to a question the Task
+    // asked — the Worker refuses any other kind before this runs. It resumes the
+    // Task that is waiting, and must never begin a second one.
+    if (requestContext.task) {
+      await this.continueTask(requestContext, eventBus);
+      return;
+    }
+
     const text = textOf(requestContext.userMessage);
     const messageId = requestContext.userMessage.messageId;
     const contextId = requestContext.contextId;
@@ -153,6 +177,61 @@ export class A2AExecutor implements AgentExecutor {
     eventBus.publish(AgentEvent.task(task));
     eventBus.finished();
   };
+
+  /**
+   * A reply onto a parked Task: record it, wake the run, and answer with the
+   * Task as it now stands.
+   *
+   * Nothing here throws on purpose. The handler turns an executor throw into a
+   * failed Task, which would end the Task a person was answering. A wake that
+   * cannot be sent is logged instead: the answer is already recorded, so the run
+   * finds it when its own wait runs out — late, and still correct.
+   */
+  private async continueTask(
+    requestContext: RequestContext,
+    eventBus: ExecutionEventBus
+  ): Promise<void> {
+    // Loaded by the handler from the Durable Object's own row.
+    const parked: Task = requestContext.task as Task;
+    const stub = this.config.resolveAgent(this.config.identity);
+    const reply = readHumanReply(requestContext.userMessage);
+
+    let current: Task = parked;
+    // The Worker refuses a continuation to an agent that cannot wake a run, but
+    // recording the answer and waking it are separate capabilities and only the
+    // second is visible there. Both are checked here, together, because acting
+    // on one without the other is what would lose the answer silently.
+    if (reply && stub.answerTask && this.config.resumeTurn) {
+      const answered = await stub.answerTask({
+        taskId: parked.id,
+        messageId: requestContext.userMessage.messageId,
+        reply
+      });
+      if (answered.task) current = answered.task;
+      if (answered.wake) {
+        try {
+          await this.config.resumeTurn(answered.wake);
+        } catch (err) {
+          console.error("[executor] could not wake the run a reply was for", {
+            taskId: parked.id,
+            err: String(err)
+          });
+        }
+      }
+    } else if (reply) {
+      // An agent that answers for a capability it does not have. Logged rather
+      // than thrown, like the failed wake above: the price of a throw is the
+      // Task the person was answering.
+      console.error("[executor] a reply reached an agent that cannot take it", {
+        taskId: parked.id,
+        canRecord: Boolean(stub.answerTask),
+        canWake: Boolean(this.config.resumeTurn)
+      });
+    }
+
+    eventBus.publish(AgentEvent.task(current));
+    eventBus.finished();
+  }
 
   /**
    * `CancelTask`: best-effort mark the task canceled in the DO and publish the

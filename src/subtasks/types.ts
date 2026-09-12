@@ -179,7 +179,8 @@ export interface DecompositionProposal {
  * another round begins. `failed` means the round produced no answer, with
  * {@link RoundFailureKind} carrying why; no Subtask is ever synthesized to cover
  * for it. `canceled` means the caller cancelled during the round: nothing was
- * persisted and nothing was published. Transient platform faults are not
+ * persisted and nothing was published. `parked` means it asked the person
+ * something and ended there; the round after it reads the answer. Transient platform faults are not
  * results: they throw so the enclosing Workflow step can retry (mirrors
  * {@link RecipeExecutionResult}).
  *
@@ -210,7 +211,13 @@ export type TurnTaskResult =
    * way; only the words differ.
    */
   | { status: "failed"; kind: RoundFailureKind; error: string; turns: number }
-  | { status: "canceled"; turns: number };
+  | { status: "canceled"; turns: number }
+  /**
+   * The round asked the person a question. The question is durable in the
+   * Durable Object; the Workflow posts it and waits, and the next round reads
+   * the answer.
+   */
+  | { status: "parked"; turns: number };
 
 /**
  * Distributive `Omit` — applies per member, so the discriminated union survives.
@@ -256,10 +263,10 @@ export interface CompositionBranch {
  * cancellation probe — one round trip, and no gap between asking and acting.
  *
  * Ids and nothing else, deliberately: a Workflow step return is capped at 1 MiB
- * and a Subtask carries verbatim history snapshots bounded only by
- * `MAX_INBOUND_TEXT_BYTES`, so a scan returning rows would overflow on a large
- * task. The durable rows are the source of truth; the Workflow carries
- * references to them and re-reads through the parent when it needs more.
+ * and a Subtask carries verbatim history snapshots bounded only by the message
+ * text limit the protocol package sets, so a scan returning rows would overflow
+ * on a large task. The durable rows are the source of truth; the Workflow
+ * carries references to them and re-reads through the parent when it needs more.
  */
 export type SubtaskScan =
   { canceled: true } | { canceled: false; ids: SubtaskId[] };

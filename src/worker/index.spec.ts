@@ -3,21 +3,29 @@ import {
   AGENT_CARD_PATH,
   A2A_PROTOCOL_VERSION,
   AgentCard,
+  TaskState,
   verifyAgentCardSignature,
   type Task
 } from "@a2a-js/sdk";
+import {
+  HITL_RESPONSE_TYPE,
+  MAX_MESSAGE_TEXT_BYTES
+} from "@dynamicagents/g2a-protocol";
 import { createA2AWorker, defineAgent, JWKS_PATH } from "./index.js";
 import type { AgentManifest } from "../a2a/card.js";
 import type { A2ASecretsEnv } from "../env.js";
 import type { AgentResolver, TaskAgent } from "../a2a/agent-stub.js";
 import type { AcceptedTurn } from "../a2a/executor.js";
+import type { TurnWake } from "../a2a/hitl.js";
 import type { PlainTask } from "../a2a/task.js";
 import { makeGatekeeperToken, TEST_TENANT } from "../testing/auth.js";
 import {
   AGENT_ORIGIN,
   GATEKEEPER_ORIGIN,
   TEST_AGENT_PRIVATE_JWK,
-  gatekeeperPublicJwks
+  gatekeeperPublicJwks,
+  testStatus,
+  testTask
 } from "../testing/fixtures.js";
 
 /**
@@ -775,6 +783,46 @@ describe("the accept-and-notify contract", () => {
     expect(body.error.message).toMatch(/not a valid URL/);
   });
 
+  /** A push config the contract check passes, so a send reaches the next one. */
+  const pushed = {
+    taskPushNotificationConfig: {
+      url: "https://gatekeeper.test/cb",
+      token: "t"
+    }
+  };
+
+  it("rejects a message whose text is over the bound both ends enforce", async () => {
+    // Split across two parts, one of them exactly at the bound: the agreement is
+    // that the parts are summed with no separator, so this is over it by a byte
+    // and a reader that measured per part would take it.
+    const res = await authed({
+      message: {
+        ...message,
+        parts: [{ text: "x".repeat(MAX_MESSAGE_TEXT_BYTES) }, { text: "y" }]
+      },
+      configuration: pushed
+    });
+    const body = await res.json<{ error: { message: string } }>();
+
+    expect(body.error.message).toMatch(/message text exceeds/);
+  });
+
+  it("takes a message whose text is exactly at the bound", async () => {
+    // The other half of the same agreement. A sender that stops one byte short
+    // of what the receiver takes throws away the top of the range for nothing,
+    // so the boundary byte has to be spelled the same on both sides.
+    const res = await authed({
+      message: {
+        ...message,
+        parts: [{ text: "x".repeat(MAX_MESSAGE_TEXT_BYTES) }]
+      },
+      configuration: pushed
+    });
+    const body = await res.json<{ error?: { message: string } }>();
+
+    expect(body.error?.message ?? "").not.toMatch(/message text exceeds/);
+  });
+
   it("echoes the request id so a client can correlate the rejection", async () => {
     const res = await authed({ request: { message } });
     expect((await res.json<{ id: number }>()).id).toBe(7);
@@ -816,5 +864,200 @@ describe("protocol version negotiation", () => {
 
     expect(body.error).toBeDefined();
     expect(body.id).toBe(7);
+  });
+});
+
+/**
+ * A message on a Task that already exists.
+ *
+ * The only one a Task takes is the answer to a question it asked, and the Worker
+ * is where anything else is refused: past it, a refusal is an executor throw,
+ * and the handler turns that into a failed Task — ending the Task a person was
+ * in the middle of answering.
+ */
+describe("a message on an existing task", () => {
+  const parkedId = "t-parked";
+  const wake: TurnWake = { messageId: "m-original", eventType: "hitl-q1" };
+
+  /** A tenant whose one Task is parked on a question, recording what reaches it. */
+  function parkedTenant(options: { resumable?: boolean } = {}) {
+    const answered: unknown[] = [];
+    const woken: TurnWake[] = [];
+    // What the handler last wrote, so a read after its own write sees it — a
+    // cancel reads the Task back to confirm it took.
+    let stored: Task = testTask(
+      parkedId,
+      "ctx-1",
+      TaskState.TASK_STATE_INPUT_REQUIRED
+    );
+    const agent = {
+      async beginTask(): Promise<never> {
+        throw new Error("a reply must never begin a task");
+      },
+      async getTask(taskId: string) {
+        return taskId === parkedId ? structuredClone(stored) : null;
+      },
+      async saveTask(task: Task) {
+        stored = structuredClone(task);
+        return true;
+      },
+      async cancelTask() {
+        return null;
+      },
+      async answerTask(input: unknown) {
+        answered.push(input);
+        return {
+          task: {
+            ...testTask(parkedId, "ctx-1", TaskState.TASK_STATE_WORKING),
+            status: testStatus(TaskState.TASK_STATE_WORKING)
+          },
+          wake
+        };
+      },
+      async humanWake() {
+        return wake;
+      }
+    };
+    const handler = createA2AWorker({
+      manifest: hostManifest,
+      tenants: {
+        [TEST_TENANT]: {
+          manifest: manifest("worker-spec-parked"),
+          resolveAgent: () => agent as never,
+          startTurn: async () => {
+            throw new Error("a reply must never start a turn");
+          },
+          ...(options.resumable === false
+            ? {}
+            : {
+                resumeTurn: async (w: TurnWake) => {
+                  woken.push(w);
+                }
+              })
+        }
+      }
+    });
+    const call = async (body: unknown) =>
+      handler(
+        post(body, {
+          authorization: `Bearer ${await makeGatekeeperToken()}`,
+          "A2A-Version": A2A_PROTOCOL_VERSION
+        }),
+        env
+      );
+    return { call, answered, woken };
+  }
+
+  /** A `SendMessage` onto the parked Task, carrying `parts`. */
+  const onto = (parts: unknown[]) =>
+    sendMessage({
+      message: {
+        messageId: "gk-token:r:q1",
+        role: "ROLE_USER",
+        taskId: parkedId,
+        parts
+      },
+      configuration: {
+        taskPushNotificationConfig: {
+          url: "https://gatekeeper.test/cb",
+          token: "gk-token"
+        }
+      }
+    });
+
+  const answer = [
+    { text: "org/web" },
+    {
+      data: {
+        type: HITL_RESPONSE_TYPE,
+        requestId: "q1",
+        optionId: "option_2",
+        answeredBy: "U1"
+      },
+      mediaType: "application/json"
+    }
+  ];
+
+  it("hands an answer to the waiting task and wakes its run", async () => {
+    const { call, answered, woken } = parkedTenant();
+
+    const res = await call(onto(answer));
+    const body = await res.json<{
+      error?: { message: string };
+      result?: { task?: { id: string; status: { state: string } } };
+    }>();
+
+    expect(body.error).toBeUndefined();
+    expect(body.result?.task?.id).toBe(parkedId);
+    expect(body.result?.task?.status.state).toBe("TASK_STATE_WORKING");
+    expect(answered).toEqual([
+      expect.objectContaining({
+        taskId: parkedId,
+        messageId: "gk-token:r:q1",
+        reply: expect.objectContaining({ kind: "answer", requestId: "q1" })
+      })
+    ]);
+    expect(woken).toEqual([wake]);
+  });
+
+  it("refuses an ordinary message on a task, and leaves the task waiting", async () => {
+    const { call, answered, woken } = parkedTenant();
+
+    const res = await call(onto([{ text: "and one more thing" }]));
+    const body = await res.json<{ error?: { message: string } }>();
+
+    expect(body.error?.message).toMatch(
+      /must answer the question the task asked/
+    );
+    expect(answered).toEqual([]);
+    expect(woken).toEqual([]);
+  });
+
+  it("refuses an over-long answer, and leaves the task waiting", async () => {
+    // The case the bound is written down for. A person answers, the gatekeeper
+    // marks the question answered and forwards the text; a refusal that arrives
+    // after that leaves the question spent and the answer nowhere, and the only
+    // repair is to ask again. As a JSON-RPC error it is a refusal of the
+    // message, and the Task is still waiting for a shorter one.
+    const { call, answered, woken } = parkedTenant();
+
+    const res = await call(
+      onto([{ text: "x".repeat(MAX_MESSAGE_TEXT_BYTES + 1) }, answer[1]])
+    );
+    const body = await res.json<{ error?: { message: string } }>();
+
+    expect(body.error?.message).toMatch(/message text exceeds/);
+    expect(answered).toEqual([]);
+    expect(woken).toEqual([]);
+  });
+
+  it("refuses a message on a task when the agent's tasks never ask", async () => {
+    const { call, answered } = parkedTenant({ resumable: false });
+
+    const res = await call(onto(answer));
+    const body = await res.json<{ error?: { message: string } }>();
+
+    expect(body.error?.message).toMatch(
+      /takes no messages on an existing task/
+    );
+    expect(answered).toEqual([]);
+  });
+
+  it("wakes the run of a task canceled while it waited", async () => {
+    // The cancel reaches the Durable Object through the task store, where
+    // nothing can reach a Workflow. Without this the run sits on its question
+    // until the question expires.
+    const { call, woken } = parkedTenant();
+
+    const res = await call({
+      jsonrpc: "2.0",
+      id: 9,
+      method: "CancelTask",
+      params: { tenant: TEST_TENANT, id: parkedId }
+    });
+    const body = await res.json<{ error?: { message: string } }>();
+
+    expect(body.error).toBeUndefined();
+    expect(woken).toEqual([wake]);
   });
 });

@@ -242,3 +242,96 @@ describe("createAgentHarness", () => {
     expect(globalThis.fetch).toBe(before);
   });
 });
+
+/**
+ * What a gatekeeper sends onto a Task parked on a question: an answer, or word
+ * that the question expired.
+ *
+ * Driven against an edge whose agent records what reached it, because what the
+ * harness owes a consumer is exactly that: a reply shaped so the edge takes it
+ * as an answer, under the message id a real gatekeeper would give it.
+ */
+describe("replying to a question through the harness", () => {
+  const replies: unknown[] = [];
+
+  const parkedHandler = createA2AWorker<TestEnv>({
+    manifest,
+    tenants: {
+      [TEST_TENANT]: {
+        manifest,
+        resolveAgent: () =>
+          ({
+            async beginTask(): Promise<never> {
+              throw new Error("a reply must never begin a task");
+            },
+            async getTask(taskId: string) {
+              return buildSubmittedTask(taskId, "ctx-1");
+            },
+            async saveTask() {
+              return true;
+            },
+            async cancelTask() {
+              return null;
+            },
+            async answerTask(input: { taskId: string }) {
+              replies.push(input);
+              return {
+                task: buildSubmittedTask(input.taskId, "ctx-1"),
+                wake: null
+              };
+            }
+          }) as never,
+        startTurn: async () => {
+          throw new Error("a reply must never start a turn");
+        },
+        resumeTurn: async () => {}
+      }
+    }
+  });
+  const parkedWorker = { fetch: parkedHandler };
+
+  it("answers the way the gatekeeper answers", async () => {
+    const harness = createAgentHarness({
+      worker: parkedWorker,
+      env,
+      tenant: TEST_TENANT
+    });
+    using _ = harness.interceptGatekeeper();
+
+    const task = await harness.answer(
+      "t1",
+      "q1",
+      { optionId: "option_2" },
+      { answeredBy: "U1" }
+    );
+
+    expect(task.id).toBe("t1");
+    expect(replies.at(-1)).toEqual({
+      taskId: "t1",
+      // The gatekeeper's own derivation, so calling it again is its retry.
+      messageId: "harness-push-token:r:q1",
+      reply: {
+        kind: "answer",
+        requestId: "q1",
+        answer: { optionId: "option_2", answeredBy: "U1" }
+      }
+    });
+  });
+
+  it("expires a question the way the gatekeeper expires one", async () => {
+    const harness = createAgentHarness({
+      worker: parkedWorker,
+      env,
+      tenant: TEST_TENANT
+    });
+    using _ = harness.interceptGatekeeper();
+
+    await harness.timeout("t1", "q1");
+
+    expect(replies.at(-1)).toEqual({
+      taskId: "t1",
+      messageId: "harness-push-token:t:q1",
+      reply: { kind: "timeout", requestId: "q1" }
+    });
+  });
+});
