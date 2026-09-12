@@ -170,7 +170,7 @@ function approvalFor(
 }
 
 /** What the model reads for a held call the person did not approve. */
-const DECLINED = "The person asked declined this call, and it did not run.";
+const DECLINED = "The person declined this call, and it did not run.";
 
 export abstract class RoundAgentBase<
   TEnv extends Cloudflare.Env & AiEnv & A2ASecretsEnv = Cloudflare.Env &

@@ -1799,6 +1799,72 @@ describe("a round that holds calls for approval", () => {
     });
 
     expect(outcome.status).toBe("parked");
+    if (outcome.status !== "parked" || outcome.asked.kind !== "approval")
+      throw new Error("expected held calls");
+    // And the ending is not kept with the step. Its tool never executes, so
+    // nothing in the exchange answers that call, and a replayed call the
+    // provider has no result for is refused before the approved one can run.
+    expect(JSON.stringify(outcome.asked.pending)).not.toContain(
+      FINAL_REPLY_TOOL_NAME
+    );
+  });
+
+  it("runs the approved call from a step that also reached an ending", async () => {
+    const { runs, tools } = counted();
+    const parked = await holding({
+      tools,
+      models: pair(
+        mockModel({
+          toolCalls: [
+            push,
+            { toolName: FINAL_REPLY_TOOL_NAME, input: { text: "pushed it" } }
+          ]
+        })
+      )
+    });
+    const { replay } = replayOf(parked, true);
+    const model = inspectingModel(finalReply("pushed, and here is the PR"));
+
+    const outcome = await holding({
+      round: 1,
+      tools,
+      approval: replay,
+      models: pair(model.model)
+    });
+
+    expect(runs.push).toBe(1);
+    expect(outcome).toEqual({
+      status: "replied",
+      reply: "pushed, and here is the PR"
+    });
+  });
+
+  it("answers a held call whose tool the surface no longer offers", async () => {
+    const { runs, tools } = counted();
+    const parked = await holding({
+      tools,
+      models: pair(mockModel({ toolCall: push }))
+    });
+    const { replay } = replayOf(parked, true);
+    const model = inspectingModel(finalReply("that is no longer available"));
+
+    // The main-agent surface may depend on durable state, and a question can
+    // wait a week: the round after the answer can be offered a different set.
+    const { push: _gone, ...without } = tools;
+    const outcome = await holding({
+      round: 1,
+      tools: without,
+      approval: replay,
+      models: pair(model.model)
+    });
+
+    expect(runs.push).toBe(0);
+    expect(outcome.status).toBe("replied");
+    // Answered rather than left out: the person's approval never reaches the
+    // provider attached to a call nothing can run.
+    expect(JSON.stringify(model.asked()[0].messages)).toContain(
+      "execution-denied"
+    );
   });
 
   it("runs an approved call once, and goes on from its output", async () => {
