@@ -422,6 +422,12 @@ export type RoundMode = "open" | "final";
  * model is asked anything. Each output is kept the moment it lands and rendered in
  * place of the approval from then on, so a call runs once however many times the
  * round is attempted.
+ *
+ * The bound on that is the window between the call returning and its output being
+ * kept: an isolate lost in there runs the call again on the next attempt. It is
+ * the window every work tool in a round already has, and it is why this is a
+ * once-per-answer guarantee rather than a transaction — a tool whose second run
+ * would do damage has to be idempotent on its own account.
  */
 export interface ApprovalReplay {
   /** The step the previous round stopped on, as it was kept. */
@@ -722,6 +728,22 @@ function pendingExchange(
     return assigned;
   };
 
+  // Which calls this exchange can answer: the ones an approval request held, and
+  // the ones that ran. A control call — an ending the model reached in the same
+  // step — is neither, because its tool has no `execute` and so never returns a
+  // result. Replaying it would hand the provider a tool call nothing answers,
+  // which is rejected before the approved call gets to run.
+  const answerable = new Set<string>();
+  for (const message of messages) {
+    if (message.role === "assistant" && typeof message.content !== "string")
+      for (const part of message.content)
+        if (part.type === "tool-approval-request")
+          answerable.add(part.toolCallId);
+    if (message.role === "tool")
+      for (const part of message.content)
+        if (part.type === "tool-result") answerable.add(part.toolCallId);
+  }
+
   const kept: ModelMessage[] = [];
   for (const message of messages) {
     if (message.role === "assistant" && typeof message.content !== "string") {
@@ -729,7 +751,7 @@ function pendingExchange(
       for (const part of message.content) {
         if (part.type === "text")
           content.push({ type: "text", text: part.text });
-        else if (part.type === "tool-call")
+        else if (part.type === "tool-call" && answerable.has(part.toolCallId))
           content.push({
             type: "tool-call",
             toolCallId: identify(part.toolCallId),
@@ -1240,6 +1262,25 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
       call
     ])
   );
+  // A held call whose tool the plugins no longer offer. The main-agent surface is
+  // allowed to depend on durable state, and a question can wait a week, so this
+  // is reachable — and silently leaving the call out would hand the provider the
+  // person's approval for a call nothing runs. Answered instead, so the model
+  // learns it did not happen and can say so.
+  for (const call of replayed.values()) {
+    if (args.tools[call.toolName] || Object.hasOwn(results, call.toolCallId))
+      continue;
+    results[call.toolCallId] = {
+      type: "tool-result",
+      toolCallId: call.toolCallId,
+      toolName: call.toolName,
+      output: {
+        type: "execution-denied",
+        reason: "this tool is no longer available to this agent"
+      }
+    };
+  }
+
   const approvals: AttemptApprovals = {
     ...(args.toolApproval
       ? {

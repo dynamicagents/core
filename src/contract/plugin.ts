@@ -504,7 +504,20 @@ export function withoutToolApproval<TRuntime = SubtaskRuntime>(
 ): AgentPlugin<TRuntime> {
   const released: AgentPlugin<TRuntime> = { ...plugin };
   const inner = plugin.mainAgentToolApproval;
-  if (!inner || options.tools === undefined) {
+  if (!inner) {
+    // Named tools against a plugin that gates nothing. Reported for the reason
+    // the per-name miss below is: a release that matched nothing and a release
+    // that worked are otherwise indistinguishable, and a typo reads as the
+    // second.
+    if (options.tools?.length)
+      console.error(
+        `[plugin] "${plugin.key}" declares no approval rules at all, so ` +
+          `"${options.tools.join('", "')}" released nothing. Check for a rename.`
+      );
+    delete released.mainAgentToolApproval;
+    return released;
+  }
+  if (options.tools === undefined) {
     delete released.mainAgentToolApproval;
     return released;
   }
