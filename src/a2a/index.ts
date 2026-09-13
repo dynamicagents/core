@@ -8,9 +8,10 @@
  *
  * ## The wire values come from `@dynamicagents/g2a-protocol`
  *
- * Claim names, the algorithm, the well-known paths, the audience rule and the
- * human-in-the-loop part names are a two-sided contract with a token issuer, and the issuer — slack-gatekeeper — is
- * not an agent and must not import this package. They live in a zero-dependency
+ * Claim names, the algorithm, the well-known paths, the audience rule, the
+ * human-in-the-loop part names and the message text bound are a two-sided
+ * contract with a token issuer, and the issuer — slack-gatekeeper — is not an
+ * agent and must not import this package. They live in a zero-dependency
  * leaf both sides depend on, and are re-exported here so an agent's imports are
  * unchanged: `IDENTITY_CLAIM`, `TENANT_CLAIM`, `A2A_RPC_PATH` and
  * `GatekeeperIdentity` still come from `@dynamicagents/core/a2a`.
@@ -30,6 +31,7 @@ export {
   HITL_REQUEST_TYPE,
   HITL_RESPONSE_TYPE,
   HITL_TIMEOUT_TYPE,
+  MAX_MESSAGE_TEXT_BYTES,
   type HitlOption,
   type HitlRequestData,
   type HitlRequestKind,
