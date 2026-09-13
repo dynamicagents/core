@@ -180,9 +180,10 @@ export interface DecompositionProposal {
  * {@link RoundFailureKind} carrying why; no Subtask is ever synthesized to cover
  * for it. `canceled` means the caller cancelled during the round: nothing was
  * persisted and nothing was published. `parked` means it asked the person
- * something and ended there; the round after it reads the answer. Transient platform faults are not
- * results: they throw so the enclosing Workflow step can retry (mirrors
- * {@link RecipeExecutionResult}).
+ * something and ended there; the round after it reads the answer.
+ *
+ * Transient platform faults are not results: they throw so the enclosing
+ * Workflow step can retry (mirrors {@link RecipeExecutionResult}).
  *
  * `turns` is what this round cost, which the Workflow meters against the Task's
  * budget. This is the **only** type that carries it, and it carries it because the

@@ -32,7 +32,7 @@ import {
   type TurnResumer,
   type TurnStarter
 } from "../a2a/executor.js";
-import { readHumanReply } from "../a2a/hitl.js";
+import { readHumanReply, type HumanReply, type TurnWake } from "../a2a/hitl.js";
 import { inboundTextError } from "../a2a/parts.js";
 import { DurableTaskStore } from "../a2a/task-store.js";
 import type { AgentResolver } from "../a2a/agent-stub.js";
@@ -330,7 +330,7 @@ function pushConfigError(rpcBody: {
  * go on. Applies to a message that begins a Task and to one answering a question
  * alike: the bound is on any text crossing the link.
  *
- * Here rather than at the executor for the reason {@link continuationError}
+ * Here rather than at the executor for the reason {@link readContinuation}
  * gives, and for one more. The text of a message that begins a Task goes into a
  * Workflow's parameters, which the platform caps: past this point the failure is
  * an instance that will not start, reported against a Task the caller was told
@@ -351,9 +351,19 @@ function messageTextError(rpcBody: {
   return params.message ? inboundTextError(params.message) : undefined;
 }
 
+/** A reply onto an existing Task, as read off the `SendMessage` carrying it. */
+interface Continuation {
+  taskId: string;
+  /** Empty when the message names none, which the handler accepts too. */
+  contextId: string;
+  messageId: string;
+  reply: HumanReply;
+}
+
 /**
- * Why a `SendMessage` naming an existing Task is refused, or `undefined` when it
- * may go on. A message naming no Task begins one, and is no concern of this.
+ * The reply a `SendMessage` carries onto an existing Task, or why it is refused,
+ * or `null` for a message naming no Task — which begins one, and is no concern
+ * of this.
  *
  * A message on a Task is only ever the answer to a question that Task asked, and
  * only an agent that can wake the run waiting on it may take one. Refused here as
@@ -361,33 +371,127 @@ function messageTextError(rpcBody: {
  * which the handler turns into a failed Task, ending the Task the person was
  * answering.
  */
-function continuationError(
+function readContinuation(
   rpcBody: { method?: string; params?: unknown },
   resumable: boolean
-): string | undefined {
-  if (rpcBody.method !== SEND_MESSAGE_METHOD) return undefined;
+): Continuation | { refused: string } | null {
+  if (rpcBody.method !== SEND_MESSAGE_METHOD) return null;
   let params: SendMessageRequest;
   try {
     params = SendMessageRequest.fromJSON(rpcBody.params);
   } catch {
     // A malformed request is the handler's to refuse, with its own message.
-    return undefined;
+    return null;
   }
   const message = params.message;
-  if (!message?.taskId) return undefined;
+  if (!message?.taskId) return null;
   if (!resumable) {
-    return (
-      "this agent takes no messages on an existing task: none of its tasks " +
-      "asks a question to be answered"
-    );
+    return {
+      refused:
+        "this agent takes no messages on an existing task: none of its tasks " +
+        "asks a question to be answered"
+    };
   }
-  if (!readHumanReply(message)) {
-    return (
-      "a message on an existing task must answer the question the task asked, " +
-      `in a ${HITL_RESPONSE_TYPE} or ${HITL_TIMEOUT_TYPE} data part`
-    );
+  const reply = readHumanReply(message);
+  if (!reply) {
+    return {
+      refused:
+        "a message on an existing task must answer the question the task asked, " +
+        `in a ${HITL_RESPONSE_TYPE} or ${HITL_TIMEOUT_TYPE} data part`
+    };
   }
-  return undefined;
+  return {
+    taskId: message.taskId,
+    contextId: message.contextId,
+    messageId: message.messageId,
+    reply
+  };
+}
+
+/**
+ * Record a reply in the Durable Object, before the request handler runs, and
+ * return the run to wake — or the JSON-RPC error to answer with instead.
+ *
+ * Here and not in the executor for the reason {@link readContinuation} gives,
+ * which applies to a failure as much as to a refusal: a Durable Object call that
+ * throws in the executor fails the Task the person was answering. Failing here
+ * is an internal error, which the gatekeeper retries, and recording is
+ * idempotent on the message id. Answering with the Task as though the reply had
+ * landed is the one outcome worse than both: the gatekeeper would close the
+ * question on an answer nobody holds.
+ *
+ * The handler then loads the Task this has already resumed, so what the caller
+ * is answered with is the Task as the reply left it.
+ */
+async function recordReply(
+  agent: TenantAgent,
+  identity: GatekeeperIdentity,
+  continuation: Continuation
+): Promise<
+  { wake: TurnWake | null } | { error: { code: number; message: string } }
+> {
+  const stub = agent.resolveAgent(identity);
+  if (typeof stub.answerTask !== "function") {
+    return {
+      error: toJsonRpcError(
+        new RequestMalformedError(
+          "this agent cannot record an answer to a question its task asked"
+        )
+      )
+    };
+  }
+  const { contextId, ...answer } = continuation;
+  try {
+    // The one refusal the handler makes after this that recording could get
+    // ahead of — a missing Task names no question, and a closed question takes
+    // no answer. Recorded first, the handler's refusal would reach the person
+    // over an answer the run had already taken.
+    const task = await stub.getTask(answer.taskId);
+    if (task?.contextId && contextId && contextId !== task.contextId) {
+      return {
+        error: toJsonRpcError(
+          new RequestMalformedError(
+            `contextId '${contextId}' is not the context of task '${task.id}'`
+          )
+        )
+      };
+    }
+    const { wake } = await stub.answerTask(answer);
+    return { wake };
+  } catch (err) {
+    console.error("[worker] could not record a reply", {
+      taskId: continuation.taskId,
+      err: String(err)
+    });
+    return {
+      error: toJsonRpcError(
+        new Error("the answer could not be recorded, and can be sent again")
+      )
+    };
+  }
+}
+
+/**
+ * Wake the run a recorded reply was for, once the handler has answered.
+ *
+ * After it, so the handler's own writes to the Task are behind the run before it
+ * moves. Best-effort: the answer is already in the Durable Object, so a run this
+ * does not reach finds it when its own wait runs out — late, and still correct.
+ */
+async function wakeAnswered(
+  agent: TenantAgent,
+  taskId: string,
+  wake: TurnWake
+): Promise<void> {
+  if (!agent.resumeTurn) return;
+  try {
+    await agent.resumeTurn(wake);
+  } catch (err) {
+    console.error("[worker] could not wake the run a reply was for", {
+      taskId,
+      err: String(err)
+    });
+  }
 }
 
 /**
@@ -713,15 +817,23 @@ export function createA2AWorker<TEnv extends object>(
         );
       }
 
-      const continuation = continuationError(
+      const continuation = readContinuation(
         rpcBody,
         agent.resumeTurn !== undefined
       );
-      if (continuation) {
+      if (continuation && "refused" in continuation) {
         return jsonRpcErrorResponse(
           body,
-          toJsonRpcError(new RequestMalformedError(continuation))
+          toJsonRpcError(new RequestMalformedError(continuation.refused))
         );
+      }
+      let wake: TurnWake | null = null;
+      if (continuation) {
+        const recorded = await recordReply(agent, identity, continuation);
+        if ("error" in recorded) {
+          return jsonRpcErrorResponse(body, recorded.error);
+        }
+        wake = recorded.wake;
       }
 
       const handler = new DefaultRequestHandler(
@@ -731,8 +843,7 @@ export function createA2AWorker<TEnv extends object>(
           identity,
           jku: `${origin}${jwksPath}`,
           resolveAgent: agent.resolveAgent,
-          startTurn: agent.startTurn,
-          resumeTurn: agent.resumeTurn
+          startTurn: agent.startTurn
         }),
         undefined,
         undefined,
@@ -769,6 +880,11 @@ export function createA2AWorker<TEnv extends object>(
         (result as { error?: unknown }).error === undefined
       ) {
         await wakeCanceled(agent, identity, rpcBody.params);
+      }
+      // Whatever the handler made of the message: a wake nobody needed costs the
+      // run one step, and one withheld here is a run left on its wait.
+      if (continuation && wake) {
+        await wakeAnswered(agent, continuation.taskId, wake);
       }
       return Response.json(result, { headers: extensionHeaders(context) });
     }

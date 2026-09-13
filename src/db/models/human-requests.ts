@@ -108,7 +108,14 @@ export function makeHumanRequests(db: DB) {
         })
         .onConflictDoNothing()
         .run();
-      return get(input.requestId) as HumanRequest;
+      // The insert wrote this row or found it there, so a miss is storage that
+      // did not keep a write — said here, rather than as a null a caller trips
+      // over later.
+      const stored = get(input.requestId);
+      if (!stored) {
+        throw new Error(`human request ${input.requestId} was not stored`);
+      }
+      return stored;
     },
 
     get,

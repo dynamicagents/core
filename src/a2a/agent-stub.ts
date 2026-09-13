@@ -60,9 +60,9 @@ export interface TaskAgent {
   humanWake?(taskId: string): Promise<TurnWake | null>;
 }
 
-/** What recording a reply did, for the executor to act on. */
+/** What recording a reply did, for the Worker to act on. */
 export interface AnsweredTask {
-  /** The Task as it now stands — what the continuation is answered with. */
+  /** The Task as it now stands. */
   task: PlainTask | null;
   /** The run to wake, or `null` when the reply named no question of this Task. */
   wake: TurnWake | null;

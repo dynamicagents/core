@@ -7,6 +7,7 @@ import {
   verifyAgentCardSignature,
   type Task
 } from "@a2a-js/sdk";
+import { A2A_ERROR_CODE } from "@a2a-js/sdk/errors";
 import {
   HITL_RESPONSE_TYPE,
   MAX_MESSAGE_TEXT_BYTES
@@ -880,7 +881,13 @@ describe("a message on an existing task", () => {
   const wake: TurnWake = { messageId: "m-original", eventType: "hitl-q1" };
 
   /** A tenant whose one Task is parked on a question, recording what reaches it. */
-  function parkedTenant(options: { resumable?: boolean } = {}) {
+  function parkedTenant(
+    options: {
+      resumable?: boolean;
+      /** `false` for a stub with no `answerTask`; `"throws"` for one that fails. */
+      recording?: false | "throws";
+    } = {}
+  ) {
     const answered: unknown[] = [];
     const woken: TurnWake[] = [];
     // What the handler last wrote, so a read after its own write sees it — a
@@ -904,16 +911,23 @@ describe("a message on an existing task", () => {
       async cancelTask() {
         return null;
       },
-      async answerTask(input: unknown) {
-        answered.push(input);
-        return {
-          task: {
-            ...testTask(parkedId, "ctx-1", TaskState.TASK_STATE_WORKING),
-            status: testStatus(TaskState.TASK_STATE_WORKING)
-          },
-          wake
-        };
-      },
+      ...(options.recording === false
+        ? {}
+        : {
+            async answerTask(input: unknown) {
+              if (options.recording === "throws") {
+                throw new Error("Durable Object reset");
+              }
+              answered.push(input);
+              // Resumed, as the Durable Object resumes it: the handler loads the
+              // Task after this, and answers with what it finds.
+              stored = {
+                ...stored,
+                status: testStatus(TaskState.TASK_STATE_WORKING)
+              };
+              return { task: structuredClone(stored), wake };
+            }
+          }),
       async humanWake() {
         return wake;
       }
@@ -945,7 +959,7 @@ describe("a message on an existing task", () => {
         }),
         env
       );
-    return { call, answered, woken };
+    return { call, answered, woken, state: () => stored.status?.state };
   }
 
   /** A `SendMessage` onto the parked Task, carrying `parts`. */
@@ -1028,6 +1042,70 @@ describe("a message on an existing task", () => {
 
     expect(body.error?.message).toMatch(/message text exceeds/);
     expect(answered).toEqual([]);
+    expect(woken).toEqual([]);
+  });
+
+  it("answers a reply it could not record with an error the gatekeeper retries", async () => {
+    // Recorded in the executor, this throw would be a failed Task: the Task the
+    // person was answering, ended over a fault a retry would have cleared.
+    const { call, woken, state } = parkedTenant({ recording: "throws" });
+
+    const res = await call(onto(answer));
+    const body = await res.json<{
+      error?: { code: number; message: string };
+      result?: unknown;
+    }>();
+
+    expect(body.result).toBeUndefined();
+    expect(body.error?.code).toBe(A2A_ERROR_CODE.INTERNAL_ERROR);
+    expect(state()).toBe(TaskState.TASK_STATE_INPUT_REQUIRED);
+    expect(woken).toEqual([]);
+  });
+
+  it("refuses a reply in another context before recording it", async () => {
+    // The handler refuses this too, but only after the Worker has recorded the
+    // reply: without the Worker's own check, the run takes an answer the person
+    // is shown a refusal for.
+    const { call, answered, woken, state } = parkedTenant();
+
+    const res = await call(
+      sendMessage({
+        message: {
+          messageId: "gk-token:r:q1",
+          role: "ROLE_USER",
+          taskId: parkedId,
+          contextId: "ctx-other",
+          parts: answer
+        },
+        configuration: {
+          taskPushNotificationConfig: {
+            url: "https://gatekeeper.test/cb",
+            token: "gk-token"
+          }
+        }
+      })
+    );
+    const body = await res.json<{ error?: { message: string } }>();
+
+    expect(body.error?.message).toMatch(/is not the context of task/);
+    expect(answered).toEqual([]);
+    expect(woken).toEqual([]);
+    expect(state()).toBe(TaskState.TASK_STATE_INPUT_REQUIRED);
+  });
+
+  it("refuses a reply to an agent that cannot record one", async () => {
+    // Refused rather than acknowledged: an acknowledged reply is a question the
+    // gatekeeper closes, on an answer nothing kept.
+    const { call, woken, state } = parkedTenant({ recording: false });
+
+    const res = await call(onto(answer));
+    const body = await res.json<{
+      error?: { code: number; message: string };
+    }>();
+
+    expect(body.error?.message).toMatch(/cannot record an answer/);
+    expect(body.error?.code).not.toBe(A2A_ERROR_CODE.INTERNAL_ERROR);
+    expect(state()).toBe(TaskState.TASK_STATE_INPUT_REQUIRED);
     expect(woken).toEqual([]);
   });
 

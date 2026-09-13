@@ -96,6 +96,12 @@ export interface AgentHarness {
    * The message id is derived as the gatekeeper derives an answer's, so calling
    * this twice is the gatekeeper retrying, not a second answer. Throws on a
    * JSON-RPC error, like {@link send}.
+   *
+   * The text part beside the answer carries `text`, or the option id when there
+   * is none. The gatekeeper puts the option's label there, which the harness
+   * cannot know without the question. Nothing an agent does turns on it: core
+   * takes the answer from the data part, and shows the model the label from the
+   * question it stored.
    */
   answer(
     taskId: string,
