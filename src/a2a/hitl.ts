@@ -53,8 +53,10 @@ const MAX_EVENT_TYPE_LENGTH = 100;
  * The Workflow event that wakes a run parked on `requestId`.
  *
  * One type per question rather than one for every answer. Workflows buffers an
- * event sent before its wait begins, and a retried answer is sent twice, so a
- * shared type would let a stale wake satisfy the wait on a later question.
+ * event sent before its wait begins, and one question's run can be woken more
+ * than once — every reply recorded against it wakes the run, even one that
+ * changed nothing — so a shared type would let a stale wake satisfy the wait on
+ * a later question.
  *
  * An event goes to one Task's instance, so the type only has to tell that Task's
  * questions apart. An id past the length Workflows accepts is cut to a prefix and a

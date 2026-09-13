@@ -42,8 +42,8 @@ export interface TaskAgent {
 
   /**
    * Record a person's reply to a question one of this caller's Tasks asked, and
-   * say which run to wake. Idempotent on `messageId`: the gatekeeper retries a
-   * continuation like any other message.
+   * say which run to wake. Idempotent on `messageId`, which the gatekeeper
+   * derives from the question, so the same answer arriving twice records once.
    *
    * Optional, like `listTasks`. An agent whose Tasks never ask leaves it out.
    */

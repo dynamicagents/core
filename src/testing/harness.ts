@@ -94,7 +94,7 @@ export interface AgentHarness {
    * picks an option or types a reply, and return the Task the agent hands back.
    *
    * The message id is derived as the gatekeeper derives an answer's, so calling
-   * this twice is the gatekeeper retrying, not a second answer. Throws on a
+   * this twice delivers the same answer twice, not a second answer. Throws on a
    * JSON-RPC error, like {@link send}.
    *
    * The text part beside the answer carries `text`, or the option id when there

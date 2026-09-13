@@ -1045,9 +1045,9 @@ describe("a message on an existing task", () => {
     expect(woken).toEqual([]);
   });
 
-  it("answers a reply it could not record with an error the gatekeeper retries", async () => {
+  it("answers a reply it could not record with an internal error, and leaves the task waiting", async () => {
     // Recorded in the executor, this throw would be a failed Task: the Task the
-    // person was answering, ended over a fault a retry would have cleared.
+    // person was answering, ended over a fault inside the agent.
     const { call, woken, state } = parkedTenant({ recording: "throws" });
 
     const res = await call(onto(answer));

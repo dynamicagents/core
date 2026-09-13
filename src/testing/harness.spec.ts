@@ -308,7 +308,7 @@ describe("replying to a question through the harness", () => {
     expect(task.id).toBe("t1");
     expect(replies.at(-1)).toEqual({
       taskId: "t1",
-      // The gatekeeper's own derivation, so calling it again is its retry.
+      // The gatekeeper's own derivation, so a second call is the same answer.
       messageId: "harness-push-token:r:q1",
       reply: {
         kind: "answer",

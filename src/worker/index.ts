@@ -415,10 +415,13 @@ function readContinuation(
  * Here and not in the executor for the reason {@link readContinuation} gives,
  * which applies to a failure as much as to a refusal: a Durable Object call that
  * throws in the executor fails the Task the person was answering. Failing here
- * is an internal error, which the gatekeeper retries, and recording is
- * idempotent on the message id. Answering with the Task as though the reply had
- * landed is the one outcome worse than both: the gatekeeper would close the
- * question on an answer nobody holds.
+ * leaves the Task parked and answers with an internal error, the code for a
+ * fault inside the agent rather than a verdict on the message. Answering with
+ * the Task as though the reply had landed would be worse than either: the
+ * gatekeeper would take the question as answered, on an answer nobody holds.
+ *
+ * Nothing here counts on the answer being sent again. Recording is idempotent on
+ * the message id, so an answer that does arrive twice records once.
  *
  * The handler then loads the Task this has already resumed, so what the caller
  * is answered with is the Task as the reply left it.
@@ -464,9 +467,7 @@ async function recordReply(
       err: String(err)
     });
     return {
-      error: toJsonRpcError(
-        new Error("the answer could not be recorded, and can be sent again")
-      )
+      error: toJsonRpcError(new Error("the agent could not record the answer"))
     };
   }
 }
