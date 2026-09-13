@@ -8,6 +8,7 @@ import type { Task } from "@a2a-js/sdk";
 import type { GatekeeperIdentity } from "./verify.js";
 import type { AgentResolver } from "./agent-stub.js";
 import { textOf } from "./parts.js";
+import type { TurnWake } from "./hitl.js";
 
 /**
  * Derive a deterministic workflow instance id for a turn. Keyed on the gatekeeper's
@@ -52,6 +53,16 @@ export interface AcceptedTurn {
  * {@link workflowIdForMessage} and {@link ignoreAlreadyExists}.
  */
 export type TurnStarter = (turn: AcceptedTurn) => Promise<void>;
+
+/**
+ * Wake the run a Task is parked in, once its question has an answer or can no
+ * longer get one.
+ *
+ * **Must tolerate a wake nobody needed** — a retried answer, a question already
+ * closed — because the run reads what happened from the Durable Object, never
+ * from the event.
+ */
+export type TurnResumer = (wake: TurnWake) => Promise<void>;
 
 export interface ExecutorConfig {
   identity: GatekeeperIdentity;
@@ -115,6 +126,17 @@ export class A2AExecutor implements AgentExecutor {
     // request handler, not into the JSON-RPC error the caller needs to see.
     if (!pushConfig?.url || !pushConfig.token) {
       throw new Error("taskPushNotificationConfig url and token are required");
+    }
+
+    // A message naming a Task that exists is a reply to a question the Task
+    // asked. The Worker refuses any other kind, records the reply and wakes the
+    // run, all outside this — a throw here fails the Task the person was
+    // answering — so what is left is to answer with the Task as the handler
+    // loaded it, after the reply. It must never begin a second one.
+    if (requestContext.task) {
+      eventBus.publish(AgentEvent.task(requestContext.task));
+      eventBus.finished();
+      return;
     }
 
     const text = textOf(requestContext.userMessage);

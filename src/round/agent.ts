@@ -1,15 +1,23 @@
 import type { ToolSet } from "ai";
 import { TaskState } from "@a2a-js/sdk";
+import {
+  HITL_REQUEST_TYPE,
+  type HitlRequestData
+} from "@dynamicagents/g2a-protocol";
 import { validateRecipe } from "../contract/validation.js";
 import type { ResolvedRecipe } from "../contract/recipe.js";
 import type { AiEnv, A2ASecretsEnv } from "../env.js";
-import { stateOf } from "../db/index.js";
+import { stateOf, type HumanRequest } from "../db/index.js";
 import type { GatekeeperIdentity } from "../a2a/verify.js";
 import type { TurnPushContext } from "../a2a/push.js";
-import type { SessionLike } from "../agent/session.js";
+import { buildInputRequiredTask, humanRequestId } from "../a2a/hitl.js";
+import { appendOnce, type SessionLike } from "../agent/session.js";
 import {
+  deterministicSessionMessage,
   finalReplyMessageId,
   roundAckMessageId,
+  roundAnswerMessageId,
+  roundAskMessageId,
   sessionText
 } from "../agent/history.js";
 import { newTurnBudget, type TurnBudget } from "../agent/budget.js";
@@ -79,6 +87,62 @@ import {
  * direction, since the loop's other two ceilings still hold.
  */
 const FAILURE_EXCERPT_CHARS = 300;
+
+/** What posting a round's question did. See {@link RoundAgentBase.parkTask}. */
+export type ParkResult =
+  { status: "parked"; at: number } | { status: "canceled" };
+
+/**
+ * What became of a round's question. See {@link RoundAgentBase.takeAnswer}.
+ *
+ * `awaiting` is a wake that found no answer yet. It carries the time, so the run
+ * goes back to waiting on what is left of the question's life rather than on all
+ * of it again.
+ */
+export type HumanWaitResult =
+  | { status: "answered"; at: number }
+  | { status: "awaiting"; at: number }
+  | { status: "unanswered" }
+  | { status: "canceled" };
+
+/**
+ * A round's question as the gatekeeper renders it. Offered answers become a
+ * `choice` whose option ids the answer names; a question offering none is
+ * answered in the person's own words.
+ */
+function questionFor(
+  requestId: string,
+  question: string,
+  options?: readonly string[]
+): HitlRequestData {
+  return {
+    type: HITL_REQUEST_TYPE,
+    requestId,
+    requestKind: "choice",
+    prompt: question,
+    ...(options
+      ? {
+          options: options.map((label, i) => ({ id: `option_${i + 1}`, label }))
+        }
+      : { allowFreeform: true })
+  };
+}
+
+/**
+ * An answer as the conversation reads it: the label of the option picked, which
+ * is what the person saw, and then whatever they typed.
+ */
+function answerText(request: HumanRequest): string {
+  const answer = request.answer;
+  if (!answer) return "";
+  const picked = answer.optionId
+    ? (request.request.options?.find((o) => o.id === answer.optionId)?.label ??
+      answer.optionId)
+    : undefined;
+  return [picked, answer.text]
+    .filter((part): part is string => Boolean(part))
+    .join("\n\n");
+}
 
 export abstract class RoundAgentBase<
   TEnv extends Cloudflare.Env & AiEnv & A2ASecretsEnv = Cloudflare.Env &
@@ -215,7 +279,9 @@ export abstract class RoundAgentBase<
    * 3. Durable **rows for this round** mean this round already delegated —
    *    recover its acknowledgment from the Session, with no inference and no
    *    duplicate rows.
-   * 4. Otherwise, infer.
+   * 4. A durable **question for this round** means it already asked — posting
+   *    and waiting are the Workflow's, so return `parked` with no inference.
+   * 5. Otherwise, infer.
    *
    * Cancellation is re-read **after** inference too, not just before it: the model
    * call is the widest window in the round, and neither the Subtask rows nor the
@@ -268,6 +334,12 @@ export abstract class RoundAgentBase<
       return { status: "delegated", reply, subtasks: existing };
     }
 
+    // Re-inferring could ask something other than what the person may already be
+    // reading.
+    if (this.db.humanRequests.forRound(taskId, round)) {
+      return { status: "parked" };
+    }
+
     const metadata: AiGatewayMetadata = { taskId, round };
     const controller = new AbortController();
     this.inflight.set(taskId, controller);
@@ -293,6 +365,7 @@ export abstract class RoundAgentBase<
         toolOutputWindow: this.config.toolOutputWindow,
         types: this.runtime.types,
         maxSubtasks: this.config.maxSubtasks,
+        canAsk: policy.human !== undefined,
         maxOutputTokens: this.config.model.maxOutputTokens,
         instructions: this.instructions,
         partialNote: policy.copy.partialNote,
@@ -321,6 +394,24 @@ export abstract class RoundAgentBase<
       return { status: "replied", reply: outcome.reply };
     }
 
+    if (outcome.status === "parked") {
+      const requestId = humanRequestId(taskId, round);
+      // Before the question, which is the opposite order to the delegating path
+      // below, for the reason that path gives inverted. The question is what
+      // `decideRound` recovers on: once it exists, a re-run of this round
+      // reports `parked` without inferring again, so anything written after it
+      // is written only by the attempt that got that far. The put is an upsert,
+      // so the attempt that does reach the question rewrites the same row.
+      this.db.observations.put(taskId, round, outcome.observations);
+      this.db.humanRequests.open({
+        requestId,
+        taskId,
+        round,
+        request: questionFor(requestId, outcome.question, outcome.options)
+      });
+      return { status: "parked" };
+    }
+
     // The ack is durable in the Session before the rows exist. A crash in this
     // window re-runs the round and persists the *retry's* drafts under the
     // *first* attempt's ack — both are valid outputs of the same input, and no
@@ -338,6 +429,112 @@ export abstract class RoundAgentBase<
     this.db.observations.put(taskId, round, outcome.observations);
     await channel?.working(outcome.reply, `ack:${round}`);
     return { status: "delegated", reply: outcome.reply, subtasks };
+  }
+
+  /**
+   * Post a round's question and park its Task on it — the Workflow's
+   * `park:<round>` step.
+   *
+   * Returns when the question was first posted, which the Workflow takes off the
+   * Task's wall clock once the answer is in; or `canceled`, with nothing posted.
+   *
+   * Re-runnable. The park is a guarded write, the post carries the question's own
+   * id for the gatekeeper to dedupe on, and the stamp keeps its first value. A
+   * question already closed — answered while this step's result went unrecorded
+   * — is not posted again.
+   */
+  async parkTask(input: {
+    taskId: string;
+    round: number;
+    push: TurnPushContext;
+  }): Promise<ParkResult> {
+    const { taskId, round, push } = input;
+    this.noteSelfOrigin(push.jku);
+    if (await this.isTaskCanceled(taskId)) return { status: "canceled" };
+
+    const request = this.db.humanRequests.forRound(taskId, round);
+    // Unreachable: a round records its question before it reports `parked`.
+    if (!request) {
+      throw new Error(`task ${taskId} round ${round} parked with no question`);
+    }
+    if (request.status !== "awaiting") {
+      return { status: "parked", at: request.parkedAt ?? Date.now() };
+    }
+
+    const task = buildInputRequiredTask(
+      taskId,
+      push.contextId,
+      request.request
+    );
+    if (!this.db.tasks.park(task)) {
+      if (await this.isTaskCanceled(taskId)) return { status: "canceled" };
+      throw new Error(`task ${taskId} is no longer working and cannot park`);
+    }
+    const at =
+      this.db.humanRequests.markParked(request.requestId, Date.now()) ??
+      Date.now();
+    // Throws on a non-2xx so the step retries, and everything above is
+    // idempotent for exactly that.
+    await this.push(push).deliver(task);
+    return { status: "parked", at };
+  }
+
+  /**
+   * Read what became of a round's question, once its run wakes or its wait runs
+   * out — the Workflow's `answer:<round>` step.
+   *
+   * An answer goes into the Session here **with the question it answers**, under
+   * ids derived from the round, so a re-run appends nothing twice and history
+   * never holds a question nobody was shown. `timedOut` closes a question still
+   * open; it cannot overturn an answer that got in first.
+   */
+  async takeAnswer(input: {
+    taskId: string;
+    identity: GatekeeperIdentity;
+    round: number;
+    timedOut: boolean;
+  }): Promise<HumanWaitResult> {
+    const { taskId, identity, round, timedOut } = input;
+    if (await this.isTaskCanceled(taskId)) return { status: "canceled" };
+
+    const asked = this.db.humanRequests.forRound(taskId, round);
+    // Unreachable, for the reason `parkTask` gives.
+    if (!asked) {
+      throw new Error(
+        `task ${taskId} round ${round} has no question to answer`
+      );
+    }
+    if (timedOut) this.db.humanRequests.expire(asked.requestId, Date.now());
+
+    const request = this.db.humanRequests.get(asked.requestId) ?? asked;
+    switch (request.status) {
+      case "answered": {
+        const session = this.getSession(identity);
+        await appendOnce(
+          session,
+          deterministicSessionMessage(
+            roundAskMessageId(taskId, round),
+            "assistant",
+            request.request.prompt
+          )
+        );
+        await appendOnce(
+          session,
+          deterministicSessionMessage(
+            roundAnswerMessageId(taskId, round),
+            "user",
+            answerText(request)
+          )
+        );
+        return { status: "answered", at: request.closedAt ?? Date.now() };
+      }
+      case "awaiting":
+        return { status: "awaiting", at: Date.now() };
+      case "canceled":
+        return { status: "canceled" };
+      case "unanswered":
+        return { status: "unanswered" };
+    }
   }
 
   /**

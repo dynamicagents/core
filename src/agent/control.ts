@@ -5,6 +5,11 @@ import {
   finalReplyInputSchema,
   finalReplyTool
 } from "./final-reply.js";
+import {
+  ASK_USER_TOOL_NAME,
+  askUserInputSchema,
+  askUserTool
+} from "./ask-user.js";
 import type { ReferenceCatalogEntry } from "../subtasks/catalog.js";
 import {
   makeDecompositionProposalSchema,
@@ -40,10 +45,12 @@ import type { SubtaskParams } from "../contract/recipe.js";
  * means writing its `parse`; it inherits validation and repair by existing.
  */
 
-/** What one round decided. A future `escalate` is another variant here. */
+/** What one round decided. */
 export type TurnDecision =
   | { kind: "reply"; text: string }
-  | { kind: "delegate"; reply: string; drafts: SubtaskDraft[] };
+  | { kind: "delegate"; reply: string; drafts: SubtaskDraft[] }
+  /** Stop, and put `question` to the person the Task is for. */
+  | { kind: "ask"; question: string; options?: string[] };
 
 /**
  * Thrown by a {@link ControlTool.parse} for a call the round cannot use.
@@ -71,8 +78,10 @@ export interface ControlTool {
    *
    * It ranks by **commitment**: `delegate` starts durable work that a reply cannot
    * undo, so a `delegate` alongside a `final_reply` means the reply is the
-   * acknowledgment *for* that work, not an answer instead of it. A future
-   * `escalate` slots in by saying how committal it is, and nothing else changes.
+   * acknowledgment *for* that work, not an answer instead of it. `ask_user`
+   * outranks both, because asking starts nothing: a question beside a `delegate`
+   * holds the work back until the answer is in, rather than starting work the
+   * answer might have changed.
    */
   readonly precedence: number;
   /**
@@ -109,12 +118,18 @@ export interface ControlTool {
  *
  * `delegate` is withheld from a `final` round, which has no budget left to spend on
  * work. `final_reply` is declared on every round including that one: withhold both
- * and the round has no legal way to end.
+ * and the round has no legal way to end. `ask_user` is declared only where the
+ * caller says the round may ask.
  */
 export function controlTools(opts: {
   catalog: ReferenceCatalogEntry[];
   /** Whether this round may still hand out work (`false` on a `final` round). */
   delegable: boolean;
+  /**
+   * Whether this round may stop and ask the person. The caller decides: the
+   * agent's policy has to allow it, and a `final` round never may.
+   */
+  askable?: boolean;
   /** The installed subtask types — what `delegate` may name. */
   types: SubtaskTypeRegistry;
   /** `CoreConfig.maxSubtasks`, the per-round fan-out bound. */
@@ -182,6 +197,45 @@ export function controlTools(opts: {
           opts.types
         );
         return { kind: "delegate", reply, drafts };
+      }
+    });
+  }
+
+  if (opts.askable) {
+    tools.push({
+      name: ASK_USER_TOOL_NAME,
+      tool: askUserTool,
+      precedence: 2,
+      select(inputs) {
+        // The person answers one question at a time, and the gatekeeper holds
+        // one open prompt per Task — a second would never be shown.
+        if (inputs.length > 1) {
+          throw new ControlCallError(
+            `${ASK_USER_TOOL_NAME} was called ${inputs.length} times in one turn. ` +
+              `Ask one question, with everything you need to know in it.`
+          );
+        }
+        return inputs[0];
+      },
+      parse(input) {
+        const parsed = askUserInputSchema.safeParse(input);
+        if (!parsed.success) {
+          throw new ControlCallError(
+            `${ASK_USER_TOOL_NAME} input is invalid — ${issues(parsed.error)}`
+          );
+        }
+        const question = parsed.data.question.trim();
+        const options = parsed.data.options?.map((o) => o.trim());
+        if (
+          options &&
+          new Set(options.map((o) => o.toLowerCase())).size !== options.length
+        ) {
+          throw new ControlCallError(
+            `${ASK_USER_TOOL_NAME} options must differ from one another — ` +
+              `the person cannot tell two identical answers apart.`
+          );
+        }
+        return { kind: "ask", question, ...(options ? { options } : {}) };
       }
     });
   }

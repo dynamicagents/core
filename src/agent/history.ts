@@ -130,6 +130,20 @@ export function finalReplyMessageId(taskId: string): string {
   return `task:${taskId}:reply:final`;
 }
 
+/**
+ * Id of the question a round asked. Appended together with its answer, once the
+ * answer is in, so history never holds a question nobody was shown: a round that
+ * decided to ask and then crashed before posting leaves nothing behind here.
+ */
+export function roundAskMessageId(taskId: string, round: number): string {
+  return `task:${taskId}:round:${round}:ask`;
+}
+
+/** Id of the answer to {@link roundAskMessageId}, in the words the person gave. */
+export function roundAnswerMessageId(taskId: string, round: number): string {
+  return `task:${taskId}:round:${round}:answer`;
+}
+
 /** A Sessions-store message with a caller-chosen (deterministic) id. */
 export function deterministicSessionMessage(
   id: string,

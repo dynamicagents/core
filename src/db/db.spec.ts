@@ -4,9 +4,14 @@ import { describe, it, expect } from "vitest";
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { TaskState } from "@a2a-js/sdk";
+import {
+  HITL_REQUEST_TYPE,
+  type HitlRequestData
+} from "@dynamicagents/g2a-protocol";
 import { AgentDB, PLUGIN_MIGRATIONS_TABLE } from "./db.js";
 import { makeDoHelpers, doStorage } from "../testing/do.js";
 import { buildCompletedTask, buildFailedTask } from "../a2a/notify.js";
+import { buildInputRequiredTask } from "../a2a/hitl.js";
 import type { PluginStore } from "./db.js";
 import type { TaskListQuery } from "./models/tasks.js";
 import type { SubtaskDraft } from "../subtasks/types.js";
@@ -607,3 +612,260 @@ async function withDbStores<T>(
     return fn(storage.sql);
   });
 }
+
+describe("a task parked on a question", () => {
+  const question: HitlRequestData = {
+    type: HITL_REQUEST_TYPE,
+    requestId: "task_t1_round_0_ask",
+    requestKind: "choice",
+    prompt: "Which one?",
+    allowFreeform: true
+  };
+
+  it("parks a working task, and resumes it once", async () => {
+    const result = await withDb("park-resume", async (db) => {
+      await db.ensureReady();
+      db.tasks.begin({ messageId: "m1", taskId: "t1", contextId: "c" });
+      db.tasks.markWorking("t1");
+      const parked = db.tasks.park(buildInputRequiredTask("t1", "c", question));
+      const waiting = db.tasks.get("t1")?.status.state;
+      const resumed = db.tasks.resume("t1");
+      const again = db.tasks.resume("t1");
+      return { parked, waiting, resumed, again, now: db.tasks.get("t1") };
+    });
+
+    expect(result.parked).toBe(true);
+    expect(result.waiting).toBe(TaskState.TASK_STATE_INPUT_REQUIRED);
+    expect(result.resumed?.status.state).toBe(TaskState.TASK_STATE_WORKING);
+    // A retried answer finds it resumed already, and resumes nothing.
+    expect(result.again).toBeNull();
+    // The question leaves with the state; it was already shown.
+    expect(result.now?.status.message).toBeUndefined();
+  });
+
+  it("parks only a task that is working", async () => {
+    const result = await withDb("park-guard", async (db) => {
+      await db.ensureReady();
+      const park = (taskId: string) =>
+        db.tasks.park(buildInputRequiredTask(taskId, "c", question));
+      db.tasks.begin({ messageId: "m1", taskId: "submitted", contextId: "c" });
+      db.tasks.begin({ messageId: "m2", taskId: "canceled", contextId: "c" });
+      db.tasks.cancel("canceled");
+      db.tasks.begin({ messageId: "m3", taskId: "done", contextId: "c" });
+      db.tasks.save(buildCompletedTask("done", "c", "the answer"));
+      return {
+        submitted: park("submitted"),
+        canceled: park("canceled"),
+        done: park("done"),
+        unknown: park("nobody")
+      };
+    });
+
+    // Nobody is left to take an answer on a finished task, and a submitted one
+    // has run no round that could have asked.
+    expect(result).toEqual({
+      submitted: false,
+      canceled: false,
+      done: false,
+      unknown: false
+    });
+  });
+
+  it("lets a cancel reach a task waiting on its question", async () => {
+    const result = await withDb("park-cancel", async (db) => {
+      await db.ensureReady();
+      db.tasks.begin({ messageId: "m1", taskId: "t1", contextId: "c" });
+      db.tasks.markWorking("t1");
+      db.tasks.park(buildInputRequiredTask("t1", "c", question));
+      return {
+        canceled: db.tasks.cancel("t1"),
+        working: db.tasks.markWorking("t1")
+      };
+    });
+
+    // A waiting task is still running, as far as its person is concerned, and
+    // stopping it is what a cancel is for.
+    expect(result.canceled?.status.state).toBe(TaskState.TASK_STATE_CANCELED);
+    expect(result.working).toBe("canceled");
+  });
+
+  it("names the message a task was accepted on", async () => {
+    const result = await withDb("message-id-of", async (db) => {
+      await db.ensureReady();
+      db.tasks.begin({ messageId: "m-original", taskId: "t1", contextId: "c" });
+      return {
+        known: db.tasks.messageIdOf("t1"),
+        unknown: db.tasks.messageIdOf("nobody")
+      };
+    });
+
+    expect(result).toEqual({ known: "m-original", unknown: null });
+  });
+});
+
+describe("the questions a task asks", () => {
+  const asked = (requestId: string, prompt = "Which one?") =>
+    ({
+      type: HITL_REQUEST_TYPE,
+      requestId,
+      requestKind: "choice",
+      prompt,
+      allowFreeform: true
+    }) satisfies HitlRequestData;
+
+  it("keeps the first question a round asked", async () => {
+    // A round can re-run after a crash and word its question differently, and
+    // the first one may already be in front of the person.
+    const result = await withDb("hr-open", async (db) => {
+      await db.ensureReady();
+      const open = (prompt: string) =>
+        db.humanRequests.open({
+          requestId: "q0",
+          taskId: "t1",
+          round: 0,
+          request: asked("q0", prompt)
+        });
+      open("Which repository?");
+      const again = open("Which repo do you mean?");
+      return { again, forRound: db.humanRequests.forRound("t1", 0) };
+    });
+
+    expect(result.again.request.prompt).toBe("Which repository?");
+    expect(result.again.status).toBe("awaiting");
+    expect(result.forRound?.requestId).toBe("q0");
+  });
+
+  it("records an answer once, and knows its retry for the same message", async () => {
+    const verdicts = await withDb("hr-answer", async (db) => {
+      await db.ensureReady();
+      db.humanRequests.open({
+        requestId: "q0",
+        taskId: "t1",
+        round: 0,
+        request: asked("q0")
+      });
+      const answer = (messageId: string) =>
+        db.humanRequests.answer("q0", {
+          answer: { optionId: "option_1", answeredBy: "U1" },
+          messageId,
+          at: 5_000
+        });
+      return {
+        first: answer("gk:r:q0"),
+        retry: answer("gk:r:q0"),
+        another: answer("someone-else"),
+        unknown: db.humanRequests.answer("nope", {
+          answer: { text: "x", answeredBy: "U1" },
+          messageId: "m",
+          at: 1
+        }),
+        stored: db.humanRequests.get("q0")
+      };
+    });
+
+    expect(verdicts.first).toBe("answered");
+    expect(verdicts.retry).toBe("repeated");
+    expect(verdicts.another).toBe("closed");
+    expect(verdicts.unknown).toBe("unknown");
+    expect(verdicts.stored).toMatchObject({
+      status: "answered",
+      answer: { optionId: "option_1", answeredBy: "U1" },
+      closedAt: 5_000
+    });
+  });
+
+  it("keeps whichever of an answer and an expiry landed first", async () => {
+    const result = await withDb("hr-race", async (db) => {
+      await db.ensureReady();
+      for (const [requestId, round] of [
+        ["answered-first", 0],
+        ["expired-first", 1]
+      ] as const) {
+        db.humanRequests.open({
+          requestId,
+          taskId: "t1",
+          round,
+          request: asked(requestId)
+        });
+      }
+      const reply = { answer: { text: "yes", answeredBy: "U1" }, at: 2 };
+
+      db.humanRequests.answer("answered-first", { ...reply, messageId: "a" });
+      const lateExpiry = db.humanRequests.expire("answered-first", 3);
+
+      db.humanRequests.expire("expired-first", 2);
+      const lateAnswer = db.humanRequests.answer("expired-first", {
+        ...reply,
+        messageId: "b"
+      });
+
+      return {
+        lateExpiry,
+        lateAnswer,
+        answered: db.humanRequests.get("answered-first")?.status,
+        expired: db.humanRequests.get("expired-first")?.status
+      };
+    });
+
+    expect(result).toEqual({
+      lateExpiry: false,
+      lateAnswer: "closed",
+      answered: "answered",
+      expired: "unanswered"
+    });
+  });
+
+  it("keeps the first moment a question was posted", async () => {
+    // The step that posts it retries, and the wait began the first time.
+    const stamps = await withDb("hr-parked", async (db) => {
+      await db.ensureReady();
+      db.humanRequests.open({
+        requestId: "q0",
+        taskId: "t1",
+        round: 0,
+        request: asked("q0")
+      });
+      return [
+        db.humanRequests.markParked("q0", 100),
+        db.humanRequests.markParked("q0", 200)
+      ];
+    });
+
+    expect(stamps).toEqual([100, 100]);
+  });
+
+  it("closes a canceled task's open questions, and no one else's", async () => {
+    const result = await withDb("hr-cancel", async (db) => {
+      await db.ensureReady();
+      const open = (requestId: string, taskId: string, round: number) =>
+        db.humanRequests.open({
+          requestId,
+          taskId,
+          round,
+          request: asked(requestId)
+        });
+      open("t1-r0", "t1", 0);
+      db.humanRequests.answer("t1-r0", {
+        answer: { text: "yes", answeredBy: "U1" },
+        messageId: "a",
+        at: 1
+      });
+      open("t1-r1", "t1", 1);
+      open("t2-r0", "t2", 0);
+
+      return {
+        closed: db.humanRequests.cancelForTask("t1", 9),
+        latest: db.humanRequests.latest("t1")?.status,
+        earlier: db.humanRequests.get("t1-r0")?.status,
+        other: db.humanRequests.get("t2-r0")?.status
+      };
+    });
+
+    expect(result).toEqual({
+      closed: 1,
+      latest: "canceled",
+      earlier: "answered",
+      other: "awaiting"
+    });
+  });
+});

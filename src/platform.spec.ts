@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   CHUNK_SOFT_MS,
+  HUMAN_WAIT_MS,
   MAX_CHUNKS_PER_BRANCH,
   MAX_TOOL_CALL_MS,
   STEP_TIMEOUT_MS,
@@ -50,6 +51,13 @@ describe("platform bounds", () => {
     expect(MAX_CHUNKS_PER_BRANCH).toBeGreaterThan(
       DEFAULT_CORE_CONFIG.subagentLimits.maxTurns
     );
+  });
+
+  it("waits on a person past the gatekeeper's expiry, and no longer than a wait may last", () => {
+    // Past a week, so the gatekeeper's own timeout is what normally ends the
+    // wait; inside a year, the longest `step.waitForEvent` accepts.
+    expect(HUMAN_WAIT_MS).toBeGreaterThan(7 * 24 * 60 * 60_000);
+    expect(HUMAN_WAIT_MS).toBeLessThanOrEqual(365 * 24 * 60 * 60_000);
   });
 
   it("keeps the worst-case step product under one Workflow instance", () => {

@@ -1,8 +1,15 @@
 import { describe, it, expect } from "vitest";
 import { APICallError, generateText, isStepCount, tool } from "ai";
+import type { ModelMessage } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 import { z } from "zod";
 import { FINAL_REPLY_TOOL_NAME } from "../agent/final-reply.js";
+import { ASK_USER_TOOL_NAME } from "../agent/ask-user.js";
+import {
+  deterministicSessionMessage,
+  roundAnswerMessageId,
+  roundAskMessageId
+} from "../agent/history.js";
 import { DELEGATE_TOOL_NAME } from "../subtasks/delegate.js";
 import { makeSubtaskTypes } from "../subtasks/index.js";
 import { newTurnBudget } from "../agent/index.js";
@@ -1430,5 +1437,217 @@ describe("the tool deadline the round relies on", () => {
       release?.();
       await generation;
     }
+  });
+});
+
+/**
+ * A round that stops to ask the person.
+ *
+ * Asking is an ending, as `final_reply` and `delegate` are, and what is pinned
+ * is what makes it one: it is offered only where the agent's policy says it may
+ * ask and never on a round that has to answer, it outranks the other endings in
+ * its step, and it leaves the Session alone — the question goes in with its
+ * answer, not before.
+ */
+describe("a round that asks", () => {
+  const askPolicy: RoundPolicy = {
+    ...policy,
+    human: {
+      askGuidance: `
+
+# Asking
+
+Ask only when you cannot go on without an answer that only they have.`
+    }
+  };
+  const askInstructions = buildTurnInstructions(askPolicy, types, 8, {
+    maxTurns: 20,
+    maxWallMs: 60_000
+  });
+
+  const asking = (overrides: Partial<RunTurnArgs> = {}) =>
+    args({ canAsk: true, instructions: askInstructions, ...overrides });
+
+  const ask = (question: string, options?: string[]) => ({
+    toolName: ASK_USER_TOOL_NAME,
+    input: { question, ...(options ? { options } : {}) }
+  });
+
+  it("ends on the question, and leaves the Session to the answer", async () => {
+    const session = new FakeSession();
+
+    const outcome = await runTurn(
+      asking({
+        session,
+        models: pair(
+          mockModel({
+            toolCall: ask("Which repository?", ["org/api", "org/web"])
+          })
+        )
+      })
+    );
+
+    expect(outcome).toMatchObject({
+      status: "parked",
+      question: "Which repository?",
+      options: ["org/api", "org/web"]
+    });
+    // Only the turn that began the Task. A question in history before anyone
+    // was shown it would read to every later round as asked and ignored.
+    expect(session.messages.map((m) => m.role)).toEqual(["user"]);
+  });
+
+  it("asks instead of delegating, in a step that does both", async () => {
+    const outcome = await runTurn(
+      asking({
+        models: pair(
+          mockModel({
+            toolCalls: [
+              {
+                toolName: DELEGATE_TOOL_NAME,
+                input: {
+                  reply: "on it",
+                  subtasks: [{ type: "general", prompt: "research it" }]
+                }
+              },
+              ask("Should the old API be covered too?")
+            ]
+          })
+        )
+      })
+    );
+
+    // Asking starts nothing, so the work waits on the answer rather than
+    // starting on a guess the answer could have changed.
+    expect(outcome.status).toBe("parked");
+  });
+
+  it("asks instead of answering, in a step that does both", async () => {
+    const outcome = await runTurn(
+      asking({
+        models: pair(
+          mockModel({
+            toolCalls: [
+              { toolName: FINAL_REPLY_TOOL_NAME, input: { text: "done" } },
+              ask("Did you want the tests as well?")
+            ]
+          })
+        )
+      })
+    );
+
+    expect(outcome.status).toBe("parked");
+  });
+
+  it("offers the question only to an agent that may ask", async () => {
+    const may = inspectingModel(finalReply("done"));
+    const mayNot = inspectingModel(finalReply("done"));
+
+    await runTurn(asking({ models: pair(may.model) }));
+    await runTurn(args({ models: pair(mayNot.model) }));
+
+    expect(may.asked()[0].tools).toContain(ASK_USER_TOOL_NAME);
+    expect(mayNot.asked()[0].tools).not.toContain(ASK_USER_TOOL_NAME);
+  });
+
+  it("never offers it to a round that has to answer", async () => {
+    // No budget is left to act on whatever the person says.
+    const model = inspectingModel(finalReply("what I have"));
+
+    await runTurn(asking({ mode: "final", models: pair(model.model) }));
+
+    expect(model.asked()[0].tools).toEqual([FINAL_REPLY_TOOL_NAME]);
+  });
+
+  it("tells the model when to ask only where the agent does", () => {
+    expect(askInstructions.open).toContain("# Asking");
+    expect(instructions.open).not.toContain("# Asking");
+  });
+
+  it("hands two questions in one step back, to be asked as one", async () => {
+    const model = inspectingModel(
+      { toolCalls: [ask("Which repository?"), ask("Which branch?")] },
+      { toolCall: ask("Which repository, and which branch?") }
+    );
+
+    const outcome = await runTurn(asking({ models: pair(model.model) }));
+
+    expect(outcome).toMatchObject({
+      status: "parked",
+      question: "Which repository, and which branch?"
+    });
+    // Repaired on the same model, which was shown why.
+    expect(JSON.stringify(model.asked()[1].messages)).toContain(
+      "Ask one question"
+    );
+  });
+
+  it("hands back options the person could not tell apart", async () => {
+    const model = inspectingModel(
+      { toolCall: ask("Go ahead?", ["Yes", "yes"]) },
+      { toolCall: ask("Go ahead?", ["Yes", "No"]) }
+    );
+
+    const outcome = await runTurn(asking({ models: pair(model.model) }));
+
+    expect(outcome).toMatchObject({ status: "parked", options: ["Yes", "No"] });
+  });
+
+  it("puts what it saw in front of its question, for the round after the answer", () => {
+    const saw: ModelMessage[] = [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolCallId: "obs_r0_0",
+            toolName: "repo_status",
+            input: {}
+          }
+        ]
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "obs_r0_0",
+            toolName: "repo_status",
+            output: { type: "text", value: "two checkouts" }
+          }
+        ]
+      }
+    ];
+    const history = [
+      deterministicSessionMessage("task:t1:user", "user", "fix the build"),
+      deterministicSessionMessage(
+        roundAskMessageId("t1", 0),
+        "assistant",
+        "Which repository?"
+      ),
+      deterministicSessionMessage(
+        roundAnswerMessageId("t1", 0),
+        "user",
+        "org/web"
+      )
+    ];
+
+    const { messages } = renderTurnMessages(
+      history,
+      "t1",
+      [],
+      new Map([[0, saw]])
+    );
+
+    const at = (needle: string) =>
+      messages.findIndex((m) => JSON.stringify(m).includes(needle));
+    expect(at("two checkouts")).toBeGreaterThan(at("fix the build"));
+    expect(at("two checkouts")).toBeLessThan(at("Which repository?"));
+    expect(at("Which repository?")).toBeLessThan(at("org/web"));
+    // Once, where it happened — not a second time at the end, as a round with
+    // nothing to anchor on would be.
+    expect(
+      messages.filter((m) => JSON.stringify(m).includes("two checkouts"))
+    ).toHaveLength(1);
   });
 });

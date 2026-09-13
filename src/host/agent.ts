@@ -13,7 +13,8 @@ import { AgentDB, stateOf } from "../db/index.js";
 import type { GatekeeperIdentity } from "../a2a/verify.js";
 import { callerContext } from "../a2a/caller.js";
 import type { PlainTask } from "../a2a/task.js";
-import type { TaskListQuery } from "../a2a/agent-stub.js";
+import type { AnsweredTask, TaskListQuery } from "../a2a/agent-stub.js";
+import { humanEventType, type HumanReply, type TurnWake } from "../a2a/hitl.js";
 import {
   createPushChannel,
   type PushChannel,
@@ -254,6 +255,7 @@ export abstract class DynamicAgent<
     _schedule: Schedule
   ): Promise<void> {
     this.db.tasks.cleanup();
+    this.db.humanRequests.cleanup();
     this.cleanupAgentState();
   }
 
@@ -468,9 +470,75 @@ export abstract class DynamicAgent<
   }
 
   /**
+   * Record a person's reply to a question one of this caller's Tasks asked, and
+   * say which run to wake. See {@link TaskAgent.answerTask}.
+   *
+   * The reply has to name a question of the Task it arrived on; anything else is
+   * logged and changes nothing. An answer resumes the Task only when this message
+   * is the one that answered — a retry finds it resumed already — and a timeout
+   * leaves it parked for the run to fail. Every reply to a real question wakes
+   * the run, even one that changed nothing: the run reads the verdict from here,
+   * so a wake that finds nothing new costs it one step and nothing else.
+   */
+  async answerTask(input: {
+    taskId: string;
+    messageId: string;
+    reply: HumanReply;
+  }): Promise<AnsweredTask> {
+    const { taskId, messageId, reply } = input;
+    const request = this.db.humanRequests.get(reply.requestId);
+    if (!request || request.taskId !== taskId) {
+      console.warn("[agent] a reply names no question of this task", {
+        taskId,
+        requestId: reply.requestId
+      });
+      return { task: this.db.tasks.get(taskId), wake: null };
+    }
+
+    const at = Date.now();
+    if (reply.kind === "timeout") {
+      this.db.humanRequests.expire(request.requestId, at);
+    } else if (
+      this.db.humanRequests.answer(request.requestId, {
+        answer: reply.answer,
+        messageId,
+        at
+      }) === "answered"
+    ) {
+      this.db.tasks.resume(taskId);
+    }
+    return {
+      task: this.db.tasks.get(taskId),
+      wake: this.wakeFor(taskId, request.requestId)
+    };
+  }
+
+  /**
+   * The run to wake for a Task just canceled while it waited on a question, or
+   * `null` when it was not waiting. See {@link TaskAgent.humanWake}.
+   *
+   * Only a question the cancel itself closed counts. One answered or expired
+   * earlier has no run left waiting on it.
+   */
+  async humanWake(taskId: string): Promise<TurnWake | null> {
+    const request = this.db.humanRequests.latest(taskId);
+    return request?.status === "canceled"
+      ? this.wakeFor(taskId, request.requestId)
+      : null;
+  }
+
+  /** The run a Task's question parks, and the event that wakes it. */
+  private wakeFor(taskId: string, requestId: string): TurnWake | null {
+    const messageId = this.db.tasks.messageIdOf(taskId);
+    return messageId
+      ? { messageId, eventType: humanEventType(requestId) }
+      : null;
+  }
+
+  /**
    * The one place a Task becomes canceled: flip the row — terminal, so every
    * non-canceled write is refused afterwards — then interrupt whatever is still
-   * running for it.
+   * running for it, and close any question it was waiting on.
    *
    * `task` is supplied when the caller already built the canceled Task (the
    * a2a-js cancel branch attaches its own status message); otherwise the row's
@@ -488,6 +556,7 @@ export abstract class DynamicAgent<
       ? this.db.tasks.save(task) && this.db.tasks.get(taskId)
       : this.db.tasks.cancel(taskId);
     if (!canceled) return null;
+    this.db.humanRequests.cancelForTask(taskId, Date.now());
     await this.onTaskCanceled(taskId);
     return canceled;
   }

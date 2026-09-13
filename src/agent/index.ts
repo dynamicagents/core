@@ -61,6 +61,8 @@ export {
   parseRoundAckMessageId,
   parseTurn,
   roundAckMessageId,
+  roundAnswerMessageId,
+  roundAskMessageId,
   sessionMessage,
   sessionText,
   taskUserMessageId,
@@ -90,3 +92,10 @@ export {
   finalReplyInputSchema,
   finalReplyTool
 } from "./final-reply.js";
+
+export {
+  ASK_USER_TOOL_NAME,
+  MAX_ASK_OPTIONS,
+  askUserInputSchema,
+  askUserTool
+} from "./ask-user.js";

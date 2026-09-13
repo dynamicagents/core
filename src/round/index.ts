@@ -23,7 +23,11 @@
 // union its own words are selected by.
 export type { FinalRoundReason, RoundPolicy } from "./policy.js";
 
-export { RoundAgentBase } from "./agent.js";
+export {
+  RoundAgentBase,
+  type HumanWaitResult,
+  type ParkResult
+} from "./agent.js";
 
 export { RecipeSubagentHost, type SubagentClass } from "./subagent.js";
 
@@ -31,13 +35,15 @@ export {
   runHandleTask,
   type HandleTaskDeps,
   type HandleTaskParams,
+  type TaskFailureKind,
   type TaskVerdict
 } from "./workflow.js";
 
-// Re-exported here, not only from `/agent`: `RoundFailureKind` is the argument
-// type of `HandleTaskDeps.failureCopy`, and a host implementing that hook should
-// not have to reach into a second subpath to name it — nor to name the
-// credential subset, which is what a host keyed only on those will write.
+// Re-exported here, not only from `/agent`: `RoundFailureKind` is most of
+// `TaskFailureKind`, the argument type of `HandleTaskDeps.failureCopy`, and a
+// host implementing that hook should not have to reach into a second subpath to
+// name it — nor to name the credential subset, which is what a host keyed only
+// on those will write.
 export type {
   NonRecoverableKind,
   RoundFailureKind

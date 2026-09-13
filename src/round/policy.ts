@@ -121,4 +121,18 @@ export interface RoundPolicy {
      */
     partialNote: string;
   };
+
+  /**
+   * Present on an agent whose rounds may stop, ask the person the Task is for,
+   * and wait for the answer. Absent, no round is offered `ask_user` — which is
+   * right for an agent behind a gatekeeper that cannot put a question to anyone.
+   */
+  human?: {
+    /**
+     * When this agent should ask, and when it should work from what it has.
+     * Appended to the round contract, so it owns its leading separator like the
+     * other prompt strings here.
+     */
+    askGuidance: string;
+  };
 }

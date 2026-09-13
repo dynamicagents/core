@@ -2,11 +2,14 @@ import { describe, it, expect, vi } from "vitest";
 import type { WorkflowStep } from "cloudflare:workers";
 import type { GatekeeperIdentity } from "@dynamicagents/g2a-protocol";
 import { resolveConfig } from "../config.js";
+import { HUMAN_WAIT_MS } from "../platform.js";
+import { humanEventType, humanRequestId } from "../a2a/hitl.js";
 import { TEST_MODELS } from "../testing/fixtures.js";
 import { runHandleTask, type HandleTaskDeps } from "./workflow.js";
 import type { RoundPolicy } from "./policy.js";
 import type { FinalRoundReason } from "./policy.js";
 import type { RoundMode } from "./turn.js";
+import type { HumanWaitResult, ParkResult } from "./agent.js";
 
 /**
  * The durable orchestration: cancellation ordering, replay determinism, and the
@@ -54,11 +57,30 @@ interface FakeStepOptions {
    * Zero (the default) keeps every other spec's single-shot behaviour.
    */
   retries?: number;
+  /**
+   * How each `waitForEvent` ends, in order: `"event"` is a wake, `"timeout"`
+   * throws the way a wait that runs out does. Past the end of the list, a wake.
+   */
+  waits?: ("event" | "timeout")[];
 }
 
 function fakeStep(options: FakeStepOptions = {}) {
   const ran: string[] = [];
+  const waited: { name: string; type: string; timeout?: unknown }[] = [];
+  let waits = 0;
   const step = {
+    async waitForEvent(
+      name: string,
+      config: { type: string; timeout?: unknown }
+    ): Promise<unknown> {
+      ran.push(name);
+      waited.push({ name, ...config });
+      if (Object.hasOwn(options.cached ?? {}, name))
+        return options.cached![name];
+      if ((options.waits ?? [])[waits++] === "timeout")
+        throw new Error(`waitForEvent ${name} timed out`);
+      return { payload: {}, timestamp: new Date(), type: config.type };
+    },
     async do(name: string, a: unknown, b?: unknown): Promise<unknown> {
       const body = (typeof a === "function" ? a : b) as () => Promise<unknown>;
       ran.push(name);
@@ -75,7 +97,7 @@ function fakeStep(options: FakeStepOptions = {}) {
       throw last;
     }
   } as unknown as WorkflowStep;
-  return { step, ran };
+  return { step, ran, waited };
 }
 
 interface FakeAgentOptions {
@@ -1303,5 +1325,203 @@ describe("a turn whose callback fails after the result was saved", () => {
       expect.stringContaining("task abandoned"),
       expect.anything()
     );
+  });
+});
+
+/**
+ * A round that asked the person something.
+ *
+ * The run posts the question, sleeps on its event, reads what became of it, and
+ * goes on — and that wait is the one span of a Task's life its wall clock does
+ * not charge. As everywhere in this file, every fact is about which steps run
+ * and on what verdict.
+ */
+describe("a round that asks the person", () => {
+  const TEN_DAYS = 10 * 24 * 60 * 60_000;
+
+  /**
+   * Round 0 asks, later rounds answer the user. `answers` is what each
+   * `takeAnswer` finds, in order.
+   */
+  function askingAgent(
+    answers: HumanWaitResult[],
+    park: ParkResult = { status: "parked", at: 1_000 }
+  ) {
+    const calls: string[] = [];
+    const saved: unknown[] = [];
+    const modes: RoundMode[] = [];
+    let taken = 0;
+    const stub = {
+      async markWorking() {
+        return "ok";
+      },
+      async runTaskTurn(input: { round: number; mode: RoundMode }) {
+        modes.push(input.mode);
+        return input.round === 0
+          ? { status: "parked", turns: 1 }
+          : { status: "replied", reply: "thanks — done", turns: 1 };
+      },
+      async parkTask() {
+        calls.push("parkTask");
+        return park;
+      },
+      async takeAnswer(input: { timedOut: boolean }) {
+        calls.push(`takeAnswer:${input.timedOut ? "timed-out" : "woken"}`);
+        return answers[Math.min(taken++, answers.length - 1)];
+      },
+      async saveTask(task: unknown) {
+        saved.push(task);
+        return true;
+      },
+      async sweepTaskChildren() {},
+      async roundFailures() {
+        return [];
+      }
+    };
+    return { stub, calls, saved, modes };
+  }
+
+  it("posts the question, waits on it, and lets the next round read the answer", async () => {
+    const { stub, calls } = askingAgent([{ status: "answered", at: 5_000 }]);
+    const { step, ran } = fakeStep({ cached: { notify: undefined } });
+
+    const verdict = await runHandleTask(params(), step, deps(stub));
+
+    expect(verdict).toEqual({ outcome: "replied", rounds: 2, turns: 2 });
+    expect(ran.indexOf("park:0")).toBeLessThan(ran.indexOf("wait:0"));
+    expect(ran.indexOf("wait:0")).toBeLessThan(ran.indexOf("answer:0"));
+    expect(ran.indexOf("answer:0")).toBeLessThan(ran.indexOf("turn:1"));
+    expect(calls).toEqual(["parkTask", "takeAnswer:woken"]);
+  });
+
+  it("waits on the question's own event, for as long as a person may take", async () => {
+    const { stub } = askingAgent([{ status: "answered", at: 5_000 }]);
+    const { step, waited } = fakeStep({ cached: { notify: undefined } });
+
+    await runHandleTask(params(), step, deps(stub));
+
+    expect(waited).toEqual([
+      {
+        name: "wait:0",
+        type: humanEventType(humanRequestId(params().taskId, 0)),
+        timeout: HUMAN_WAIT_MS
+      }
+    ]);
+  });
+
+  it("does not charge the wait to the Task's wall clock", async () => {
+    // Begun ten days ago against a one-minute clock, and parked for all ten of
+    // them: the round after the answer is still an open one. Charged, the Task
+    // would have been out of time before the answer arrived.
+    const { stub, modes } = askingAgent(
+      [{ status: "answered", at: TEN_DAYS }],
+      {
+        status: "parked",
+        at: 0
+      }
+    );
+    const { step } = fakeStep({
+      cached: {
+        started: Date.now() - TEN_DAYS,
+        "deadline:0": false,
+        notify: undefined
+      }
+    });
+
+    await runHandleTask(params(), step, {
+      ...deps(stub),
+      config: resolveConfig({
+        model: TEST_MODELS,
+        mainAgentLimits: { maxWallMs: 60_000 }
+      })
+    });
+
+    expect(modes).toEqual(["open", "open"]);
+  });
+
+  it("fails the Task in the host's words when nobody answers", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { stub, calls, saved } = askingAgent([{ status: "unanswered" }]);
+    const { step } = fakeStep({
+      waits: ["timeout"],
+      cached: { notify: undefined }
+    });
+    const seen: string[] = [];
+
+    const verdict = await runHandleTask(params(), step, {
+      ...deps(stub),
+      failureCopy: (kind) => {
+        seen.push(kind);
+        return kind === "unanswered" ? "NOBODY ANSWERED IN TIME" : undefined;
+      }
+    });
+
+    expect(verdict).toEqual({
+      outcome: "failed",
+      kind: "unanswered",
+      rounds: 1,
+      turns: 1
+    });
+    // The run reports that its wait ran out and lets the Durable Object decide,
+    // since an answer may have got in first.
+    expect(calls).toEqual(["parkTask", "takeAnswer:timed-out"]);
+    expect(seen).toEqual(["unanswered"]);
+    expect(JSON.stringify(saved[0])).toContain("NOBODY ANSWERED IN TIME");
+  });
+
+  it("ends canceled, delivering nothing, for a Task canceled while it waits", async () => {
+    const { stub, saved } = askingAgent([{ status: "canceled" }]);
+    const { step } = fakeStep();
+
+    const verdict = await runHandleTask(params(), step, deps(stub));
+
+    expect(verdict).toEqual({ outcome: "canceled", rounds: 1, turns: 1 });
+    expect(saved).toEqual([]);
+  });
+
+  it("neither posts nor waits for a Task canceled before it could ask", async () => {
+    const { stub, calls } = askingAgent([], { status: "canceled" });
+    const { step, ran } = fakeStep();
+
+    const verdict = await runHandleTask(params(), step, deps(stub));
+
+    expect(verdict).toEqual({ outcome: "canceled", rounds: 1, turns: 1 });
+    expect(ran).not.toContain("wait:0");
+    expect(calls).toEqual(["parkTask"]);
+  });
+
+  it("waits again, on what is left, after a wake that found no answer", async () => {
+    const { stub } = askingAgent(
+      [
+        { status: "awaiting", at: 61_000 },
+        { status: "answered", at: 90_000 }
+      ],
+      { status: "parked", at: 1_000 }
+    );
+    const { step, waited } = fakeStep({ cached: { notify: undefined } });
+
+    const verdict = await runHandleTask(params(), step, deps(stub));
+
+    expect(verdict.outcome).toBe("replied");
+    expect(waited.map((w) => w.name)).toEqual(["wait:0", "wait:0:1"]);
+    expect(waited[1].timeout).toBe(HUMAN_WAIT_MS - 60_000);
+  });
+
+  it("replays an answered question without asking or waiting again", async () => {
+    const { stub, calls } = askingAgent([]);
+    const { step } = fakeStep({
+      cached: {
+        "park:0": { status: "parked", at: 1_000 },
+        "wait:0": { payload: {}, type: "replayed" },
+        "answer:0": { status: "answered", at: 5_000 },
+        notify: undefined
+      }
+    });
+
+    const verdict = await runHandleTask(params(), step, deps(stub));
+
+    expect(verdict).toEqual({ outcome: "replied", rounds: 2, turns: 2 });
+    expect(calls).toEqual([]);
   });
 });

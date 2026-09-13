@@ -126,6 +126,21 @@ export const MAX_TOOL_CALL_MS = 10 * 60_000;
 export const TOOL_CALL_GRACE_MS = 5_000;
 
 /**
+ * The longest a Task waits on a person's answer before failing as unanswered.
+ *
+ * The gatekeeper is what expires a question it posted: slack-gatekeeper closes
+ * its prompt after a week and sends the timeout part onto the Task, which ends
+ * the wait long before this does. So this is sized past that, as the backstop
+ * for a gatekeeper that never sends anything. Any shorter and the agent would
+ * give up on a person who was still entitled to answer.
+ *
+ * The wait itself is free. An instance parked on `step.waitForEvent` holds no
+ * concurrency, and the round loop does not charge it to the Task's wall clock.
+ * Workflows caps one wait at a year, asserted in `platform.spec.ts`.
+ */
+export const HUMAN_WAIT_MS = 8 * 24 * 60 * 60_000;
+
+/**
  * Hard ceiling on durable chunk steps for one Subtask branch. A backstop, not a
  * budget: the Workflow *fails* a branch that reaches it, so reaching it is a bug.
  * It is held unreachable by two constraints, both asserted in

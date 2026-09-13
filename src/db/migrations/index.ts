@@ -38,6 +38,12 @@ const dbMigrations: MigrationConfig = {
         when: 1788817590937,
         tag: "0002_round_observations",
         breakpoints: true
+      },
+      {
+        idx: 3,
+        when: 1789148198330,
+        tag: "0003_human_requests",
+        breakpoints: true
       }
     ]
   },
@@ -89,7 +95,22 @@ CREATE INDEX \`idx_subtasks_created_at\` ON \`subtasks\` (\`created_at\`);`,
 	PRIMARY KEY(\`task_id\`, \`round\`)
 );
 --> statement-breakpoint
-CREATE INDEX \`idx_round_observations_created_at\` ON \`round_observations\` (\`created_at\`);`
+CREATE INDEX \`idx_round_observations_created_at\` ON \`round_observations\` (\`created_at\`);`,
+    m0003: `CREATE TABLE \`human_requests\` (
+	\`request_id\` text PRIMARY KEY NOT NULL,
+	\`task_id\` text NOT NULL,
+	\`round\` integer NOT NULL,
+	\`request_json\` text NOT NULL,
+	\`status\` text NOT NULL,
+	\`answer_json\` text,
+	\`answer_message_id\` text,
+	\`parked_at\` integer,
+	\`closed_at\` integer,
+	\`created_at\` integer NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX \`idx_human_requests_task_round\` ON \`human_requests\` (\`task_id\`,\`round\`);--> statement-breakpoint
+CREATE INDEX \`idx_human_requests_created_at\` ON \`human_requests\` (\`created_at\`);`
   }
 };
 
