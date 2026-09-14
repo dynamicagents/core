@@ -45,7 +45,8 @@ const policy: RoundPolicy = {
   copy: {
     taskFailed: "TASK FAILED COPY",
     recoveredReply: "recovered",
-    partialNote: "partial"
+    partialNote: "partial",
+    approvalPrompt: () => "approve?"
   }
 };
 

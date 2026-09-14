@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { APICallError, generateText, isStepCount, tool } from "ai";
-import type { ModelMessage } from "ai";
+import type { ModelMessage, ToolResultPart } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 import { z } from "zod";
 import { FINAL_REPLY_TOOL_NAME } from "../agent/final-reply.js";
@@ -30,9 +30,13 @@ import { TEST_MODELS } from "../testing/fixtures.js";
 import {
   buildTurnInstructions,
   joinSuccessfulBranches,
+  declinedReason,
+  heldCalls,
   renderTurnMessages,
   runTurn,
-  type RunTurnArgs
+  type ApprovalReplay,
+  type RunTurnArgs,
+  type RunTurnOutcome
 } from "./turn.js";
 import { captureObservations } from "./observations.js";
 import type { RoundPolicy } from "./policy.js";
@@ -113,7 +117,9 @@ final_reply now with what you have.`,
   copy: {
     taskFailed: "Sorry — something went wrong handling that request.",
     recoveredReply: "Working on your request.",
-    partialNote: "Some parts of this request could not be completed."
+    partialNote: "Some parts of this request could not be completed.",
+    approvalPrompt: (calls) =>
+      calls.map((call) => call.reason ?? call.toolName).join("\n")
   }
 };
 
@@ -1444,30 +1450,11 @@ describe("the tool deadline the round relies on", () => {
  * A round that stops to ask the person.
  *
  * Asking is an ending, as `final_reply` and `delegate` are, and what is pinned
- * is what makes it one: it is offered only where the agent's policy says it may
- * ask and never on a round that has to answer, it outranks the other endings in
- * its step, and it leaves the Session alone — the question goes in with its
- * answer, not before.
+ * is what makes it one: it is offered on every round that can still act on the
+ * answer, it outranks the other endings in its step, and it leaves the Session
+ * alone — the question goes in with its answer, not before.
  */
 describe("a round that asks", () => {
-  const askPolicy: RoundPolicy = {
-    ...policy,
-    human: {
-      askGuidance: `
-
-# Asking
-
-Ask only when you cannot go on without an answer that only they have.`
-    }
-  };
-  const askInstructions = buildTurnInstructions(askPolicy, types, 8, {
-    maxTurns: 20,
-    maxWallMs: 60_000
-  });
-
-  const asking = (overrides: Partial<RunTurnArgs> = {}) =>
-    args({ canAsk: true, instructions: askInstructions, ...overrides });
-
   const ask = (question: string, options?: string[]) => ({
     toolName: ASK_USER_TOOL_NAME,
     input: { question, ...(options ? { options } : {}) }
@@ -1477,7 +1464,7 @@ Ask only when you cannot go on without an answer that only they have.`
     const session = new FakeSession();
 
     const outcome = await runTurn(
-      asking({
+      args({
         session,
         models: pair(
           mockModel({
@@ -1489,8 +1476,11 @@ Ask only when you cannot go on without an answer that only they have.`
 
     expect(outcome).toMatchObject({
       status: "parked",
-      question: "Which repository?",
-      options: ["org/api", "org/web"]
+      asked: {
+        kind: "question",
+        question: "Which repository?",
+        options: ["org/api", "org/web"]
+      }
     });
     // Only the turn that began the Task. A question in history before anyone
     // was shown it would read to every later round as asked and ignored.
@@ -1499,7 +1489,7 @@ Ask only when you cannot go on without an answer that only they have.`
 
   it("asks instead of delegating, in a step that does both", async () => {
     const outcome = await runTurn(
-      asking({
+      args({
         models: pair(
           mockModel({
             toolCalls: [
@@ -1524,7 +1514,7 @@ Ask only when you cannot go on without an answer that only they have.`
 
   it("asks instead of answering, in a step that does both", async () => {
     const outcome = await runTurn(
-      asking({
+      args({
         models: pair(
           mockModel({
             toolCalls: [
@@ -1539,29 +1529,22 @@ Ask only when you cannot go on without an answer that only they have.`
     expect(outcome.status).toBe("parked");
   });
 
-  it("offers the question only to an agent that may ask", async () => {
-    const may = inspectingModel(finalReply("done"));
-    const mayNot = inspectingModel(finalReply("done"));
+  it("offers the question on a round that can act on the answer", async () => {
+    // Nothing in the agent turns it on: every gatekeeper can ask a person.
+    const model = inspectingModel(finalReply("done"));
 
-    await runTurn(asking({ models: pair(may.model) }));
-    await runTurn(args({ models: pair(mayNot.model) }));
+    await runTurn(args({ models: pair(model.model) }));
 
-    expect(may.asked()[0].tools).toContain(ASK_USER_TOOL_NAME);
-    expect(mayNot.asked()[0].tools).not.toContain(ASK_USER_TOOL_NAME);
+    expect(model.asked()[0].tools).toContain(ASK_USER_TOOL_NAME);
   });
 
   it("never offers it to a round that has to answer", async () => {
     // No budget is left to act on whatever the person says.
     const model = inspectingModel(finalReply("what I have"));
 
-    await runTurn(asking({ mode: "final", models: pair(model.model) }));
+    await runTurn(args({ mode: "final", models: pair(model.model) }));
 
     expect(model.asked()[0].tools).toEqual([FINAL_REPLY_TOOL_NAME]);
-  });
-
-  it("tells the model when to ask only where the agent does", () => {
-    expect(askInstructions.open).toContain("# Asking");
-    expect(instructions.open).not.toContain("# Asking");
   });
 
   it("hands two questions in one step back, to be asked as one", async () => {
@@ -1570,11 +1553,11 @@ Ask only when you cannot go on without an answer that only they have.`
       { toolCall: ask("Which repository, and which branch?") }
     );
 
-    const outcome = await runTurn(asking({ models: pair(model.model) }));
+    const outcome = await runTurn(args({ models: pair(model.model) }));
 
     expect(outcome).toMatchObject({
       status: "parked",
-      question: "Which repository, and which branch?"
+      asked: { question: "Which repository, and which branch?" }
     });
     // Repaired on the same model, which was shown why.
     expect(JSON.stringify(model.asked()[1].messages)).toContain(
@@ -1588,9 +1571,12 @@ Ask only when you cannot go on without an answer that only they have.`
       { toolCall: ask("Go ahead?", ["Yes", "No"]) }
     );
 
-    const outcome = await runTurn(asking({ models: pair(model.model) }));
+    const outcome = await runTurn(args({ models: pair(model.model) }));
 
-    expect(outcome).toMatchObject({ status: "parked", options: ["Yes", "No"] });
+    expect(outcome).toMatchObject({
+      status: "parked",
+      asked: { options: ["Yes", "No"] }
+    });
   });
 
   it("puts what it saw in front of its question, for the round after the answer", () => {
@@ -1649,5 +1635,352 @@ Ask only when you cannot go on without an answer that only they have.`
     expect(
       messages.filter((m) => JSON.stringify(m).includes("two checkouts"))
     ).toHaveLength(1);
+  });
+});
+
+/**
+ * Calls a plugin's rule holds for a person.
+ *
+ * What is pinned is the promise the rule makes: a held call does not run until a
+ * person approves it, runs **once** when they do — however many times the round
+ * after the answer is attempted — and a model told it was declined knows a person
+ * decided that.
+ */
+describe("a round that holds calls for approval", () => {
+  /** A gated tool and an ungated one, each counting how often it really ran. */
+  function counted() {
+    const runs = { push: 0, probe: 0 };
+    const tools = {
+      push: tool({
+        description: "push a branch",
+        inputSchema: z.object({ branch: z.string() }),
+        execute: async ({ branch }: { branch: string }) => {
+          runs.push += 1;
+          return `pushed ${branch}`;
+        }
+      }),
+      probe: tool({
+        description: "look something up",
+        inputSchema: z.object({}),
+        execute: async () => {
+          runs.probe += 1;
+          return "probed";
+        }
+      })
+    };
+    return { runs, tools };
+  }
+
+  const rules = {
+    push: { type: "user-approval" as const, reason: "Push fix to org/web?" }
+  };
+  const push = { toolName: "push", input: { branch: "fix" } };
+
+  /** The round after the answer, fed the held step and the person's decision. */
+  function replayOf(
+    outcome: RunTurnOutcome,
+    approved: boolean,
+    results: Record<string, ToolResultPart> = {}
+  ) {
+    if (outcome.status !== "parked" || outcome.asked.kind !== "approval")
+      throw new Error(`expected held calls, got ${outcome.status}`);
+    const kept: ToolResultPart[] = [];
+    const calls = heldCalls(outcome.asked.pending);
+    const replay: ApprovalReplay = {
+      pending: outcome.asked.pending,
+      responses: calls.map((call) => ({
+        type: "tool-approval-response",
+        approvalId: call.approvalId,
+        approved,
+        ...(approved ? {} : { reason: declinedReason("not today") })
+      })),
+      results: approved
+        ? results
+        : Object.fromEntries(
+            calls.map((call) => [
+              call.toolCallId,
+              {
+                type: "tool-result",
+                toolCallId: call.toolCallId,
+                toolName: call.toolName,
+                output: {
+                  type: "execution-denied",
+                  reason: declinedReason("not today")
+                }
+              } satisfies ToolResultPart
+            ])
+          ),
+      onResult: (part) => {
+        kept.push(part);
+      }
+    };
+    return { replay, kept };
+  }
+
+  const holding = (overrides: Partial<RunTurnArgs>) =>
+    runTurn(args({ toolApproval: rules, ...overrides }));
+
+  it("parks on a held call without running it", async () => {
+    const { runs, tools } = counted();
+
+    const outcome = await holding({
+      tools,
+      models: pair(mockModel({ toolCall: push }))
+    });
+
+    expect(outcome).toMatchObject({
+      status: "parked",
+      asked: {
+        kind: "approval",
+        calls: [
+          {
+            toolName: "push",
+            input: { branch: "fix" },
+            reason: "Push fix to org/web?"
+          }
+        ]
+      }
+    });
+    expect(runs.push).toBe(0);
+  });
+
+  it("runs the call beside it that no rule holds, once, and keeps it with the step", async () => {
+    const { runs, tools } = counted();
+
+    const outcome = await holding({
+      tools,
+      models: pair(mockModel({ toolCalls: [{ toolName: "probe" }, push] }))
+    });
+
+    expect(runs).toEqual({ push: 0, probe: 1 });
+    if (outcome.status !== "parked" || outcome.asked.kind !== "approval")
+      throw new Error("expected held calls");
+    // Replayed with the step it belongs to, and not carried a second time as
+    // something the round observed.
+    expect(JSON.stringify(outcome.asked.pending)).toContain("probed");
+    expect(JSON.stringify(outcome.observations)).not.toContain("probed");
+  });
+
+  it("holds the call rather than taking an ending written beside it", async () => {
+    // The ending was written before the call ran, and may say it did.
+    const { tools } = counted();
+
+    const outcome = await holding({
+      tools,
+      models: pair(
+        mockModel({
+          toolCalls: [
+            push,
+            { toolName: FINAL_REPLY_TOOL_NAME, input: { text: "pushed it" } }
+          ]
+        })
+      )
+    });
+
+    expect(outcome.status).toBe("parked");
+    if (outcome.status !== "parked" || outcome.asked.kind !== "approval")
+      throw new Error("expected held calls");
+    // And the ending is not kept with the step. Its tool never executes, so
+    // nothing in the exchange answers that call, and a replayed call the
+    // provider has no result for is refused before the approved one can run.
+    expect(JSON.stringify(outcome.asked.pending)).not.toContain(
+      FINAL_REPLY_TOOL_NAME
+    );
+  });
+
+  it("runs the approved call from a step that also reached an ending", async () => {
+    const { runs, tools } = counted();
+    const parked = await holding({
+      tools,
+      models: pair(
+        mockModel({
+          toolCalls: [
+            push,
+            { toolName: FINAL_REPLY_TOOL_NAME, input: { text: "pushed it" } }
+          ]
+        })
+      )
+    });
+    const { replay } = replayOf(parked, true);
+    const model = inspectingModel(finalReply("pushed, and here is the PR"));
+
+    const outcome = await holding({
+      round: 1,
+      tools,
+      approval: replay,
+      models: pair(model.model)
+    });
+
+    expect(runs.push).toBe(1);
+    expect(outcome).toEqual({
+      status: "replied",
+      reply: "pushed, and here is the PR"
+    });
+  });
+
+  it("answers a held call whose tool the surface no longer offers", async () => {
+    const { runs, tools } = counted();
+    const parked = await holding({
+      tools,
+      models: pair(mockModel({ toolCall: push }))
+    });
+    const { replay } = replayOf(parked, true);
+    const model = inspectingModel(finalReply("that is no longer available"));
+
+    // The main-agent surface may depend on durable state, and a question can
+    // wait a week: the round after the answer can be offered a different set.
+    const { push: _gone, ...without } = tools;
+    const outcome = await holding({
+      round: 1,
+      tools: without,
+      approval: replay,
+      models: pair(model.model)
+    });
+
+    expect(runs.push).toBe(0);
+    expect(outcome.status).toBe("replied");
+    // Answered rather than left out: the person's approval never reaches the
+    // provider attached to a call nothing can run.
+    expect(JSON.stringify(model.asked()[0].messages)).toContain(
+      "execution-denied"
+    );
+  });
+
+  it("runs an approved call once, and goes on from its output", async () => {
+    const { runs, tools } = counted();
+    const parked = await holding({
+      tools,
+      models: pair(mockModel({ toolCall: push }))
+    });
+    const { replay, kept } = replayOf(parked, true);
+    const model = inspectingModel(finalReply("pushed, and here is the PR"));
+
+    const outcome = await holding({
+      round: 1,
+      tools,
+      approval: replay,
+      models: pair(model.model)
+    });
+
+    expect(outcome).toEqual({
+      status: "replied",
+      reply: "pushed, and here is the PR"
+    });
+    expect(runs.push).toBe(1);
+    expect(kept).toHaveLength(1);
+    expect(JSON.stringify(model.asked()[0].messages)).toContain("pushed fix");
+  });
+
+  it("hands a declined call to the model as refused, without running it", async () => {
+    const { runs, tools } = counted();
+    const parked = await holding({
+      tools,
+      models: pair(mockModel({ toolCall: push }))
+    });
+    const { replay } = replayOf(parked, false);
+    const model = inspectingModel(finalReply("left it unpushed"));
+
+    const outcome = await holding({
+      round: 1,
+      tools,
+      approval: replay,
+      models: pair(model.model)
+    });
+
+    expect(outcome.status).toBe("replied");
+    expect(runs.push).toBe(0);
+    const seen = JSON.stringify(model.asked()[0].messages);
+    expect(seen).toContain("The person declined this call");
+    expect(seen).toContain("They said: not today");
+  });
+
+  it("says a person declined a call before anything they typed", () => {
+    // Their words alone read as a note, not as a decision somebody made.
+    expect(declinedReason(undefined)).toBe(
+      "The person declined this call, and it did not run."
+    );
+    expect(declinedReason("  ")).toBe(declinedReason(undefined));
+    expect(declinedReason("not today")).toBe(
+      "The person declined this call, and it did not run. They said: not today"
+    );
+  });
+
+  it("runs an approved call once when the first slot reaches no ending", async () => {
+    const { runs, tools } = counted();
+    const parked = await holding({
+      tools,
+      models: pair(mockModel({ toolCall: push }))
+    });
+    const { replay } = replayOf(parked, true);
+    const fallback = inspectingModel(finalReply("done on the second model"));
+
+    const outcome = await holding({
+      round: 1,
+      tools,
+      approval: replay,
+      // Narration: no ending, so the round moves on to the second slot — which
+      // must read the push that already ran rather than run it again.
+      models: pair(mockModel({ text: "let me think" }), fallback.model)
+    });
+
+    expect(outcome).toEqual({
+      status: "replied",
+      reply: "done on the second model"
+    });
+    expect(runs.push).toBe(1);
+    expect(JSON.stringify(fallback.asked()[0].messages)).toContain(
+      "pushed fix"
+    );
+  });
+
+  it("does not run an approved call again when the round itself re-runs", async () => {
+    // The step re-ran after a crash, with the output kept from the first run.
+    const { runs, tools } = counted();
+    const parked = await holding({
+      tools,
+      models: pair(mockModel({ toolCall: push }))
+    });
+    if (parked.status !== "parked" || parked.asked.kind !== "approval")
+      throw new Error("expected held calls");
+    const [call] = heldCalls(parked.asked.pending);
+    const { replay } = replayOf(parked, true, {
+      [call.toolCallId]: {
+        type: "tool-result",
+        toolCallId: call.toolCallId,
+        toolName: call.toolName,
+        output: { type: "text", value: "pushed fix" }
+      }
+    });
+
+    const outcome = await holding({
+      round: 1,
+      tools,
+      approval: replay,
+      models: pair(mockModel(finalReply("already pushed")))
+    });
+
+    expect(outcome.status).toBe("replied");
+    expect(runs.push).toBe(0);
+  });
+
+  it("runs an approved call on a round that has to answer", async () => {
+    // No work tools are left to that round, and the approval is not a new call.
+    const { runs, tools } = counted();
+    const parked = await holding({
+      tools,
+      models: pair(mockModel({ toolCall: push }))
+    });
+    const { replay } = replayOf(parked, true);
+
+    const outcome = await holding({
+      round: 1,
+      mode: "final",
+      tools,
+      approval: replay,
+      models: pair(mockModel(finalReply("pushed, out of budget now")))
+    });
+
+    expect(outcome.status).toBe("replied");
+    expect(runs.push).toBe(1);
   });
 });

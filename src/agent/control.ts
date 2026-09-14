@@ -118,18 +118,15 @@ export interface ControlTool {
  *
  * `delegate` is withheld from a `final` round, which has no budget left to spend on
  * work. `final_reply` is declared on every round including that one: withhold both
- * and the round has no legal way to end. `ask_user` is declared only where the
- * caller says the round may ask.
+ * and the round has no legal way to end. `ask_user` is withheld from a `final`
+ * round too, which has no budget left to act on the answer.
  */
 export function controlTools(opts: {
   catalog: ReferenceCatalogEntry[];
   /** Whether this round may still hand out work (`false` on a `final` round). */
   delegable: boolean;
-  /**
-   * Whether this round may stop and ask the person. The caller decides: the
-   * agent's policy has to allow it, and a `final` round never may.
-   */
-  askable?: boolean;
+  /** Whether this round may stop and ask the person (`false` on a `final` round). */
+  askable: boolean;
   /** The installed subtask types — what `delegate` may name. */
   types: SubtaskTypeRegistry;
   /** `CoreConfig.maxSubtasks`, the per-round fan-out bound. */

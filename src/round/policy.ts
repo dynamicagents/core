@@ -37,7 +37,8 @@ export type FinalRoundReason = "budget" | "no-progress";
  *   copy: {
  *     taskFailed: "Sorry — something went wrong handling that request.",
  *     recoveredReply: "Working on your request.",
- *     partialNote: "Some parts of this request could not be completed…"
+ *     partialNote: "Some parts of this request could not be completed…",
+ *     approvalPrompt: (calls) => `…`
  *   }
  * };
  * ```
@@ -120,19 +121,22 @@ export interface RoundPolicy {
      * delivering.
      */
     partialNote: string;
-  };
-
-  /**
-   * Present on an agent whose rounds may stop, ask the person the Task is for,
-   * and wait for the answer. Absent, no round is offered `ask_user` — which is
-   * right for an agent behind a gatekeeper that cannot put a question to anyone.
-   */
-  human?: {
     /**
-     * When this agent should ask, and when it should work from what it has.
-     * Appended to the round contract, so it owns its leading separator like the
-     * other prompt strings here.
+     * What the person reads when a round holds calls for their approval: every
+     * call in the step that a plugin's rule sent to them, each with the words the
+     * rule gave. One prompt for all of them, since they are answered together —
+     * the model decided them together.
      */
-    askGuidance: string;
+    approvalPrompt(calls: readonly ApprovalCall[]): string;
   };
+}
+
+/** A call a plugin's rule held for a person's approval. See `RoundPolicy.copy`. */
+export interface ApprovalCall {
+  /** The tool the model called. */
+  toolName: string;
+  /** What it called the tool with, as the tool validated it. */
+  input: unknown;
+  /** The words the rule gave for this call, when it gave any. */
+  reason?: string;
 }
