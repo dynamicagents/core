@@ -22,10 +22,14 @@ export {
   PLUGIN_CONTRACT_VERSION,
   definePlugin,
   restrictMainAgentTools,
+  withoutToolApproval,
   type AgentPlugin,
   type RestrictMainAgentToolsOptions,
+  type WithoutToolApprovalOptions,
   type EmitProgress,
   type EnrichResultContext,
+  type MainAgentToolApproval,
+  type MainAgentToolApprovalRule,
   type MainAgentToolContext,
   type PluginRequirements,
   type RecipeToolSet,
@@ -71,13 +75,16 @@ export {
   type CoreEnv
 } from "./env.js";
 
+export { withAbort } from "./abort.js";
+
 export {
   CHUNK_SOFT_MS,
   CHUNK_STEP,
   MAX_CHUNKS_PER_BRANCH,
   MAX_TOOL_CALL_MS,
   STEP_TIMEOUT_MS,
-  STEPS_PER_INSTANCE
+  STEPS_PER_INSTANCE,
+  TOOL_CALL_GRACE_MS
 } from "./platform.js";
 
 export type { PluginStore } from "./db/db.js";

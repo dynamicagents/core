@@ -1,7 +1,13 @@
 import type {
   AssistantContent,
+  JSONValue,
   LanguageModel,
   ModelMessage,
+  OnToolExecutionEndCallback,
+  Tool,
+  ToolApprovalResponse,
+  ToolContent,
+  ToolResultPart,
   ToolSet
 } from "ai";
 import {
@@ -11,6 +17,7 @@ import {
   ToolChoiceViolationError
 } from "ai";
 import type { SessionMessage } from "agents/experimental/memory/session";
+import { MAX_TOOL_CALL_MS, TOOL_CALL_GRACE_MS } from "../platform.js";
 import type { AgentLimits } from "../config.js";
 import type { SubtaskTypeRegistry } from "../subtasks/subtask-types.js";
 import { appendOnce, type SessionLike } from "../agent/session.js";
@@ -19,6 +26,7 @@ import {
   finalReplyMessageId,
   parseRoundAckMessageId,
   roundAckMessageId,
+  roundAskMessageId,
   sessionText,
   taskUserMessageId
 } from "../agent/history.js";
@@ -37,7 +45,9 @@ import {
 } from "../agent/control.js";
 import { FINAL_REPLY_TOOL_NAME } from "../agent/final-reply.js";
 import { stepAllowance, type TurnBudget } from "../agent/budget.js";
+import { withFallback } from "../agent/fallback.js";
 import type { ModelPair } from "../agent/model.js";
+import type { MainAgentToolApproval } from "../contract/plugin.js";
 import {
   DELEGATE_TOOL_NAME,
   delegateCallInput,
@@ -49,7 +59,7 @@ import {
   type ReferenceCatalogEntry
 } from "../subtasks/catalog.js";
 import type { CompositionBranch, SubtaskDraft } from "../subtasks/types.js";
-import type { FinalRoundReason, RoundPolicy } from "./policy.js";
+import type { ApprovalCall, FinalRoundReason, RoundPolicy } from "./policy.js";
 import {
   captureObservations,
   renderObservations,
@@ -74,13 +84,11 @@ import {
  *   results. Every round gets them except the one the budget forced — looking
  *   something up before answering is ordinary work, not a special phase, right up
  *   until there is nothing left to spend on it (see {@link RoundMode}).
- * - **Control tools** — `delegate` and `final_reply` — have no `execute`. The call
- *   *is* the round's output: the loop halts on it, and for `delegate` the Workflow
- *   performs it durably. Because the loop halts, the SDK never validates their
- *   input either, so each one checks its own and the round repairs what it rejects
- *   — see `agent/control.ts`. A future `escalate` (ask the human) is the same
- *   shape: another entry there, another variant of {@link TurnDecision}, another
- *   `case` in the Workflow's switch.
+ * - **Control tools** — `delegate`, `final_reply` and `ask_user` — have no
+ *   `execute`. The call *is* the round's output: the loop halts on it, and for
+ *   `delegate` and `ask_user` the Workflow performs it durably. Because the loop
+ *   halts, the SDK never validates their input either, so each one checks its own
+ *   and the round repairs what it rejects — see `agent/control.ts`.
  *
  * Nothing forces the *choice*, and that is deliberate. An earlier design pinned
  * `toolChoice` to a specific tool to force delegation in one phase and forbid it in
@@ -256,6 +264,10 @@ function delegationPair(
  * them a round inherits only its predecessors' claims, which is how thirteen
  * rounds each re-discovered that an SSH clone URL is refused.
  *
+ * A round that **asked** is anchored the same way on its question, since it has
+ * no acknowledgment: its observations come just before the question, and the
+ * answer follows it as the person's own turn.
+ *
  * Everything here is ephemeral — scaffolding for this call only. Reference text is
  * snapshotted from the catalog, so no `[ref N]` prefix ever reaches a Subtask, and
  * the Session never sees any of this markup.
@@ -281,6 +293,12 @@ export function renderTurnMessages(
   const ackIds = new Map(
     [...carried].map((round) => [roundAckMessageId(taskId, round), round])
   );
+  const askIds = new Map(
+    [...observations.keys()].map((round) => [
+      roundAskMessageId(taskId, round),
+      round
+    ])
+  );
 
   const catalog: ReferenceCatalogEntry[] = [];
   const messages: ModelMessage[] = [];
@@ -290,6 +308,14 @@ export function renderTurnMessages(
     if (message.role !== "user" && message.role !== "assistant") continue;
     const role = message.role;
     const text = sessionText(message);
+
+    // In front of the question, then on to render the question itself: it is
+    // conversation the person saw and answered, not scaffolding.
+    const asked = askIds.get(message.id);
+    if (asked !== undefined) {
+      anchored.add(asked);
+      messages.push(...(observations.get(asked) ?? []));
+    }
 
     const round = ackIds.get(message.id);
     if (round !== undefined) {
@@ -386,6 +412,42 @@ export function joinSuccessfulBranches(
  */
 export type RoundMode = "open" | "final";
 
+/**
+ * Calls a person was asked to approve, and their decision, replayed to the round
+ * after the answer.
+ *
+ * Rendered after the conversation, where the SDK runs an approved call before the
+ * model is asked anything. Each output is kept the moment it lands and rendered in
+ * place of the approval from then on, so a call runs once however many times the
+ * round is attempted.
+ *
+ * The bound on that is the window between the call returning and its output being
+ * kept: an isolate lost in there runs the call again on the next attempt. It is
+ * the window every work tool in a round already has, and it is why this is a
+ * once-per-answer guarantee rather than a transaction — a tool whose second run
+ * would do damage has to be idempotent on its own account.
+ */
+export interface ApprovalReplay {
+  /** The step the previous round stopped on, as it was kept. */
+  pending: ModelMessage[];
+  /** The person's decision on each held call. */
+  responses: ToolApprovalResponse[];
+  /** Outputs already kept, by tool call id: calls that ran, and declined ones. */
+  results: Record<string, ToolResultPart>;
+  /** Keep a replayed call's output. Called as soon as the call returns. */
+  onResult: (part: ToolResultPart) => void;
+}
+
+/** What a round stopped to ask the person about. */
+export type ParkedOn =
+  | { kind: "question"; question: string; options?: string[] }
+  | {
+      kind: "approval";
+      calls: ApprovalCall[];
+      /** The step holding them, kept to be replayed with the answer. */
+      pending: ModelMessage[];
+    };
+
 export interface RunTurnArgs {
   /** The DO's one continuous Session. */
   session: SessionLike;
@@ -442,16 +504,35 @@ export interface RunTurnArgs {
   types: SubtaskTypeRegistry;
   /** `CoreConfig.maxSubtasks`, the per-round fan-out bound. */
   maxSubtasks: number;
+  /**
+   * Approval rules for the work tools, by name — the plugins' own, see
+   * `AgentPlugin.mainAgentToolApproval`. A call a rule holds for a person parks
+   * the round.
+   */
+  toolApproval?: MainAgentToolApproval;
+  /** Held calls the person has now answered on. See {@link ApprovalReplay}. */
+  approval?: ApprovalReplay;
   /** `CoreConfig.model.maxOutputTokens`. */
   maxOutputTokens: number;
-  /** `CoreConfig.model.maxRetries` — retries on *this* model before the fallback. */
-  maxRetries: number;
   /** The prompt suffixes, memoized by the DO. See {@link buildTurnInstructions}. */
   instructions: TurnInstructions;
   /** The note a deterministic join appends when it has to disclose gaps. */
   partialNote: string;
   /** Streams intermediate content while the model reasons. Best-effort. */
   onContent?: OnContent;
+  /**
+   * Cancellation for the round's own inference, so a cancel lands on the model
+   * call in flight rather than after it — the widest window a round has.
+   *
+   * The SDK hands this to every work tool's `execute` as well, merged with the
+   * per-tool deadline, so a tool that reads its `abortSignal` stops on both. One
+   * that ignores it keeps running either way: {@link MAX_TOOL_CALL_MS} bounds
+   * what the loop *waits* for, not what the tool does.
+   *
+   * Optional, and absent means the round cannot be interrupted, which is what a
+   * caller with nothing to interrupt it from already had.
+   */
+  abortSignal?: AbortSignal;
 }
 
 /**
@@ -486,7 +567,23 @@ export type RunTurnOutcome =
        */
       observations: ModelMessage[];
     }
-  | { status: "failed"; kind: RoundFailureKind; error: string };
+  | { status: "failed"; kind: RoundFailureKind; error: string }
+  /**
+   * The round stopped to ask the person something — a question, or calls to
+   * approve — and ended there. Nothing goes into the Session: a question goes in
+   * with its answer, and an approval is replayed from what the caller keeps. So
+   * the caller keeps `asked` and the observations, and the Workflow asks.
+   */
+  | { status: "parked"; asked: ParkedOn; observations: ModelMessage[] }
+  /**
+   * The round was cancelled while a model call was in flight. Separate from
+   * `failed` because the models did nothing wrong and a human is owed no
+   * explanation about them — the caller asked for this to stop.
+   *
+   * The budget is still charged, as every other exit charges it: the model ran,
+   * whatever became of its output.
+   */
+  | { status: "canceled" };
 
 /**
  * A control call the round refused, kept so it can be handed back to the model
@@ -509,7 +606,209 @@ interface RejectedCall {
  */
 type Attempt =
   | { ok: true; decision: TurnDecision }
-  | { ok: false; error: unknown; rejected?: RejectedCall };
+  /**
+   * The model called tools a rule holds for a person. Outranks any ending in the
+   * same step: that ending was written before the held calls ran, and may take
+   * for granted that they did.
+   */
+  | {
+      ok: true;
+      held: {
+        calls: ApprovalCall[];
+        pending: ModelMessage[];
+        /** Where the holding step begins in the round's `seen`. */
+        seenBefore: number;
+      };
+    }
+  /**
+   * Cancelled mid-call. Distinct from a failure because it is not evidence about
+   * the model: repairing it asks a cancelled round to try again, and falling
+   * through spends the second slot on work nobody is waiting for any more.
+   */
+  | { ok: false; aborted: true }
+  | {
+      ok: false;
+      aborted?: false;
+      error: unknown;
+      rejected?: RejectedCall;
+    };
+
+/** What an attempt needs to hold calls for a person, or to replay the answer. */
+interface AttemptApprovals {
+  /** The rules as this round applies them — see {@link refuseWithoutAsking}. */
+  rules?: MainAgentToolApproval;
+  /**
+   * The tools replayed calls run, offered whatever the attempt's allowance: a
+   * call a person approved runs even on a round with no work tools left.
+   */
+  tools: ToolSet;
+  /** Keeps a replayed call's output as it lands. */
+  onToolExecutionEnd?: OnToolExecutionEndCallback;
+}
+
+/** What the model reads for a held call the person did not approve. */
+const DECLINED = "The person declined this call, and it did not run.";
+
+/**
+ * The refusal a declined call carries: {@link DECLINED}, then whatever the person
+ * typed. Appended rather than substituted — their words alone do not say that a
+ * person decided, and that is the first thing the model has to know about the
+ * call.
+ */
+export function declinedReason(said: string | undefined): string {
+  const text = said?.trim();
+  return text ? `${DECLINED} They said: ${text}` : DECLINED;
+}
+
+/**
+ * The calls a kept step holds for a person, with the ids the answer and the
+ * outputs are matched by. Automatic approvals and denials are not among them:
+ * nobody was asked about those.
+ */
+export function heldCalls(
+  pending: readonly ModelMessage[]
+): { approvalId: string; toolCallId: string; toolName: string }[] {
+  const names = new Map<string, string>();
+  const held: { approvalId: string; toolCallId: string }[] = [];
+  for (const message of pending) {
+    if (message.role !== "assistant" || typeof message.content === "string")
+      continue;
+    for (const part of message.content) {
+      if (part.type === "tool-call") names.set(part.toolCallId, part.toolName);
+      if (part.type === "tool-approval-request" && part.isAutomatic !== true)
+        held.push({ approvalId: part.approvalId, toolCallId: part.toolCallId });
+    }
+  }
+  return held.map((call) => ({
+    ...call,
+    toolName: names.get(call.toolCallId) ?? ""
+  }));
+}
+
+/**
+ * The step a round stopped on to have calls approved, made fit to replay: tool
+ * call ids a provider accepts, rewritten alike everywhere they appear, and only
+ * the parts a later round can send back. Reasoning goes, as from observations.
+ */
+function pendingExchange(
+  messages: readonly ModelMessage[],
+  round: number
+): ModelMessage[] {
+  const ids = new Map<string, string>();
+  const identify = (original: string): string => {
+    const existing = ids.get(original);
+    if (existing) return existing;
+    const assigned = `held_r${round}_${ids.size}`;
+    ids.set(original, assigned);
+    return assigned;
+  };
+
+  // Which calls this exchange can answer: the ones an approval request held, and
+  // the ones that ran. A control call — an ending the model reached in the same
+  // step — is neither, because its tool has no `execute` and so never returns a
+  // result. Replaying it would hand the provider a tool call nothing answers,
+  // which is rejected before the approved call gets to run.
+  const answerable = new Set<string>();
+  for (const message of messages) {
+    if (message.role === "assistant" && typeof message.content !== "string")
+      for (const part of message.content)
+        if (part.type === "tool-approval-request")
+          answerable.add(part.toolCallId);
+    if (message.role === "tool")
+      for (const part of message.content)
+        if (part.type === "tool-result") answerable.add(part.toolCallId);
+  }
+
+  const kept: ModelMessage[] = [];
+  for (const message of messages) {
+    if (message.role === "assistant" && typeof message.content !== "string") {
+      const content: AssistantContent = [];
+      for (const part of message.content) {
+        if (part.type === "text")
+          content.push({ type: "text", text: part.text });
+        else if (part.type === "tool-call" && answerable.has(part.toolCallId))
+          content.push({
+            type: "tool-call",
+            toolCallId: identify(part.toolCallId),
+            toolName: part.toolName,
+            input: part.input
+          });
+        else if (part.type === "tool-approval-request")
+          content.push({ ...part, toolCallId: identify(part.toolCallId) });
+      }
+      if (content.length > 0) kept.push({ role: "assistant", content });
+    } else if (message.role === "tool") {
+      const content: ToolContent = [];
+      for (const part of message.content) {
+        if (part.type === "tool-result")
+          content.push({ ...part, toolCallId: identify(part.toolCallId) });
+        else if (part.type === "tool-approval-response") content.push(part);
+      }
+      if (content.length > 0) kept.push({ role: "tool", content });
+    }
+  }
+  return kept;
+}
+
+/**
+ * The replay's step, then one tool message holding every output kept so far and
+ * the person's decisions. Last in the conversation, the SDK runs an approved call
+ * with no output yet and skips one that has one.
+ */
+function approvalTail(
+  replay: ApprovalReplay,
+  results: Record<string, ToolResultPart>
+): ModelMessage[] {
+  return [
+    ...replay.pending,
+    { role: "tool", content: [...Object.values(results), ...replay.responses] }
+  ];
+}
+
+/** The replay's step with the outputs kept for it — what the round saw it do. */
+function replayedExchange(
+  replay: ApprovalReplay,
+  results: Record<string, ToolResultPart>
+): ModelMessage[] {
+  const outputs = Object.values(results);
+  return outputs.length > 0
+    ? [...replay.pending, { role: "tool", content: outputs }]
+    : [];
+}
+
+/**
+ * A tool's output as the model reads it: the conversion the SDK applies to every
+ * result, repeated because it does not export it. A tool's own `toModelOutput`
+ * wins there, and so it does here.
+ */
+async function modelOutput(
+  tool: Tool | undefined,
+  toolCallId: string,
+  input: unknown,
+  outcome:
+    | { type: "tool-result"; output: unknown }
+    | { type: "tool-error"; error: unknown }
+): Promise<ToolResultPart["output"]> {
+  if (outcome.type === "tool-error")
+    return { type: "error-text", value: errorMessage(outcome.error) };
+  if (tool?.toModelOutput)
+    return await tool.toModelOutput({
+      toolCallId,
+      input,
+      output: outcome.output
+    });
+  return typeof outcome.output === "string"
+    ? { type: "text", value: outcome.output }
+    : { type: "json", value: (outcome.output ?? null) as JSONValue };
+}
+
+/** An error in the words the SDK gives the model for one. */
+function errorMessage(error: unknown): string {
+  if (error == null) return "unknown error";
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
+  return JSON.stringify(error);
+}
 
 /**
  * One attempt against a single model: let it work, and take whichever ending it
@@ -555,7 +854,9 @@ async function attempt(
    * reaching for a control tool, so a rejected `delegate` never survives while
    * the work in front of it does.
    */
-  seen: ModelMessage[]
+  seen: ModelMessage[],
+  /** Held calls, and the replay of an answer on them. See {@link ApprovalReplay}. */
+  approvals: AttemptApprovals
 ): Promise<Attempt> {
   const final = args.mode === "final";
   // One step per attempt for a `final` round: it exists to produce the answer, and
@@ -582,11 +883,14 @@ async function attempt(
   // `delegate` and `final_reply` stay on either way — they *are* endings.
   const workTools: ToolSet = final || stepBudget <= 1 ? {} : args.tools;
   const content = args.onContent
-    ? buildIntermediateContentHandler(args.onContent, [
-        DELEGATE_TOOL_NAME,
-        FINAL_REPLY_TOOL_NAME
-      ])
+    ? buildIntermediateContentHandler(
+        args.onContent,
+        control.map((c) => c.name)
+      )
     : undefined;
+  // Where the latest step begins in `seen`: a step that holds calls is kept whole
+  // for the replay, and must not be carried as observations too.
+  let stepStart = seen.length;
 
   try {
     const result = await generateText({
@@ -597,7 +901,9 @@ async function attempt(
       // the two endings are the thing every round has to reach. Work tool names
       // are compile-time constants and none collides with a control name, so the
       // spread order costs nothing.
-      tools: { ...controlToolSet(control), ...workTools },
+      tools: { ...controlToolSet(control), ...workTools, ...approvals.tools },
+      toolApproval: approvals.rules,
+      onToolExecutionEnd: approvals.onToolExecutionEnd,
       // Every ending is a control call, so the model must always call something.
       // Work tools stay freely available — `required` constrains the *shape* of a
       // step's output, not which tool is chosen.
@@ -609,20 +915,57 @@ async function attempt(
         // change here.
         ...control.map((c) => hasToolCall(c.name))
       ],
-      // Retries on *this* model before the slot is given up, honouring the
-      // provider's own `retry-after`. Not a duplicate of the fallback: the
-      // fallback answers "this model cannot do it", and a 429 says "not yet" —
-      // and when both slots share a credential the fallback cannot even answer
-      // that. See `ModelConfig.maxRetries`.
-      maxRetries: args.maxRetries,
+      abortSignal: args.abortSignal,
+      // When a single tool call's signal fires: a grace ahead of
+      // {@link file://../platform.ts MAX_TOOL_CALL_MS}, so a tool that honours it
+      // can stop its work and still answer inside the bound. Every plugin tool is
+      // abandoned at the bound itself, listening or not — see `boundToolCalls`.
+      //
+      // A call stopped either way ends as a result or a `tool-error` the next
+      // step reads, and the loop continues, so the model can route around a
+      // wedged tool instead of the round dying with it. That is why only `toolMs`
+      // is set here. `stepMs` and `totalMs` abort the whole call, which arrives
+      // indistinguishable from a real fault and would spend the fallback slot on
+      // work that was merely slow.
+      timeout: { toolMs: MAX_TOOL_CALL_MS - TOOL_CALL_GRACE_MS },
       // Charged here rather than from `result.steps` so a throw mid-loop still
       // bills the steps already spent — the `catch` below has no `result` to read.
       onStepEnd: async (step) => {
         args.budget.spent += 1;
+        stepStart = seen.length;
         seen.push(...step.response.messages);
         if (content) await content(step);
       }
     });
+
+    // Before the result is read, for the same reason the `catch` checks first: a
+    // cancel that lands as the call returns is still a cancel, and acting on the
+    // decision would persist rows for a Task nobody is waiting on.
+    if (args.abortSignal?.aborted) return { ok: false, aborted: true };
+
+    // Calls a rule held for a person come first — see the `held` attempt.
+    const held = result.finalStep.content.flatMap((part) =>
+      part.type === "tool-approval-request" && part.isAutomatic !== true
+        ? [part]
+        : []
+    );
+    if (held.length > 0) {
+      return {
+        ok: true,
+        held: {
+          calls: held.map((part) => ({
+            toolName: part.toolCall.toolName,
+            input: part.toolCall.input as unknown,
+            ...(part.reason !== undefined ? { reason: part.reason } : {})
+          })),
+          pending: pendingExchange(
+            result.finalStep.response.messages,
+            args.round
+          ),
+          seenBefore: stepStart
+        }
+      };
+    }
 
     // The most committal ending the model reached, and every call it made to that
     // tool. Ranking by precedence rather than by position keeps "which ending
@@ -680,6 +1023,11 @@ async function attempt(
       )
     };
   } catch (error) {
+    // Check the signal before the error: an abort surfaces as a rejection, and
+    // reading it as bad model output would walk the repair ladder and spend the
+    // fallback on a round that was cancelled on purpose.
+    if (args.abortSignal?.aborted) return { ok: false, aborted: true };
+
     // The model narrated instead of calling a tool — the failure this whole
     // design exists to catch. The SDK enforces `toolChoice` itself and throws
     // before the step ends, so this arrives as a throw rather than as a result
@@ -866,6 +1214,7 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
   const control = controlTools({
     catalog,
     delegable: args.mode !== "final",
+    askable: args.mode !== "final",
     types: args.types,
     maxSubtasks: args.maxSubtasks
   });
@@ -878,17 +1227,128 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
   // attempt's — a call that ran is a call that ran, whichever attempt made it.
   const seen: ModelMessage[] = [];
 
-  for (const slot of ["primary", "fallback"] as const) {
-    const modelId =
-      slot === "primary" ? models.primaryId() : models.fallbackId();
-    const model = slot === "primary" ? models.primary : models.fallback;
+  // Held calls: a round after an answer replays the calls it was about.
+  const replay = args.approval;
+  const results: Record<string, ToolResultPart> = { ...replay?.results };
+  const replayed = new Map(
+    (replay ? heldCalls(replay.pending) : []).map((call) => [
+      call.toolCallId,
+      call
+    ])
+  );
+  // A held call whose tool the plugins no longer offer. The main-agent surface is
+  // allowed to depend on durable state, and a question can wait a week, so this
+  // is reachable — and silently leaving the call out would hand the provider the
+  // person's approval for a call nothing runs. Answered instead, so the model
+  // learns it did not happen and can say so.
+  for (const call of replayed.values()) {
+    if (args.tools[call.toolName] || Object.hasOwn(results, call.toolCallId))
+      continue;
+    results[call.toolCallId] = {
+      type: "tool-result",
+      toolCallId: call.toolCallId,
+      toolName: call.toolName,
+      output: {
+        type: "execution-denied",
+        reason: "this tool is no longer available to this agent"
+      }
+    };
+  }
 
-    // This slot's own view: the round's messages plus whatever repair exchange it
-    // accumulates. A fresh copy per slot, so a fallback that is reached is never
-    // handed the primary's rejected calls to be confused by.
-    const slotMessages = [...messages];
+  const approvals: AttemptApprovals = {
+    ...(args.toolApproval ? { rules: args.toolApproval } : {}),
+    tools: Object.fromEntries(
+      [...replayed.values()].flatMap((call) => {
+        const tool = args.tools[call.toolName];
+        return tool ? [[call.toolName, tool]] : [];
+      })
+    ),
+    ...(replay
+      ? {
+          onToolExecutionEnd: async (event) => {
+            const call = replayed.get(event.toolCall.toolCallId);
+            if (!call || Object.hasOwn(results, call.toolCallId)) return;
+            const part: ToolResultPart = {
+              type: "tool-result",
+              toolCallId: call.toolCallId,
+              toolName: call.toolName,
+              output: await modelOutput(
+                args.tools[call.toolName],
+                call.toolCallId,
+                event.toolCall.input,
+                event.toolOutput
+              )
+            };
+            results[call.toolCallId] = part;
+            replay.onResult(part);
+          }
+        }
+      : {})
+  };
+
+  /** What this round saw, the replayed calls first: they ran at its start. */
+  const observed = (upTo = seen.length): ModelMessage[] =>
+    captureObservations(
+      [
+        ...(replay ? replayedExchange(replay, results) : []),
+        ...seen.slice(0, upTo)
+      ],
+      { round, controlNames: control.map((c) => c.name) }
+    );
+
+  /**
+   * Which model the first slot's failure belongs to. The fallback once it has
+   * been reached mid-attempt, the primary until then — the only thing that
+   * distinguishes them once the pair answers as one model.
+   */
+  let answering = models.primaryId();
+
+  /**
+   * The primary's failures the pair covered for during the attempt under way, by
+   * handing the call to the fallback. Non-empty means that model has worked on
+   * this round already — see where the first slot gives way to the second.
+   */
+  let absorbed: unknown[] = [];
+
+  /**
+   * The first slot is the pair as one model: a call the primary cannot take is
+   * taken by the second at the **step**, so the round keeps the work it has
+   * already done instead of starting over. What the slot loop is still for is
+   * the failure that wrapper cannot see — a call that came back and reached no
+   * ending, where a model the round has not asked yet is worth asking.
+   */
+  const resilient = withFallback(models, {
+    onFallback: ({ modelId, error }) => {
+      answering = models.fallbackId();
+      absorbed.push(error);
+      diagnostics.push(`${modelId}: ${String(error)}`);
+      console.warn("[turn] model call failed, trying the other slot", {
+        taskId,
+        round,
+        model: modelId,
+        error: String(error)
+      });
+    },
+    // Last word, and it can point back at the primary: the error a failed pair
+    // reports is the one worth acting on, not the one that happened last.
+    onFailure: ({ modelId }) => {
+      answering = modelId;
+    }
+  });
+
+  slots: for (const slot of ["primary", "fallback"] as const) {
+    const model = slot === "primary" ? resilient : models.fallback;
+
+    // This slot's own repair exchanges. Fresh per slot, so a fallback that is
+    // reached is never handed the primary's rejected calls to be confused by.
+    const repairs: ModelMessage[] = [];
 
     for (let repair = 0; repair <= MAX_REPAIR_ATTEMPTS; repair += 1) {
+      // Per attempt, not per slot: a repair is a fresh call, and which model
+      // takes it is decided again from the top.
+      if (slot === "primary") answering = models.primaryId();
+      absorbed = [];
+
       // Both slots draw on the one `args.budget`, which each attempt reads on entry
       // and charges as it works. A fallback attempt is spend, not a free retry —
       // and so is a repair.
@@ -897,11 +1357,26 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
         control,
         model,
         system,
-        slotMessages,
-        seen
+        // A replayed approval after the round's messages and before any repair.
+        // On the first attempt that puts it last, where the SDK runs what was
+        // approved; by the time a repair follows it, that has already run.
+        [
+          ...messages,
+          ...(replay ? approvalTail(replay, results) : []),
+          ...repairs
+        ],
+        seen,
+        approvals
       );
+      const modelId = slot === "primary" ? answering : models.fallbackId();
 
       if (!outcome.ok) {
+        // Ahead of every other exit, including the non-recoverable one: a
+        // cancelled round has no second slot to spend and nothing to diagnose.
+        // The caller re-reads cancellation itself, so returning here only saves
+        // the work — it is not what makes the Task canceled.
+        if (outcome.aborted) return { status: "canceled" };
+
         // Before anything else, and before the fallback slot exists as an
         // option: a failure nothing can clear ends the round here. Repairing
         // asks a dead credential to try again; falling through spends the
@@ -962,7 +1437,7 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
           repair < MAX_REPAIR_ATTEMPTS &&
           args.budget.spent < args.budget.allowance
         ) {
-          slotMessages.push(
+          repairs.push(
             ...repairExchange(
               `${controlCallId(taskId, round)}_repair_${repair}`,
               rejected,
@@ -971,7 +1446,33 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
           );
           continue;
         }
+
+        // The second slot is for a model the round has not asked yet. If the pair
+        // already handed this attempt's calls to the fallback, that model has
+        // seen the round, and asking it again from the top would repeat every
+        // tool call made since.
+        //
+        // What the pair covered for joins the round's own failures: a capacity
+        // fault the fallback absorbed is still evidence a retry could succeed,
+        // and nothing else carries it once that slot has answered.
+        if (absorbed.length > 0) {
+          errors.push(...absorbed);
+          break slots;
+        }
         break;
+      }
+
+      if ("held" in outcome) {
+        return {
+          status: "parked",
+          asked: {
+            kind: "approval",
+            calls: outcome.held.calls,
+            pending: outcome.held.pending
+          },
+          // Not the step that held them, which is kept whole to be replayed.
+          observations: observed(outcome.held.seenBefore)
+        };
       }
 
       if (outcome.decision.kind === "reply") {
@@ -987,6 +1488,20 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
         return { status: "replied", reply };
       }
 
+      if (outcome.decision.kind === "ask") {
+        return {
+          status: "parked",
+          asked: {
+            kind: "question",
+            question: outcome.decision.question,
+            ...(outcome.decision.options
+              ? { options: outcome.decision.options }
+              : {})
+          },
+          observations: observed()
+        };
+      }
+
       const stored = await appendOnce(
         session,
         deterministicSessionMessage(
@@ -999,10 +1514,7 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
         status: "delegated",
         reply: stored,
         drafts: outcome.decision.drafts,
-        observations: captureObservations(seen, {
-          round,
-          controlNames: control.map((c) => c.name)
-        })
+        observations: observed()
       };
     }
   }

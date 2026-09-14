@@ -5,7 +5,12 @@ import {
   validateVersion
 } from "@a2a-js/sdk/server";
 import { RequestMalformedError, toJsonRpcError } from "@a2a-js/sdk/errors";
-import { JWKS_PATH, endpointUrl } from "@dynamicagents/g2a-protocol";
+import {
+  HITL_RESPONSE_TYPE,
+  HITL_TIMEOUT_TYPE,
+  JWKS_PATH,
+  endpointUrl
+} from "@dynamicagents/g2a-protocol";
 import {
   A2A_RPC_PATH,
   buildBaseCard,
@@ -22,7 +27,13 @@ import {
   verifyGatekeeperToken,
   type GatekeeperIdentity
 } from "../a2a/verify.js";
-import { A2AExecutor, type TurnStarter } from "../a2a/executor.js";
+import {
+  A2AExecutor,
+  type TurnResumer,
+  type TurnStarter
+} from "../a2a/executor.js";
+import { readHumanReply, type HumanReply, type TurnWake } from "../a2a/hitl.js";
+import { inboundTextError } from "../a2a/parts.js";
 import { DurableTaskStore } from "../a2a/task-store.js";
 import type { AgentResolver } from "../a2a/agent-stub.js";
 import { parseGatekeeperOrigins, type A2ASecretsEnv } from "../env.js";
@@ -94,6 +105,9 @@ export { JWKS_PATH } from "@dynamicagents/g2a-protocol";
 /** The JSON-RPC method carrying a turn (v1.0 renamed v0.3's `message/send`). */
 const SEND_MESSAGE_METHOD = "SendMessage";
 
+/** The JSON-RPC method that cancels a Task. */
+const CANCEL_TASK_METHOD = "CancelTask";
+
 /** The two secrets a mount signs and verifies with, already read off `env`. */
 export interface A2ASecrets {
   /** Ed25519 private JWK, as JSON. See {@link A2ASecretsEnv.A2A_SIGNING_KEY}. */
@@ -110,6 +124,12 @@ export interface TenantAgent {
   resolveAgent: AgentResolver;
   /** Start the durable turn. Must be idempotent — see {@link TurnStarter}. */
   startTurn: TurnStarter;
+  /**
+   * Wake a Task's run once a question it asked is answered — see
+   * {@link TurnResumer}. Absent, a message on one of this agent's Tasks is
+   * refused, which is right for an agent whose Tasks never ask.
+   */
+  resumeTurn?: TurnResumer;
 }
 
 export interface A2AWorkerOptions<TEnv = A2ASecretsEnv> {
@@ -306,6 +326,204 @@ function pushConfigError(rpcBody: {
 }
 
 /**
+ * Why a `SendMessage`'s text is refused for its size, or `undefined` when it may
+ * go on. Applies to a message that begins a Task and to one answering a question
+ * alike: the bound is on any text crossing the link.
+ *
+ * Here rather than at the executor for the reason {@link readContinuation}
+ * gives, and for one more. The text of a message that begins a Task goes into a
+ * Workflow's parameters, which the platform caps: past this point the failure is
+ * an instance that will not start, reported against a Task the caller was told
+ * it had. The same sentence, said here, is a caller that can send a shorter one.
+ */
+function messageTextError(rpcBody: {
+  method?: string;
+  params?: unknown;
+}): string | undefined {
+  if (rpcBody.method !== SEND_MESSAGE_METHOD) return undefined;
+  let params: SendMessageRequest;
+  try {
+    params = SendMessageRequest.fromJSON(rpcBody.params);
+  } catch {
+    // A malformed request is the handler's to refuse, with its own message.
+    return undefined;
+  }
+  return params.message ? inboundTextError(params.message) : undefined;
+}
+
+/** A reply onto an existing Task, as read off the `SendMessage` carrying it. */
+interface Continuation {
+  taskId: string;
+  /** Empty when the message names none, which the handler accepts too. */
+  contextId: string;
+  messageId: string;
+  reply: HumanReply;
+}
+
+/**
+ * The reply a `SendMessage` carries onto an existing Task, or why it is refused,
+ * or `null` for a message naming no Task — which begins one, and is no concern
+ * of this.
+ *
+ * A message on a Task is only ever the answer to a question that Task asked, and
+ * only an agent that can wake the run waiting on it may take one. Refused here as
+ * a JSON-RPC error, because past this point a refusal would be an executor throw —
+ * which the handler turns into a failed Task, ending the Task the person was
+ * answering.
+ */
+function readContinuation(
+  rpcBody: { method?: string; params?: unknown },
+  resumable: boolean
+): Continuation | { refused: string } | null {
+  if (rpcBody.method !== SEND_MESSAGE_METHOD) return null;
+  let params: SendMessageRequest;
+  try {
+    params = SendMessageRequest.fromJSON(rpcBody.params);
+  } catch {
+    // A malformed request is the handler's to refuse, with its own message.
+    return null;
+  }
+  const message = params.message;
+  if (!message?.taskId) return null;
+  if (!resumable) {
+    return {
+      refused:
+        "this agent takes no messages on an existing task: none of its tasks " +
+        "asks a question to be answered"
+    };
+  }
+  const reply = readHumanReply(message);
+  if (!reply) {
+    return {
+      refused:
+        "a message on an existing task must answer the question the task asked, " +
+        `in a ${HITL_RESPONSE_TYPE} or ${HITL_TIMEOUT_TYPE} data part`
+    };
+  }
+  return {
+    taskId: message.taskId,
+    contextId: message.contextId,
+    messageId: message.messageId,
+    reply
+  };
+}
+
+/**
+ * Record a reply in the Durable Object, before the request handler runs, and
+ * return the run to wake — or the JSON-RPC error to answer with instead.
+ *
+ * Here and not in the executor for the reason {@link readContinuation} gives,
+ * which applies to a failure as much as to a refusal: a Durable Object call that
+ * throws in the executor fails the Task the person was answering. Failing here
+ * leaves the Task parked and answers with an internal error, the code for a
+ * fault inside the agent rather than a verdict on the message. Answering with
+ * the Task as though the reply had landed would be worse than either: the
+ * gatekeeper would take the question as answered, on an answer nobody holds.
+ *
+ * Nothing here counts on the answer being sent again. Recording is idempotent on
+ * the message id, so an answer that does arrive twice records once.
+ *
+ * The handler then loads the Task this has already resumed, so what the caller
+ * is answered with is the Task as the reply left it.
+ */
+async function recordReply(
+  agent: TenantAgent,
+  identity: GatekeeperIdentity,
+  continuation: Continuation
+): Promise<
+  { wake: TurnWake | null } | { error: { code: number; message: string } }
+> {
+  const stub = agent.resolveAgent(identity);
+  if (typeof stub.answerTask !== "function") {
+    return {
+      error: toJsonRpcError(
+        new RequestMalformedError(
+          "this agent cannot record an answer to a question its task asked"
+        )
+      )
+    };
+  }
+  const { contextId, ...answer } = continuation;
+  try {
+    // The one refusal the handler makes after this that recording could get
+    // ahead of — a missing Task names no question, and a closed question takes
+    // no answer. Recorded first, the handler's refusal would reach the person
+    // over an answer the run had already taken.
+    const task = await stub.getTask(answer.taskId);
+    if (task?.contextId && contextId && contextId !== task.contextId) {
+      return {
+        error: toJsonRpcError(
+          new RequestMalformedError(
+            `contextId '${contextId}' is not the context of task '${task.id}'`
+          )
+        )
+      };
+    }
+    const { wake } = await stub.answerTask(answer);
+    return { wake };
+  } catch (err) {
+    console.error("[worker] could not record a reply", {
+      taskId: continuation.taskId,
+      err: String(err)
+    });
+    return {
+      error: toJsonRpcError(new Error("the agent could not record the answer"))
+    };
+  }
+}
+
+/**
+ * Wake the run a recorded reply was for, once the handler has answered.
+ *
+ * After it, so the handler's own writes to the Task are behind the run before it
+ * moves. Best-effort: the answer is already in the Durable Object, so a run this
+ * does not reach finds it when its own wait runs out — late, and still correct.
+ */
+async function wakeAnswered(
+  agent: TenantAgent,
+  taskId: string,
+  wake: TurnWake
+): Promise<void> {
+  if (!agent.resumeTurn) return;
+  try {
+    await agent.resumeTurn(wake);
+  } catch (err) {
+    console.error("[worker] could not wake the run a reply was for", {
+      taskId,
+      err: String(err)
+    });
+  }
+}
+
+/**
+ * Wake the run of a Task just canceled while it waited on a question.
+ *
+ * Needed because the cancel reaches the Durable Object through the task store,
+ * and nothing there can reach a Workflow: without this, a canceled Task's run
+ * sits waiting on its question until the question expires. Best-effort — a
+ * missed wake is read at that expiry instead.
+ */
+async function wakeCanceled(
+  agent: TenantAgent,
+  identity: GatekeeperIdentity,
+  params: unknown
+): Promise<void> {
+  const taskId = (params as { id?: unknown } | undefined)?.id;
+  if (typeof taskId !== "string" || !taskId || !agent.resumeTurn) return;
+  try {
+    const stub = agent.resolveAgent(identity);
+    if (typeof stub.humanWake !== "function") return;
+    const wake = await stub.humanWake(taskId);
+    if (wake) await agent.resumeTurn(wake);
+  } catch (err) {
+    console.warn("[worker] could not wake a canceled task's run", {
+      taskId,
+      err: String(err)
+    });
+  }
+}
+
+/**
  * Build the Worker `fetch` handler.
  *
  * ```ts
@@ -415,7 +633,10 @@ export function createA2AWorker<TEnv extends object>(
     return {
       manifest: agent.manifest,
       resolveAgent: (identity) => agent.resolveAgent(env, identity),
-      startTurn: (turn) => agent.startTurn(env, turn)
+      startTurn: (turn) => agent.startTurn(env, turn),
+      ...(agent.resumeTurn
+        ? { resumeTurn: (wake) => agent.resumeTurn!(env, wake) }
+        : {})
     };
   };
   // Only reachable through the first overload, which has already established
@@ -589,6 +810,33 @@ export function createA2AWorker<TEnv extends object>(
         }
       }
 
+      const oversize = messageTextError(rpcBody);
+      if (oversize) {
+        return jsonRpcErrorResponse(
+          body,
+          toJsonRpcError(new RequestMalformedError(oversize))
+        );
+      }
+
+      const continuation = readContinuation(
+        rpcBody,
+        agent.resumeTurn !== undefined
+      );
+      if (continuation && "refused" in continuation) {
+        return jsonRpcErrorResponse(
+          body,
+          toJsonRpcError(new RequestMalformedError(continuation.refused))
+        );
+      }
+      let wake: TurnWake | null = null;
+      if (continuation) {
+        const recorded = await recordReply(agent, identity, continuation);
+        if ("error" in recorded) {
+          return jsonRpcErrorResponse(body, recorded.error);
+        }
+        wake = recorded.wake;
+      }
+
       const handler = new DefaultRequestHandler(
         card,
         new DurableTaskStore(identity, agent.resolveAgent),
@@ -627,6 +875,17 @@ export function createA2AWorker<TEnv extends object>(
       // Streaming is not advertised; reject async generators outright.
       if (Symbol.asyncIterator in result) {
         return new Response("streaming not supported", { status: 501 });
+      }
+      if (
+        rpcBody.method === CANCEL_TASK_METHOD &&
+        (result as { error?: unknown }).error === undefined
+      ) {
+        await wakeCanceled(agent, identity, rpcBody.params);
+      }
+      // Whatever the handler made of the message: a wake nobody needed costs the
+      // run one step, and one withheld here is a run left on its wait.
+      if (continuation && wake) {
+        await wakeAnswered(agent, continuation.taskId, wake);
       }
       return Response.json(result, { headers: extensionHeaders(context) });
     }

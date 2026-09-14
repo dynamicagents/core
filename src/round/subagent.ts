@@ -119,7 +119,6 @@ export abstract class RecipeSubagentHost<
       toolFamilies: runtime.toolFamilies,
       toolOutputWindow: runtime.config.toolOutputWindow,
       maxOutputTokens: runtime.config.model.maxOutputTokens,
-      maxRetries: runtime.config.model.maxRetries,
       // Always defined: the plugin that declared a backend, or core's in-memory
       // fallback. So this needs no null check.
       workspaceBacking: runtime.workspaceBacking

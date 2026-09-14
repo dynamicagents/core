@@ -1,4 +1,4 @@
-import type { ToolSet } from "ai";
+import type { ModelMessage, ToolApprovalStatus, ToolSet } from "ai";
 import type { SessionMessage } from "agents/experimental/memory/session";
 import type { SessionLike } from "../agent/session.js";
 import type { PluginStore } from "../db/db.js";
@@ -74,6 +74,19 @@ export interface ToolFamilyContext<TRuntime = SubtaskRuntime> {
    * whatever its own {@link AgentPlugin.resolveRuntime} wrote.
    */
   runtime: TRuntime;
+  /**
+   * Aborts when this execution is cancelled, and belongs to the chunk these tools
+   * are built for — a tool must not be kept past it.
+   *
+   * Not needed to bound a call: core stops waiting on every plugin tool at
+   * {@link file://../platform.ts MAX_TOOL_CALL_MS} on its own. Read it to stop work
+   * that would outlive a cancel — a process to kill, a write not yet sent. A tool
+   * that must also stop at its call's deadline reads `execute`'s `abortSignal`
+   * instead, which carries both.
+   *
+   * Absent when families are rebuilt only to run their `abort` hooks.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -111,11 +124,11 @@ export interface EnrichResultContext<TRuntime = SubtaskRuntime> {
 /**
  * What a plugin knows when it builds the *main* agent's tools.
  *
- * Deliberately just the session, and deliberately not the caller's identity. A
- * plugin that needs a per-caller value takes it as config at instantiation, like
- * every other config value — the Durable Object is keyed 1:1 by the verified
- * caller, so that value is constant for its life. Putting it here as well would
- * give a plugin two ways to reach one fact, and the *other* hook that needs it
+ * Deliberately not the caller's identity. A plugin that needs a per-caller value
+ * takes it as config at instantiation, like every other config value — the
+ * Durable Object is keyed 1:1 by the verified caller, so that value is constant
+ * for its life. Putting it here as well would give a plugin two ways to reach one
+ * fact, and the *other* hook that needs it
  * ({@link AgentPlugin.onMessagesDisplaced}) has no context to read it from
  * anyway.
  *
@@ -125,6 +138,12 @@ export interface EnrichResultContext<TRuntime = SubtaskRuntime> {
  */
 export interface MainAgentToolContext {
   session: SessionLike;
+  /**
+   * Aborts when this round's Task is cancelled. The main-agent side of
+   * {@link ToolFamilyContext.signal}, read for the same reasons, and belonging to
+   * one round the same way: tools are built again for the next.
+   */
+  signal?: AbortSignal;
 }
 
 /** What a plugin knows when deciding whether a turn should run at all. */
@@ -137,6 +156,24 @@ export interface TurnGateContext {
    */
   history: SessionMessage[];
 }
+
+/**
+ * Approval rules for main-agent tools, by tool name. See
+ * {@link AgentPlugin.mainAgentToolApproval}.
+ */
+export type MainAgentToolApproval = Record<
+  string,
+  ToolApprovalStatus | MainAgentToolApprovalRule
+>;
+
+/**
+ * A rule decided per call, from what the call was asked to do: its validated
+ * input, and the conversation it came out of.
+ */
+export type MainAgentToolApprovalRule = (
+  input: unknown,
+  options: { toolCallId: string; messages: ModelMessage[] }
+) => ToolApprovalStatus | PromiseLike<ToolApprovalStatus>;
 
 /** Bindings and secrets a plugin needs the *host* to provide in `wrangler.jsonc`. */
 export interface PluginRequirements {
@@ -182,6 +219,27 @@ export interface AgentPlugin<TRuntime = SubtaskRuntime> {
    * find that out, and costs every round the tokens to describe it.
    */
   mainAgentTools?: (ctx: MainAgentToolContext) => ToolSet | Promise<ToolSet>;
+  /**
+   * Which of this plugin's main-agent tools need a person's say before they run,
+   * by tool name.
+   *
+   * A rule is a status, or a function of the call returning one.
+   * `"user-approval"` stops the round and asks the person, and its object form's
+   * `reason` is the words they read about the call; `"denied"`, `"approved"` and
+   * `undefined` decide without asking anyone. The round waits on the answer as
+   * it waits on a question — every gatekeeper puts both in front of a person,
+   * see `a2a/hitl.ts` — and `RoundPolicy.copy.approvalPrompt` frames what they
+   * read.
+   *
+   * **The main agent's calls only.** A subagent runs unattended, so a recipe
+   * naming this plugin's tool family gets these tools with no rules at all.
+   *
+   * An agent that wants a tool to run without asking removes the rule — see
+   * {@link withoutToolApproval}.
+   */
+  mainAgentToolApproval?: (
+    ctx: MainAgentToolContext
+  ) => MainAgentToolApproval | Promise<MainAgentToolApproval>;
   /**
    * What the main agent is told it can do with this domain, rendered into its
    * soul alongside the other capability blocks.
@@ -418,4 +476,66 @@ export function restrictMainAgentTools<TRuntime = SubtaskRuntime>(
   else restricted.capability = options.capability;
 
   return restricted;
+}
+
+/** See {@link withoutToolApproval}. */
+export interface WithoutToolApprovalOptions {
+  /**
+   * The tools whose rules go. Omit it to drop every rule the plugin declares.
+   *
+   * Names, for the reason {@link RestrictMainAgentToolsOptions.allow} gives: the
+   * install site is where a reader should see which calls run without asking.
+   */
+  tools?: readonly string[];
+}
+
+/**
+ * A plugin whose main-agent tools run without asking anyone — all of them, or
+ * the ones named.
+ *
+ * For an agent that has decided nobody needs to approve these calls: one whose
+ * gatekeeper cannot put a question to a person, or whose every Task is already a
+ * person's instruction to make them. Everything else about the plugin passes
+ * through untouched, as with {@link restrictMainAgentTools}, and a name that
+ * matches no rule is logged rather than thrown, for the reason that helper gives.
+ */
+export function withoutToolApproval<TRuntime = SubtaskRuntime>(
+  plugin: AgentPlugin<TRuntime>,
+  options: WithoutToolApprovalOptions = {}
+): AgentPlugin<TRuntime> {
+  const released: AgentPlugin<TRuntime> = { ...plugin };
+  const inner = plugin.mainAgentToolApproval;
+  if (!inner) {
+    // Named tools against a plugin that gates nothing. Reported for the reason
+    // the per-name miss below is: a release that matched nothing and a release
+    // that worked are otherwise indistinguishable, and a typo reads as the
+    // second.
+    if (options.tools?.length)
+      console.error(
+        `[plugin] "${plugin.key}" declares no approval rules at all, so ` +
+          `"${options.tools.join('", "')}" released nothing. Check for a rename.`
+      );
+    delete released.mainAgentToolApproval;
+    return released;
+  }
+  if (options.tools === undefined) {
+    delete released.mainAgentToolApproval;
+    return released;
+  }
+
+  const drop = new Set(options.tools);
+  released.mainAgentToolApproval = async (ctx) => {
+    const rules = { ...(await inner(ctx)) };
+    for (const name of drop) {
+      if (Object.hasOwn(rules, name)) delete rules[name];
+      else
+        console.error(
+          `[plugin] "${plugin.key}" declares no approval rule for "${name}" — ` +
+            "the name matches none of its rules, so nothing was released. " +
+            "Check for a rename."
+        );
+    }
+    return rules;
+  };
+  return released;
 }

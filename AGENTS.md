@@ -48,11 +48,25 @@ Generate a keypair with `npm run keys`.
 
 ## Publishing constraints
 
+**Development lands on `next`; `main` is the released line.** A release is a merge
+from `next` into `main` carrying a version bump — so a bump is a deliberate act at
+release time rather than something that rides every merge.
+
 A version bump reaching `main` is what ships it: on the first green Test run for
 a commit carrying that version, `.github/workflows/release.yml` publishes it to
 npm over OIDC and only then cuts the tag. The bump is the decision to ship, and `prepack` and
 `prepublishOnly` are the last gate a tarball passes before it is immutable on the
 registry. The workflow comments hold the rest.
+
+The release gate reads the **registry**, not the commit log — it asks whether
+`name@version` is already published — so a merge of many commits and one bump
+publishes once, and a merge with no bump does nothing. That is what makes batching a
+release safe.
+
+`prepare` runs `build`, which is what lets a consumer depend on this package by git
+ref while it is still unreleased: `dist/` is not committed, and npm runs `prepare`
+when installing a git dependency. `husky || true` because husky exits non-zero
+outside a git checkout, which is exactly the consumer-install case.
 
 The package has no root barrel; every area is its own subpath export. Four rules
 follow from that, and all four have already been violated once:
@@ -121,7 +135,7 @@ cannot strand in-flight runs.
 
 ### The migration journal
 
-`src/db/schema.ts` holds core's three tables and **only** core's — the journal is
+`src/db/schema.ts` holds core's tables and **only** core's — the journal is
 a flat integer sequence over one shared `__drizzle_migrations` table, and two
 independently-versioned packages writing to it will collide. A plugin owns its
 tables through `PluginStore`.
@@ -155,10 +169,14 @@ headroom therefore has to cover a whole turn — `MAX_TOOL_CALL_MS` plus room fo
 the model — not a nominal minute. `platform.spec.ts` asserts that relationship;
 raise the step timeout before raising the chunk deadline.
 
-`MAX_TOOL_CALL_MS` is a **contract, not a mechanism** — core installs no tools,
-so it cannot enforce it. A host that installs something which can block (a shell,
-a container command, a fetch with no ceiling) must bound it at or below that
-value, or it reintroduces the step-timeout kill invisibly, from inside a plugin.
+`MAX_TOOL_CALL_MS` is enforced by core for every plugin tool. Each `generateText`
+fires the call's signal `TOOL_CALL_GRACE_MS` early through the SDK's
+`timeout.toolMs`, and `src/runtime/bound-tools.ts` wraps every plugin tool where core
+assembles it, so a call still running at the bound is abandoned and the loop moves on
+whether or not the tool listened. What core cannot stop is the tool's _work_ — the
+SDK aborts a signal, it does not cancel a promise — so a tool whose work must not
+outlive its call (a container command, a write that must not start late) still reads
+its signal and stops it. The detail is on the constants in `platform.ts`.
 
 ---
 
@@ -180,7 +198,7 @@ produce a `completed` callback.
 What is genuinely per-agent is now explicit and mandatory:
 
 - **`RoundPolicy`** — the round contract, a note per reason a round can be forced
-  to answer, and the three user-facing strings. Nothing has a default. A lent-out
+  to answer, and the user-facing strings. Nothing has a default. A lent-out
   round contract is exactly the house prompt copy `validateRecipe` already refuses
   for a subagent soul.
 - **The loop itself, if you want a different one.** `/round` is opt-in and its own
@@ -209,12 +227,17 @@ ships one implementation inline reads as _the_ runtime with an escape hatch
 rather than as one of N. `src/agent/errors.ts` is its neutral companion: a
 rejected credential is a fact about the path to a model, not about any vendor.
 
-Three rules follow, and they are what keep a third provider cheap:
+The rules that follow are what keep a third provider cheap:
 
 - **Nothing neutral may import a provider directory.** `inference.ts` classifies
   a dead credential by `CredentialRejectedError`, which is structurally matched,
   so a provider written _outside_ core raises one and gets the same
   fallback-skipping treatment with nothing in core to change.
+- **A provider supplies two models; which one answers a given step is core's.**
+  `withFallback` in `src/agent/fallback.ts` wraps the pair into one model, so a
+  call the primary cannot take is taken by the second at the step rather than by
+  re-running the round. A runtime that builds its own fallback inside a single
+  model hides that decision from the loops, and from the budget that pays for it.
 - **A subpath only when the peer is optional.** `workers-ai` has none because
   `workers-ai-provider` is a required peer and every consumer's graph holds it
   already. A provider behind an _optional_ peer gets its own subpath instead, so

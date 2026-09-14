@@ -10,16 +10,17 @@
  *
  * ## Why a third classification was needed at all
  *
- * Core's attempt ladder splits every failure two ways — transient conditions
- * throw out so the Workflow step retries the whole round, everything else burns
- * the model slot and hands over to the fallback (see
- * {@link file://./inference.ts isTransientAiError}). An expired credential fits
- * neither: retrying spends the Workflow's budget on a request that can never
- * succeed, and falling back spends the second slot on the *same* rejected token.
- * It has to stop the round and say what a human must do.
+ * Core answers two questions about a failed call, and an expired credential is
+ * the wrong answer to both. **Is the other slot worth asking?** —
+ * {@link file://./fallback.ts withFallback}, and it is not, because both slots
+ * sit behind the one rejected token. **Is the whole round worth retrying?** —
+ * {@link file://./inference.ts isTransientAiError}, and it is not, because the
+ * Workflow would spend its budget on a request that can never succeed.
  *
- * Note that being non-transient is not enough on its own — "not transient" is
- * precisely the signal that means "try the fallback".
+ * So neither "transient" nor "not transient" expresses it: the first retries
+ * forever and the second spends the second slot proving the obvious. It has to
+ * stop the round and say what a human must do, which is the third
+ * classification this file exists for.
  */
 
 /**
@@ -49,12 +50,13 @@ export type CredentialRejectedBy = "provider" | "gateway" | "unknown";
 /**
  * A credential on the path to the model was rejected (HTTP 401 / 403).
  *
- * Deliberately not an `APICallError`: the AI SDK's classifier treats those as
- * potentially retryable, and this never is.
+ * Deliberately not an `APICallError`: that is the shape a provider uses to say a
+ * failure is worth another attempt, and this one never is.
  * {@link file://./inference.ts nonRecoverableKind} maps it to one of the
- * credential kinds — which one depends on {@link source} — and that is what
- * stops the round before the fallback slot; `isTransientAiError` additionally
- * returns `false` so the message text can never be mistaken for a rate limit.
+ * credential kinds — which one depends on {@link source} — and that is what both
+ * the model wrapper and the round read to leave the second slot unspent.
+ * `isTransientAiError` reads it as deterministic for the same reason it is not
+ * an `APICallError`.
  *
  * The round then fails carrying that kind, and the host supplies the
  * operator-facing copy through `HandleTaskDeps.failureCopy` — core owns the

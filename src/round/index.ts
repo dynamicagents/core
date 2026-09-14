@@ -14,16 +14,20 @@
  *
  * **Core still ships no prompt copy.** Everything the model and the user read
  * comes from the {@link RoundPolicy} an agent supplies: the round contract, the
- * forced-answer notes, and the three user-facing strings. That is the line — core
+ * forced-answer notes, and the user-facing strings. That is the line — core
  * owns the machine, you own the words.
  */
 
 // `FinalRoundReason` rides with the policy: it is the second argument of
 // `finalRoundNote`, and a host writing that note should not have to guess the
 // union its own words are selected by.
-export type { FinalRoundReason, RoundPolicy } from "./policy.js";
+export type { ApprovalCall, FinalRoundReason, RoundPolicy } from "./policy.js";
 
-export { RoundAgentBase } from "./agent.js";
+export {
+  RoundAgentBase,
+  type HumanWaitResult,
+  type ParkResult
+} from "./agent.js";
 
 export { RecipeSubagentHost, type SubagentClass } from "./subagent.js";
 
@@ -31,13 +35,15 @@ export {
   runHandleTask,
   type HandleTaskDeps,
   type HandleTaskParams,
+  type TaskFailureKind,
   type TaskVerdict
 } from "./workflow.js";
 
-// Re-exported here, not only from `/agent`: `RoundFailureKind` is the argument
-// type of `HandleTaskDeps.failureCopy`, and a host implementing that hook should
-// not have to reach into a second subpath to name it — nor to name the
-// credential subset, which is what a host keyed only on those will write.
+// Re-exported here, not only from `/agent`: `RoundFailureKind` is most of
+// `TaskFailureKind`, the argument type of `HandleTaskDeps.failureCopy`, and a
+// host implementing that hook should not have to reach into a second subpath to
+// name it — nor to name the credential subset, which is what a host keyed only
+// on those will write.
 export type {
   NonRecoverableKind,
   RoundFailureKind
@@ -53,6 +59,8 @@ export {
   joinSuccessfulBranches,
   renderTurnMessages,
   runTurn,
+  type ApprovalReplay,
+  type ParkedOn,
   type RoundMode,
   type RunTurnArgs,
   type RunTurnOutcome,

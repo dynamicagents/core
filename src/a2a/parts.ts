@@ -1,4 +1,5 @@
 import { Role, type Message, type Part } from "@a2a-js/sdk";
+import { MAX_MESSAGE_TEXT_BYTES } from "@dynamicagents/g2a-protocol";
 import type { PlainMessage, PlainPart } from "./task.js";
 
 /**
@@ -18,6 +19,9 @@ import type { PlainMessage, PlainPart } from "./task.js";
 /** Media type stamped on the text parts this agent emits. */
 const TEXT_MEDIA_TYPE = "text/plain";
 
+/** Media type stamped on the structured parts this agent emits. */
+const DATA_MEDIA_TYPE = "application/json";
+
 /**
  * A `text` part carrying `text`. Typed as the narrowed {@link PlainPart} (which
  * widens to `Part` for free) so a message built here can cross the DO RPC
@@ -29,6 +33,23 @@ export function textPart(text: string): PlainPart {
     metadata: undefined,
     filename: "",
     mediaType: TEXT_MEDIA_TYPE
+  };
+}
+
+/**
+ * A `data` part carrying a structured value.
+ *
+ * The SDK's own `Part`, not {@link PlainPart}: that one admits only text, which
+ * is what lets a Task cross Durable Object RPC typed (see
+ * {@link file://./task.ts}). Whatever carries one of these is built and sent from
+ * inside the object that holds it.
+ */
+export function dataPart(value: object): Part {
+  return {
+    content: { $case: "data", value },
+    metadata: undefined,
+    filename: "",
+    mediaType: DATA_MEDIA_TYPE
   };
 }
 
@@ -46,13 +67,6 @@ export function textOf(message: Message): string {
   return partsText(message.parts);
 }
 
-/**
- * Bounds the inbound user text carried in a durable Workflow payload (UTF-8).
- * Workflow params have a platform size limit, and a caller's message is the one
- * unbounded thing that goes into them.
- */
-export const MAX_INBOUND_TEXT_BYTES = 256 * 1024;
-
 const encoder = new TextEncoder();
 
 /** Invalid inbound content that must not cross the A2A-to-workflow boundary. */
@@ -64,21 +78,44 @@ export class InboundPartError extends Error {
 }
 
 /**
- * Extract and validate the user-turn text. Rejects a message with no usable
- * text, and enforces a single UTF-8 size bound *before* the text enters a
- * workflow payload — past that point the failure is a workflow that will not
- * start, with no request left to answer on.
+ * Why this message's text cannot be taken, or `undefined` when it can.
+ *
+ * The bound is `MAX_MESSAGE_TEXT_BYTES`, and it is the protocol package's rather
+ * than this one's because the sending side has to know it too: a gatekeeper that
+ * will send anything an agent will refuse discovers the bound by hitting it, and
+ * the expensive case is a person's answer to a question that is now spent. That
+ * module's doc carries the half of the agreement that is not the number — UTF-8
+ * bytes, summed over every text part with no separator and trimmed, which is
+ * what {@link partsText} computes.
+ *
+ * Separate from {@link inboundText} because the refusal has to reach the caller
+ * as a JSON-RPC error and not as a throw, which the request handler would turn
+ * into a failed Task. Applied by the Worker before the executor runs, beside the
+ * other preflight refusals in {@link file://../worker/index.ts}.
+ */
+export function inboundTextError(message: Message): string | undefined {
+  if (encoder.encode(textOf(message)).byteLength > MAX_MESSAGE_TEXT_BYTES) {
+    return `message text exceeds ${MAX_MESSAGE_TEXT_BYTES} bytes`;
+  }
+  return undefined;
+}
+
+/**
+ * Extract and validate the user-turn text, for a caller holding a message with
+ * nowhere to put a refusal. Rejects a message with no usable text, and applies
+ * {@link inboundTextError}.
  *
  * File and data parts are deliberately out of scope: only text crosses into the
  * agent runtime.
  */
 export function inboundText(message: Message): string {
+  const tooLong = inboundTextError(message);
+  if (tooLong) {
+    throw new InboundPartError(tooLong);
+  }
   const text = textOf(message);
   if (!text) {
     throw new InboundPartError("message has no usable text");
-  }
-  if (encoder.encode(text).byteLength > MAX_INBOUND_TEXT_BYTES) {
-    throw new InboundPartError("message text exceeds the size limit");
   }
   return text;
 }

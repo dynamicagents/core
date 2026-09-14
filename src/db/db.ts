@@ -8,6 +8,7 @@ import dbMigrations from "./migrations/index.js";
 import { makeTasks } from "./models/tasks.js";
 import { makeSubtasks } from "./models/subtasks.js";
 import { makeObservations } from "./models/observations.js";
+import { makeHumanRequests } from "./models/human-requests.js";
 
 export type DB = DrizzleSqliteDODatabase<typeof schema>;
 
@@ -113,6 +114,7 @@ export class AgentDB {
   private _tasks?: ReturnType<typeof makeTasks>;
   private _subtasks?: ReturnType<typeof makeSubtasks>;
   private _observations?: ReturnType<typeof makeObservations>;
+  private _humanRequests?: ReturnType<typeof makeHumanRequests>;
 
   constructor(
     private readonly storage: DurableObjectStorage,
@@ -140,6 +142,10 @@ export class AgentDB {
 
   get observations() {
     return (this._observations ??= makeObservations(this.db));
+  }
+
+  get humanRequests() {
+    return (this._humanRequests ??= makeHumanRequests(this.db));
   }
 
   /**

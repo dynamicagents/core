@@ -78,26 +78,67 @@ export const STEPS_PER_INSTANCE = 10_000;
  * So the headroom is sized against a whole turn, not against a guess:
  * `STEP_TIMEOUT_MS - CHUNK_SOFT_MS` is 15 minutes, covering
  * {@link MAX_TOOL_CALL_MS} of tool call plus five minutes for the model call and
- * its provider retries. Asserted in `platform.spec.ts` — raise the step timeout
+ * its provider retries. Those retries are the AI SDK's own defaults — core
+ * configures none — and it caps a single honoured `retry-after` at 60s. Each
+ * attempt costs **both** model slots, because the pair answers as one model and
+ * the retry wraps it from outside — see
+ * {@link file://./agent/fallback.ts withFallback}. A release that retried more
+ * would eat this headroom silently, so the attempt count is pinned in
+ * `agent/fallback.spec.ts` and `round/turn.spec.ts` and fails there instead. The
+ * headroom itself is asserted in `platform.spec.ts` — raise the step timeout
  * before raising this.
  */
 export const CHUNK_SOFT_MS = 15 * 60_000;
 
 /**
- * The longest a **single tool call** may run, and a contract rather than a
- * mechanism: core has no way to enforce it, because core installs no tools.
+ * The longest a **single plugin tool call** may hold the loop that made it. Core
+ * enforces it whatever the tool does: every `generateText` in the round and the
+ * recipe loop fires the call's signal {@link TOOL_CALL_GRACE_MS} before it, and
+ * every plugin tool is wrapped where core assembles it, so a call still running at
+ * this bound is abandoned and the loop moves on. See
+ * {@link file://./runtime/bound-tools.ts boundToolCalls}.
+ *
+ * What core cannot stop is the tool's *work*. The SDK aborts a signal — it does
+ * not cancel a promise — so an abandoned call runs on unattended. **A tool whose
+ * work must not outlive its call (a container command, a write that must not start
+ * late) still reads its signal and stops that work**, or bounds it at the source,
+ * as starter's container `timeoutMs` does.
  *
  * It exists because {@link CHUNK_SOFT_MS} cannot be reasoned about without it. The
- * soft deadline is checked between turns, so a host that lets one tool block for
- * longer than the headroom under {@link STEP_TIMEOUT_MS} reintroduces exactly the
- * step-timeout kill this pair is sized to prevent — and it reintroduces it
- * invisibly, in a plugin, a long way from this file.
- *
- * A host installing a tool that can block (a shell, a container command, a fetch
- * with no ceiling of its own) must bound it at or below this. See the `timeoutMs`
- * passed to `@dynamicagents/plugins/computer` in starter.
+ * soft deadline is checked between turns, so a tool call that could hold the loop
+ * for longer than the headroom under {@link STEP_TIMEOUT_MS} would reintroduce
+ * exactly the step-timeout kill this pair is sized to prevent — invisibly, from
+ * inside a plugin, a long way from this file. That is why core enforces it rather
+ * than asking hosts to.
  */
 export const MAX_TOOL_CALL_MS = 10 * 60_000;
+
+/**
+ * How far ahead of {@link MAX_TOOL_CALL_MS} a tool call's signal fires: the window
+ * a tool that honours its signal has to stop its work and answer for itself.
+ *
+ * An answer inside it is the one the model reads, so the tool can say what it
+ * stopped and what survived. Past it core abandons the call with a sentence of its
+ * own, which can only say the tool may still be running. Taken out of the bound
+ * rather than added to it, so nothing sized against `MAX_TOOL_CALL_MS` moves. It
+ * needs to cover a kill sent over RPC, and nothing more.
+ */
+export const TOOL_CALL_GRACE_MS = 5_000;
+
+/**
+ * The longest a Task waits on a person's answer before failing as unanswered.
+ *
+ * The gatekeeper is what expires a question it posted: slack-gatekeeper closes
+ * its prompt after a week and sends the timeout part onto the Task, which ends
+ * the wait long before this does. So this is sized past that, as the backstop
+ * for a gatekeeper that never sends anything. Any shorter and the agent would
+ * give up on a person who was still entitled to answer.
+ *
+ * The wait itself is free. An instance parked on `step.waitForEvent` holds no
+ * concurrency, and the round loop does not charge it to the Task's wall clock.
+ * Workflows caps one wait at a year, asserted in `platform.spec.ts`.
+ */
+export const HUMAN_WAIT_MS = 8 * 24 * 60 * 60_000;
 
 /**
  * Hard ceiling on durable chunk steps for one Subtask branch. A backstop, not a

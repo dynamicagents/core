@@ -66,6 +66,29 @@ export interface ModelPair {
   fallbackId: () => string;
 }
 
+/**
+ * ## What a provider owes the loops when a call fails
+ *
+ * One thing, and it is not optional: **a failure worth another attempt is an
+ * `APICallError` carrying `isRetryable`.** A provider that rethrows its
+ * transport's errors raw gets none of what follows, because nothing about a bare
+ * `Error` says whether waiting would have helped.
+ *
+ * A failed call is offered to the **other slot** first — the two are different
+ * models, and the second may have capacity the first does not. Only a pair that
+ * both failed reaches {@link file://./inference.ts isTransientAiError}, which
+ * reads the flag again to decide between retrying the whole round and giving up
+ * on it. So the flag answers two different questions at two different levels,
+ * and the same value answers both: see
+ * {@link file://./fallback.ts withFallback} for the first and `isTransientAiError`
+ * for the second.
+ *
+ * Everything else is deterministic, with one exception the loops have to be told
+ * about separately: a refused credential is
+ * {@link file://./errors.ts CredentialRejectedError}. Neither slot can clear it —
+ * they sit behind one credential — so it is the one failure that is never offered
+ * to the second.
+ */
 export interface ModelRuntime {
   /**
    * Lazily build + memoize a primary/fallback model pair (overridable in tests,

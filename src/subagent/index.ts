@@ -47,8 +47,6 @@ export interface SubagentRuntime {
   toolOutputWindow: number;
   /** `CoreConfig.model.maxOutputTokens`. */
   maxOutputTokens: number;
-  /** `CoreConfig.model.maxRetries`. */
-  maxRetries: number;
   /**
    * Build the durable file store over this facet's own SQLite.
    *
@@ -313,15 +311,18 @@ export abstract class RecipeSubagentBase<
       });
     const workspace = makeWorkspaceHandle(this.workspace());
     const progress: ProgressEvent[] = [];
+    // Before the tools, which close over its signal so a cancel reaches work they
+    // started as well as the model call.
+    const controller = new AbortController();
     const { tools } = buildRecipeTools(recipe.toolFamilies, rt.toolFamilies, {
       workspace,
       emitProgress: (event: ProgressEvent) => progress.push(event),
       params: request.params,
-      runtime
+      runtime,
+      signal: controller.signal
     });
     const { system, prompt } = renderSubagentPrompt({ ...request, recipe });
 
-    const controller = new AbortController();
     this.inflight = controller;
     let outcome, state;
     try {
@@ -336,7 +337,6 @@ export abstract class RecipeSubagentBase<
         toolOutputWindow: rt.toolOutputWindow,
         reportMetrics: recipe.reportMetrics,
         maxOutputTokens: rt.maxOutputTokens,
-        maxRetries: rt.maxRetries,
         now: () => Date.now(),
         progress,
         checkpoint: (s) => this.saveRunState(fingerprint, s),

@@ -1,6 +1,6 @@
 {
   "name": "@dynamicagents/core",
-  "version": "0.10.1",
+  "version": "0.11.0",
   "description": "Shared, mandatory foundation for Dynamic Agents on Cloudflare Workers: zero-trust A2A, durable task lifecycle, delegation and subagent runtime, test harness.",
   "keywords": [
     "a2a",
@@ -115,11 +115,11 @@
     "verify:peer-ranges": "node scripts/verify-peer-ranges.mjs",
     "prepack": "npm run build && npm run verify:exports",
     "prepublishOnly": "npm run check && npm test && npm run verify:exports",
-    "prepare": "husky"
+    "prepare": "husky || true && npm run build"
   },
   "dependencies": {
     "@a2a-js/sdk": "^1.1.0",
-    "@dynamicagents/g2a-protocol": "^0.3.0",
+    "@dynamicagents/g2a-protocol": "^0.4.1",
     "drizzle-orm": "^0.45.2",
     "jose": "^6.2.12",
     "zod": "^4.5.4"

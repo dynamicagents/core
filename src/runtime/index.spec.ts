@@ -9,6 +9,7 @@ import { buildRecipeTools, collectToolFamilies } from "./tool-families.js";
 import {
   definePlugin,
   restrictMainAgentTools,
+  withoutToolApproval,
   PLUGIN_CONTRACT_VERSION,
   type AgentPlugin,
   type MainAgentToolContext,
@@ -62,6 +63,14 @@ const toolCtx = (compactions: unknown[] = []): MainAgentToolContext => ({
   session: {
     getCompactions: async () => compactions
   } as unknown as SessionLike
+});
+
+/** The options the SDK passes a tool's `execute`. */
+const executeOptions = (abortSignal: AbortSignal) => ({
+  toolCallId: "call-1",
+  messages: [],
+  context: undefined,
+  abortSignal
 });
 
 describe("createAgentRuntime — what it refuses at startup", () => {
@@ -246,6 +255,44 @@ describe("createAgentRuntime — what it composes", () => {
         "You can delegate beta work."
       ].join("\n\n")
     );
+  });
+
+  it("hands plugins the round's signal, and bounds every tool they return", async () => {
+    let seen: AbortSignal | undefined;
+    const execute = vi.fn(async () => "acted");
+    const rt = createAgentRuntime({
+      config: { model: TEST_MODELS },
+      plugins: [
+        definePlugin({
+          key: "gamma",
+          mainAgentTools: (ctx) => {
+            seen = ctx.signal;
+            return {
+              act: tool({
+                description: "act",
+                inputSchema: z.object({}),
+                execute
+              })
+            };
+          }
+        })
+      ]
+    });
+    const round = new AbortController();
+
+    const tools = await rt.mainAgentTools({
+      ...toolCtx(),
+      signal: round.signal
+    });
+
+    expect(seen).toBe(round.signal);
+    // Only the wrapper declines to start a call whose signal has already fired,
+    // so a call that never reaches `execute` is one that went through it.
+    round.abort();
+    await expect(
+      tools.act!.execute!({}, executeOptions(round.signal))
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it("renders a capability block declared only on a plugin's subtask type", () => {
@@ -659,6 +706,44 @@ describe("buildRecipeTools", () => {
 
     expect(buildRecipeTools(["plain"], registry, ctx).abort).toBeUndefined();
   });
+
+  it("hands each family the chunk's signal, and bounds every tool it returns", async () => {
+    let seen: AbortSignal | undefined;
+    const execute = vi.fn(async () => "acted");
+    const registry = collectToolFamilies([
+      {
+        key: "p",
+        toolFamilies: {
+          act: (c: ToolFamilyContext) => {
+            seen = c.signal;
+            return {
+              tools: {
+                act: tool({
+                  description: "act",
+                  inputSchema: z.object({}),
+                  execute
+                })
+              }
+            };
+          }
+        }
+      }
+    ]);
+    const chunk = new AbortController();
+    chunk.abort();
+
+    const built = buildRecipeTools(["act"], registry, {
+      ...ctx,
+      signal: chunk.signal
+    });
+
+    expect(seen).toBe(chunk.signal);
+    // See the main-agent case: never reaching `execute` is the wrapper's mark.
+    await expect(
+      built.tools.act!.execute!({}, executeOptions(chunk.signal))
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(execute).not.toHaveBeenCalled();
+  });
 });
 
 describe("restrictMainAgentTools", () => {
@@ -792,5 +877,131 @@ describe("restrictMainAgentTools", () => {
     expect(Object.keys(await original.mainAgentTools!(toolCtx()))).toHaveLength(
       3
     );
+  });
+});
+
+describe("the approval rules a runtime composes", () => {
+  const gated = (
+    key: string,
+    names: string[],
+    rules: Record<string, "user-approval" | "denied">
+  ): AgentPlugin =>
+    definePlugin({
+      key,
+      mainAgentTools: () =>
+        Object.fromEntries(
+          names.map((name) => [
+            name,
+            tool({ description: name, inputSchema: z.object({}) })
+          ])
+        ),
+      mainAgentToolApproval: () => rules
+    });
+
+  it("hands back each rule beside the tool it governs", async () => {
+    const runtime = createAgentRuntime({
+      config: { model: TEST_MODELS },
+      plugins: [
+        gated("repo", ["repo_push", "repo_status"], {
+          repo_push: "user-approval"
+        })
+      ]
+    });
+
+    const surface = await runtime.mainAgentSurface(toolCtx());
+
+    expect(Object.keys(surface.tools)).toEqual(["repo_push", "repo_status"]);
+    expect(surface.toolApproval).toEqual({ repo_push: "user-approval" });
+  });
+
+  it("drops a rule for a tool its plugin does not offer, and names both", async () => {
+    // A rule that governs nothing is a tool running unasked that its plugin
+    // meant to gate — the typo is worth a log line, not a silent pass.
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const runtime = createAgentRuntime({
+      config: { model: TEST_MODELS },
+      plugins: [gated("repo", ["repo_push"], { repo_psuh: "user-approval" })]
+    });
+
+    const surface = await runtime.mainAgentSurface(toolCtx());
+
+    expect(surface.toolApproval).toEqual({});
+    expect(String(error.mock.calls[0]?.[0])).toMatch(/"repo".*"repo_psuh"/);
+    error.mockRestore();
+  });
+
+  it("does not let one plugin's rule govern another plugin's tool", async () => {
+    // A later plugin offering the same name replaced the tool, and the rule was
+    // about the one it replaced.
+    const runtime = createAgentRuntime({
+      config: { model: TEST_MODELS },
+      plugins: [
+        gated("first", ["shared"], { shared: "user-approval" }),
+        definePlugin({
+          key: "second",
+          mainAgentTools: () => ({
+            shared: tool({ description: "another", inputSchema: z.object({}) })
+          })
+        })
+      ]
+    });
+
+    const surface = await runtime.mainAgentSurface(toolCtx());
+
+    expect(surface.toolApproval).toEqual({});
+  });
+});
+
+describe("withoutToolApproval", () => {
+  const repo = (): AgentPlugin =>
+    definePlugin({
+      key: "repo",
+      mainAgentTools: () => ({
+        repo_push: tool({ description: "push", inputSchema: z.object({}) }),
+        repo_open_pr: tool({ description: "open", inputSchema: z.object({}) })
+      }),
+      mainAgentToolApproval: () => ({
+        repo_push: "user-approval",
+        repo_open_pr: "user-approval"
+      }),
+      capability: "You can push.",
+      requires: { secrets: ["GITHUB_TOKEN"] }
+    });
+
+  it("releases every rule when no tools are named, and nothing else", () => {
+    const released = withoutToolApproval(repo());
+
+    expect(released.mainAgentToolApproval).toBeUndefined();
+    expect(released.capability).toBe("You can push.");
+    expect(released.requires).toEqual({ secrets: ["GITHUB_TOKEN"] });
+  });
+
+  it("releases only the tools it names", async () => {
+    const runtime = createAgentRuntime({
+      config: { model: TEST_MODELS },
+      plugins: [withoutToolApproval(repo(), { tools: ["repo_open_pr"] })]
+    });
+
+    expect((await runtime.mainAgentSurface(toolCtx())).toolApproval).toEqual({
+      repo_push: "user-approval"
+    });
+  });
+
+  it("logs a name that matches none of the plugin's rules", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const released = withoutToolApproval(repo(), { tools: ["repo_pusj"] });
+
+    await released.mainAgentToolApproval?.(toolCtx());
+
+    expect(String(error.mock.calls[0]?.[0])).toMatch(/"repo".*"repo_pusj"/);
+    error.mockRestore();
+  });
+
+  it("does not change the plugin it was given", () => {
+    const original = repo();
+
+    withoutToolApproval(original);
+
+    expect(original.mainAgentToolApproval).toBeDefined();
   });
 });
