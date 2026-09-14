@@ -30,6 +30,7 @@ import { TEST_MODELS } from "../testing/fixtures.js";
 import {
   buildTurnInstructions,
   joinSuccessfulBranches,
+  declinedReason,
   heldCalls,
   renderTurnMessages,
   runTurn,
@@ -116,7 +117,9 @@ final_reply now with what you have.`,
   copy: {
     taskFailed: "Sorry — something went wrong handling that request.",
     recoveredReply: "Working on your request.",
-    partialNote: "Some parts of this request could not be completed."
+    partialNote: "Some parts of this request could not be completed.",
+    approvalPrompt: (calls) =>
+      calls.map((call) => call.reason ?? call.toolName).join("\n")
   }
 };
 
@@ -1447,32 +1450,11 @@ describe("the tool deadline the round relies on", () => {
  * A round that stops to ask the person.
  *
  * Asking is an ending, as `final_reply` and `delegate` are, and what is pinned
- * is what makes it one: it is offered only where the agent's policy says it may
- * ask and never on a round that has to answer, it outranks the other endings in
- * its step, and it leaves the Session alone — the question goes in with its
- * answer, not before.
+ * is what makes it one: it is offered on every round that can still act on the
+ * answer, it outranks the other endings in its step, and it leaves the Session
+ * alone — the question goes in with its answer, not before.
  */
 describe("a round that asks", () => {
-  const askPolicy: RoundPolicy = {
-    ...policy,
-    human: {
-      askGuidance: `
-
-# Asking
-
-Ask only when you cannot go on without an answer that only they have.`,
-      approvalPrompt: (calls) =>
-        calls.map((call) => call.reason ?? call.toolName).join("\n")
-    }
-  };
-  const askInstructions = buildTurnInstructions(askPolicy, types, 8, {
-    maxTurns: 20,
-    maxWallMs: 60_000
-  });
-
-  const asking = (overrides: Partial<RunTurnArgs> = {}) =>
-    args({ canAsk: true, instructions: askInstructions, ...overrides });
-
   const ask = (question: string, options?: string[]) => ({
     toolName: ASK_USER_TOOL_NAME,
     input: { question, ...(options ? { options } : {}) }
@@ -1482,7 +1464,7 @@ Ask only when you cannot go on without an answer that only they have.`,
     const session = new FakeSession();
 
     const outcome = await runTurn(
-      asking({
+      args({
         session,
         models: pair(
           mockModel({
@@ -1507,7 +1489,7 @@ Ask only when you cannot go on without an answer that only they have.`,
 
   it("asks instead of delegating, in a step that does both", async () => {
     const outcome = await runTurn(
-      asking({
+      args({
         models: pair(
           mockModel({
             toolCalls: [
@@ -1532,7 +1514,7 @@ Ask only when you cannot go on without an answer that only they have.`,
 
   it("asks instead of answering, in a step that does both", async () => {
     const outcome = await runTurn(
-      asking({
+      args({
         models: pair(
           mockModel({
             toolCalls: [
@@ -1547,29 +1529,22 @@ Ask only when you cannot go on without an answer that only they have.`,
     expect(outcome.status).toBe("parked");
   });
 
-  it("offers the question only to an agent that may ask", async () => {
-    const may = inspectingModel(finalReply("done"));
-    const mayNot = inspectingModel(finalReply("done"));
+  it("offers the question on a round that can act on the answer", async () => {
+    // Nothing in the agent turns it on: every gatekeeper can ask a person.
+    const model = inspectingModel(finalReply("done"));
 
-    await runTurn(asking({ models: pair(may.model) }));
-    await runTurn(args({ models: pair(mayNot.model) }));
+    await runTurn(args({ models: pair(model.model) }));
 
-    expect(may.asked()[0].tools).toContain(ASK_USER_TOOL_NAME);
-    expect(mayNot.asked()[0].tools).not.toContain(ASK_USER_TOOL_NAME);
+    expect(model.asked()[0].tools).toContain(ASK_USER_TOOL_NAME);
   });
 
   it("never offers it to a round that has to answer", async () => {
     // No budget is left to act on whatever the person says.
     const model = inspectingModel(finalReply("what I have"));
 
-    await runTurn(asking({ mode: "final", models: pair(model.model) }));
+    await runTurn(args({ mode: "final", models: pair(model.model) }));
 
     expect(model.asked()[0].tools).toEqual([FINAL_REPLY_TOOL_NAME]);
-  });
-
-  it("tells the model when to ask only where the agent does", () => {
-    expect(askInstructions.open).toContain("# Asking");
-    expect(instructions.open).not.toContain("# Asking");
   });
 
   it("hands two questions in one step back, to be asked as one", async () => {
@@ -1578,7 +1553,7 @@ Ask only when you cannot go on without an answer that only they have.`,
       { toolCall: ask("Which repository, and which branch?") }
     );
 
-    const outcome = await runTurn(asking({ models: pair(model.model) }));
+    const outcome = await runTurn(args({ models: pair(model.model) }));
 
     expect(outcome).toMatchObject({
       status: "parked",
@@ -1596,7 +1571,7 @@ Ask only when you cannot go on without an answer that only they have.`,
       { toolCall: ask("Go ahead?", ["Yes", "No"]) }
     );
 
-    const outcome = await runTurn(asking({ models: pair(model.model) }));
+    const outcome = await runTurn(args({ models: pair(model.model) }));
 
     expect(outcome).toMatchObject({
       status: "parked",
@@ -1668,7 +1643,8 @@ Ask only when you cannot go on without an answer that only they have.`,
  *
  * What is pinned is the promise the rule makes: a held call does not run until a
  * person approves it, runs **once** when they do — however many times the round
- * after the answer is attempted — and never runs at all where nobody can be asked.
+ * after the answer is attempted — and a model told it was declined knows a person
+ * decided that.
  */
 describe("a round that holds calls for approval", () => {
   /** A gated tool and an ungated one, each counting how often it really ran. */
@@ -1716,7 +1692,7 @@ describe("a round that holds calls for approval", () => {
         type: "tool-approval-response",
         approvalId: call.approvalId,
         approved,
-        ...(approved ? {} : { reason: "not today" })
+        ...(approved ? {} : { reason: declinedReason("not today") })
       })),
       results: approved
         ? results
@@ -1727,7 +1703,10 @@ describe("a round that holds calls for approval", () => {
                 type: "tool-result",
                 toolCallId: call.toolCallId,
                 toolName: call.toolName,
-                output: { type: "execution-denied", reason: "not today" }
+                output: {
+                  type: "execution-denied",
+                  reason: declinedReason("not today")
+                }
               } satisfies ToolResultPart
             ])
           ),
@@ -1739,7 +1718,7 @@ describe("a round that holds calls for approval", () => {
   }
 
   const holding = (overrides: Partial<RunTurnArgs>) =>
-    runTurn(args({ canAsk: true, toolApproval: rules, ...overrides }));
+    runTurn(args({ toolApproval: rules, ...overrides }));
 
   it("parks on a held call without running it", async () => {
     const { runs, tools } = counted();
@@ -1910,7 +1889,20 @@ describe("a round that holds calls for approval", () => {
 
     expect(outcome.status).toBe("replied");
     expect(runs.push).toBe(0);
-    expect(JSON.stringify(model.asked()[0].messages)).toContain("not today");
+    const seen = JSON.stringify(model.asked()[0].messages);
+    expect(seen).toContain("The person declined this call");
+    expect(seen).toContain("They said: not today");
+  });
+
+  it("says a person declined a call before anything they typed", () => {
+    // Their words alone read as a note, not as a decision somebody made.
+    expect(declinedReason(undefined)).toBe(
+      "The person declined this call, and it did not run."
+    );
+    expect(declinedReason("  ")).toBe(declinedReason(undefined));
+    expect(declinedReason("not today")).toBe(
+      "The person declined this call, and it did not run. They said: not today"
+    );
   });
 
   it("runs an approved call once when the first slot reaches no ending", async () => {
@@ -1990,23 +1982,5 @@ describe("a round that holds calls for approval", () => {
 
     expect(outcome.status).toBe("replied");
     expect(runs.push).toBe(1);
-  });
-
-  it("refuses a held call, and parks on nothing, where nobody can be asked", async () => {
-    const { runs, tools } = counted();
-    const model = inspectingModel(
-      { toolCall: push },
-      finalReply("could not push without a person")
-    );
-
-    const outcome = await runTurn(
-      args({ tools, toolApproval: rules, models: pair(model.model) })
-    );
-
-    expect(outcome.status).toBe("replied");
-    expect(runs.push).toBe(0);
-    expect(JSON.stringify(model.asked()[1].messages)).toContain(
-      "nobody this agent can ask"
-    );
   });
 });

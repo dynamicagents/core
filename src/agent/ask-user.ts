@@ -11,8 +11,9 @@ import { nonBlank } from "../subtasks/decomposition.js";
  * ending, the Workflow parks on the answer, and the next round finds the question
  * and its answer in the conversation, the way it finds every other turn.
  *
- * Offered only to an agent whose policy says it may ask — `RoundPolicy.human` —
- * and never on a `final` round, which has no budget left to act on the answer.
+ * Offered on every round but a `final` one, which has no budget left to act on
+ * the answer. Asking is not an agent setting: every gatekeeper can put a question
+ * to a person — see {@link file://../a2a/hitl.ts hitl.ts}.
  */
 
 export const ASK_USER_TOOL_NAME = "ask_user";

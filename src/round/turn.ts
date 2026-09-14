@@ -84,12 +84,11 @@ import {
  *   results. Every round gets them except the one the budget forced — looking
  *   something up before answering is ordinary work, not a special phase, right up
  *   until there is nothing left to spend on it (see {@link RoundMode}).
- * - **Control tools** — `delegate`, `final_reply`, and `ask_user` where the
- *   agent may ask — have no `execute`. The call *is* the round's output: the loop
- *   halts on it, and for `delegate` and `ask_user` the Workflow performs it
- *   durably. Because the loop halts, the SDK never validates their input either,
- *   so each one checks its own and the round repairs what it rejects — see
- *   `agent/control.ts`.
+ * - **Control tools** — `delegate`, `final_reply` and `ask_user` — have no
+ *   `execute`. The call *is* the round's output: the loop halts on it, and for
+ *   `delegate` and `ask_user` the Workflow performs it durably. Because the loop
+ *   halts, the SDK never validates their input either, so each one checks its own
+ *   and the round repairs what it rejects — see `agent/control.ts`.
  *
  * Nothing forces the *choice*, and that is deliberate. An earlier design pinned
  * `toolChoice` to a specific tool to force delegation in one phase and forbid it in
@@ -160,8 +159,7 @@ export function buildTurnInstructions(
   });
   const open =
     policy.roundContract({ typeKeys: types.keys, maxSubtasks }) +
-    (guidance ? `\n\n${guidance}` : "") +
-    (policy.human?.askGuidance ?? "");
+    (guidance ? `\n\n${guidance}` : "");
   return {
     open,
     final: {
@@ -507,14 +505,9 @@ export interface RunTurnArgs {
   /** `CoreConfig.maxSubtasks`, the per-round fan-out bound. */
   maxSubtasks: number;
   /**
-   * Whether this agent may stop a round to ask the person — its policy's
-   * `human`. Never on a `final` round, whatever this says. Absent means no.
-   */
-  canAsk?: boolean;
-  /**
    * Approval rules for the work tools, by name — the plugins' own, see
    * `AgentPlugin.mainAgentToolApproval`. A call a rule holds for a person parks
-   * the round when this agent may ask, and is refused when it may not.
+   * the round.
    */
   toolApproval?: MainAgentToolApproval;
   /** Held calls the person has now answered on. See {@link ApprovalReplay}. */
@@ -653,36 +646,18 @@ interface AttemptApprovals {
   onToolExecutionEnd?: OnToolExecutionEndCallback;
 }
 
-/** What the model reads for a call that needed a person and had nobody to ask. */
-const NOBODY_TO_ASK =
-  "This call needs a person's approval, and there is nobody this agent can ask. It did not run.";
+/** What the model reads for a held call the person did not approve. */
+const DECLINED = "The person declined this call, and it did not run.";
 
 /**
- * Rules for an agent with nobody to ask: a call a rule would have held for a
- * person is refused, and every other verdict stands. Never approved instead —
- * running a call nobody could approve is what the rule is there to prevent.
+ * The refusal a declined call carries: {@link DECLINED}, then whatever the person
+ * typed. Appended rather than substituted — their words alone do not say that a
+ * person decided, and that is the first thing the model has to know about the
+ * call.
  */
-function refuseWithoutAsking(
-  rules: MainAgentToolApproval
-): MainAgentToolApproval {
-  return Object.fromEntries(
-    Object.entries(rules).map(([name, rule]) => [
-      name,
-      async (
-        input: unknown,
-        options: { toolCallId: string; messages: ModelMessage[] }
-      ) => {
-        const status =
-          typeof rule === "function" ? await rule(input, options) : rule;
-        const asks =
-          status === "user-approval" ||
-          (typeof status === "object" && status.type === "user-approval");
-        return asks
-          ? { type: "denied" as const, reason: NOBODY_TO_ASK }
-          : status;
-      }
-    ])
-  );
+export function declinedReason(said: string | undefined): string {
+  const text = said?.trim();
+  return text ? `${DECLINED} They said: ${text}` : DECLINED;
 }
 
 /**
@@ -1239,7 +1214,7 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
   const control = controlTools({
     catalog,
     delegable: args.mode !== "final",
-    askable: args.canAsk === true && args.mode !== "final",
+    askable: args.mode !== "final",
     types: args.types,
     maxSubtasks: args.maxSubtasks
   });
@@ -1252,8 +1227,7 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
   // attempt's — a call that ran is a call that ran, whichever attempt made it.
   const seen: ModelMessage[] = [];
 
-  // Held calls. An agent with nobody to ask has its rules refuse what they would
-  // have held, and a round after an answer replays the calls it was about.
+  // Held calls: a round after an answer replays the calls it was about.
   const replay = args.approval;
   const results: Record<string, ToolResultPart> = { ...replay?.results };
   const replayed = new Map(
@@ -1282,13 +1256,7 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
   }
 
   const approvals: AttemptApprovals = {
-    ...(args.toolApproval
-      ? {
-          rules: args.canAsk
-            ? args.toolApproval
-            : refuseWithoutAsking(args.toolApproval)
-        }
-      : {}),
+    ...(args.toolApproval ? { rules: args.toolApproval } : {}),
     tools: Object.fromEntries(
       [...replayed.values()].flatMap((call) => {
         const tool = args.tools[call.toolName];

@@ -17,6 +17,11 @@ import { dataPart, textPart } from "./parts.js";
  * part names both sides read by are `@dynamicagents/g2a-protocol`'s. What is here
  * is core's half of it — building the question, and reading an answer back out of
  * a message that has to be treated as untrusted until it parses.
+ *
+ * **Every gatekeeper takes part.** Putting a question or an approval in front of a
+ * person, and sending back their answer or a timeout, is the gatekeeper's side of
+ * the contract, not an option an agent checks for. So any round may ask, and a call
+ * a plugin holds for approval always waits for the person's answer.
  */
 
 /** Distributive, so the "an option, a text, or both" union survives the `Omit`. */

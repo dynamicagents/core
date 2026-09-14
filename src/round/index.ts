@@ -14,7 +14,7 @@
  *
  * **Core still ships no prompt copy.** Everything the model and the user read
  * comes from the {@link RoundPolicy} an agent supplies: the round contract, the
- * forced-answer notes, and the three user-facing strings. That is the line — core
+ * forced-answer notes, and the user-facing strings. That is the line — core
  * owns the machine, you own the words.
  */
 

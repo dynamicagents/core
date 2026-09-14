@@ -226,15 +226,16 @@ export interface AgentPlugin<TRuntime = SubtaskRuntime> {
    * A rule is a status, or a function of the call returning one.
    * `"user-approval"` stops the round and asks the person, and its object form's
    * `reason` is the words they read about the call; `"denied"`, `"approved"` and
-   * `undefined` decide without asking anyone. See `RoundPolicy.human` for what a
-   * round does with a call that waits.
+   * `undefined` decide without asking anyone. The round waits on the answer as
+   * it waits on a question — every gatekeeper puts both in front of a person,
+   * see `a2a/hitl.ts` — and `RoundPolicy.copy.approvalPrompt` frames what they
+   * read.
    *
    * **The main agent's calls only.** A subagent runs unattended, so a recipe
    * naming this plugin's tool family gets these tools with no rules at all.
    *
-   * A rule is never a way around its tool: an agent with nobody to ask has every
-   * call a rule would have held refused, not run. An agent that wants a tool to
-   * run without asking removes the rule — see {@link withoutToolApproval}.
+   * An agent that wants a tool to run without asking removes the rule — see
+   * {@link withoutToolApproval}.
    */
   mainAgentToolApproval?: (
     ctx: MainAgentToolContext

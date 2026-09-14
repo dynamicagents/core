@@ -44,6 +44,7 @@ import type { ApprovalCall, FinalRoundReason, RoundPolicy } from "./policy.js";
 import type { MainAgentToolApproval } from "../contract/plugin.js";
 import {
   buildTurnInstructions,
+  declinedReason,
   heldCalls,
   runTurn,
   type ApprovalReplay,
@@ -157,20 +158,13 @@ function approvalFor(
   policy: RoundPolicy,
   calls: readonly ApprovalCall[]
 ): HitlRequestData {
-  // Unreachable: a round holds calls only for an agent whose policy can ask.
-  if (!policy.human) {
-    throw new Error("a round held calls for approval with no policy to ask in");
-  }
   return {
     type: HITL_REQUEST_TYPE,
     requestId,
     requestKind: "approval",
-    prompt: policy.human.approvalPrompt(calls)
+    prompt: policy.copy.approvalPrompt(calls)
   };
 }
-
-/** What the model reads for a held call the person did not approve. */
-const DECLINED = "The person declined this call, and it did not run.";
 
 export abstract class RoundAgentBase<
   TEnv extends Cloudflare.Env & AiEnv & A2ASecretsEnv = Cloudflare.Env &
@@ -396,7 +390,6 @@ export abstract class RoundAgentBase<
         toolOutputWindow: this.config.toolOutputWindow,
         types: this.runtime.types,
         maxSubtasks: this.config.maxSubtasks,
-        canAsk: policy.human !== undefined,
         maxOutputTokens: this.config.model.maxOutputTokens,
         instructions: this.instructions,
         partialNote: policy.copy.partialNote,
@@ -486,7 +479,7 @@ export abstract class RoundAgentBase<
       return undefined;
     }
     const approved = held.answer.optionId === HITL_APPROVE_OPTION_ID;
-    const reason = approved ? undefined : (held.answer.text ?? DECLINED);
+    const reason = approved ? undefined : declinedReason(held.answer.text);
     const results = { ...held.results };
     const responses: ToolApprovalResponse[] = [];
     for (const call of heldCalls(held.pending)) {
