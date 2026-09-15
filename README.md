@@ -421,11 +421,24 @@ messages nor knows who wants them. An episodic-memory plugin, an audit log, and 
 cold-storage dump all want exactly this callback, and each gets it:
 
 ```ts
-// in your DO, wiring the runtime's fan-out into the session
-buildAgentSession(this, model, {
-  …,
-  onMessagesDisplaced: this.runtime.onMessagesDisplaced
-});
+// In a DO of your own. `DynamicAgent` does all of this for you — it owns a
+// `Sessions` capability and calls `getSession()`; this is the wiring underneath.
+class MyAgent extends Agent<Env> {
+  readonly sessions = new Sessions(); // from `agents/sessions`
+
+  constructor(ctx: AgentContext, env: Env) {
+    super(ctx, env);
+    // Before anything starts the lifecycle: it refuses a capability after that.
+    this.lifecycle.use(this.sessions);
+  }
+
+  session() {
+    return buildAgentSession(this, this.sessions.session(), model, {
+      …,
+      onMessagesDisplaced: this.runtime.onMessagesDisplaced
+    });
+  }
+}
 ```
 
 Best-effort in both directions — a listener that throws never aborts compaction (history

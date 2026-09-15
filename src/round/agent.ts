@@ -223,8 +223,8 @@ export abstract class RoundAgentBase<
    * every round runs its loop over. The control tools that *end* a round are not
    * here; `runTurn` adds those.
    *
-   * The Session's own `set_context`/`load_context` come first, with the installed
-   * plugins' tools layered over them: a soul that instructs the model to record
+   * The context blocks' own `set_context` comes first, with the installed
+   * plugins' tools layered over it: a soul that instructs the model to record
    * durable facts with `set_context` needs it actually on the call.
    *
    * Which plugin tools appear is the plugins' business, not this class's. A
@@ -846,7 +846,7 @@ export abstract class RoundAgentBase<
     }
 
     // The result is durable in the parent now, but the child is **not** deleted
-    // here. `deleteSubAgent` aborts the facet, and aborting it in the same tick
+    // here. `dynamicAgents.delete` aborts the facet, and aborting it in the same tick
     // this `executeChunk` RPC returned stamps that already-successful invocation
     // `outcome:exception` in telemetry — a false-positive error on every
     // completed Subtask. The parent sweeps all of a Task's children once, after
@@ -863,7 +863,7 @@ export abstract class RoundAgentBase<
    * Workflow's delivery step, after the Task is terminal.
    *
    * Per-Subtask deletion is deferred to here rather than run right after each
-   * successful chunk because `deleteSubAgent` aborts the facet: aborting a child
+   * successful chunk because `dynamicAgents.delete` aborts the facet: aborting a child
    * in the same tick its `executeChunk` RPC returned records that
    * already-successful invocation as `outcome:exception`, which is pure
    * false-positive error noise (one per completed Subtask). By delivery every
@@ -1021,14 +1021,14 @@ export abstract class RoundAgentBase<
     // undefined only on an instance no turn has reached, where the facet's own
     // `requireSelfOrigin` produces the readable error.
     const selfOrigin = this.selfOrigin();
-    const child = await this.subAgent(this.subagentClass(), name);
+    const child = await this.dynamicAgents.get(this.subagentClass(), name);
     try {
       return await child.executeChunk(request, chunk, runtime, selfOrigin);
     } catch (err) {
       if (!String(err).includes(FINGERPRINT_MISMATCH)) throw err;
       console.warn("[agent] stale subagent state, recreating", { name });
-      await this.deleteSubAgent(this.subagentClass(), name);
-      const fresh = await this.subAgent(this.subagentClass(), name);
+      await this.dynamicAgents.delete(this.subagentClass(), name);
+      const fresh = await this.dynamicAgents.get(this.subagentClass(), name);
       return await fresh.executeChunk(request, chunk, runtime, selfOrigin);
     }
   }
@@ -1085,7 +1085,7 @@ export abstract class RoundAgentBase<
   ): Promise<void> {
     if (toolFamilies.length === 0) return;
     try {
-      const child = await this.subAgent(this.subagentClass(), name);
+      const child = await this.dynamicAgents.get(this.subagentClass(), name);
       await child.abortExecution(toolFamilies);
     } catch (err) {
       console.warn("[agent] subagent abort failed", { name, err: String(err) });
@@ -1121,7 +1121,7 @@ export abstract class RoundAgentBase<
   /** Delete a managed child, swallowing failures (used on best-effort sweeps). */
   private async deleteChildQuietly(name: string): Promise<void> {
     try {
-      await this.deleteSubAgent(this.subagentClass(), name);
+      await this.dynamicAgents.delete(this.subagentClass(), name);
     } catch (err) {
       console.warn("[agent] subagent cleanup failed", {
         name,
@@ -1146,7 +1146,7 @@ export abstract class RoundAgentBase<
    * here instead, or it would leak until the 30-day row cleanup regardless of
    * that row's own age.
    *
-   * Only `running` rows have a live RPC to abort. `subAgent` *creates* a facet
+   * Only `running` rows have a live RPC to abort. `dynamicAgents.get` *creates* a facet
    * that does not exist, so calling it for a `pending` row (no facet was ever
    * made) would materialize one just to delete it — `deleteChildQuietly` is a
    * silent no-op there, so it is called unconditionally instead of branching on
@@ -1182,7 +1182,7 @@ export abstract class RoundAgentBase<
         continue;
       }
       try {
-        const child = await this.subAgent(this.subagentClass(), name);
+        const child = await this.dynamicAgents.get(this.subagentClass(), name);
         // `false` means there was no in-flight RPC to interrupt. That is not the
         // "nothing to do" case it looks like: a `running` row whose isolate was
         // evicted or crashed has no live promise, so nobody is coming back to

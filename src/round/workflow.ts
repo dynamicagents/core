@@ -930,7 +930,7 @@ async function deliver(
         : buildFailedTask(p.taskId, p.contextId, failedText),
     // Sweep this Task's managed children now that it is terminal and every
     // `execute` step has unwound. Deleting them here — rather than right after
-    // each successful chunk — keeps `deleteSubAgent`'s facet-abort from landing
+    // each successful chunk — keeps `dynamicAgents.delete`'s facet-abort from landing
     // on a still-open `executeChunk` RPC, which telemetry mis-records as a
     // failure. Best-effort and idempotent, so it is safe on replay.
     sweep: async () => {

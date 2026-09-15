@@ -1,5 +1,4 @@
-import type { SessionMessage } from "agents/experimental/memory/session";
-import { isCompactionMessage } from "agents/experimental/memory/utils";
+import { isCompactionMessage, type SessionMessage } from "agents/sessions";
 import { sessionText } from "../agent/history.js";
 import type { SubtaskReference } from "./types.js";
 

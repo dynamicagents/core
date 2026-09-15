@@ -91,16 +91,21 @@ export interface AgentLimits {
 export interface SessionConfig {
   /** Soft cap (tokens) for the self-edited `"memory"` scratchpad block. */
   memoryMaxTokens: number;
-  /** Live-history token threshold that triggers automatic compaction. */
+  /**
+   * Live-history token threshold that triggers automatic compaction.
+   *
+   * History only: the system prompt — soul, capabilities and the `memory` block
+   * — is not counted, and rides on top of this in every call.
+   */
   compactAfterTokens: number;
   /**
    * Tokens of the most recent history compaction keeps **verbatim**.
    *
    * Read this together with {@link compactAfterTokens}; neither means anything
-   * alone. After a compaction the floor is `system + protectHead + summary +
-   * tail`, so the conversation that must accumulate before compaction fires
-   * again is `Δ = compactAfterTokens − floor`, and the SDK sizes each summary at
-   * 20% of the middle it folded, so at equilibrium `S ≈ 0.2Δ`.
+   * alone. After a compaction the floor is `protectHead + summary + tail`, so
+   * the conversation that must accumulate before compaction fires again is
+   * `Δ = compactAfterTokens − floor`, and the SDK sizes each summary at 20% of
+   * the middle it folded, so at equilibrium `S ≈ 0.2Δ`.
    *
    * INVARIANT: `compactAfterTokens − compactTailTokens >= 10_000`, asserted in
    * `session.spec.ts`. Below it the fixed floor eats the gap and compaction

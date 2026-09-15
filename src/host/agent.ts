@@ -1,4 +1,5 @@
-import { Agent, type Schedule } from "agents";
+import { Agent, type AgentContext, type Schedule } from "agents";
+import { Sessions } from "agents/sessions";
 import { TaskState, type Task } from "@a2a-js/sdk";
 import { createAgentRuntime, type AgentRuntime } from "../runtime/index.js";
 import type { AgentPlugin } from "../contract/plugin.js";
@@ -68,14 +69,20 @@ import type { PluginHost } from "./plugin-host.js";
  *
  * One Durable Object instance per verified caller (keyed by the gatekeeper JWT's
  * `identity.key`), each owning **one continuous Session** — durable history plus
- * a self-edited `memory` block, backed by `this.sql`. All of a caller's turns, in
- * any channel or thread, accumulate into that one conversation.
+ * a self-edited `memory` block, both in this object's SQLite. All of a caller's
+ * turns, in any channel or thread, accumulate into that one conversation.
  */
 export abstract class DynamicAgent<
   TEnv extends Cloudflare.Env & AiEnv & A2ASecretsEnv = Cloudflare.Env &
     AiEnv &
     A2ASecretsEnv
 > extends Agent<TEnv> {
+  /**
+   * The message store behind {@link getSession}. A lifecycle capability, so it is
+   * installed from the constructor: the lifecycle refuses one added after it has
+   * started, and any request can be the one that starts it.
+   */
+  private readonly sessions = new Sessions();
   private session?: SessionLike;
   private _runtime?: AgentRuntime;
   private _models?: ModelRuntime;
@@ -112,6 +119,11 @@ export abstract class DynamicAgent<
    * cannot reach it, and no model configuration crosses the RPC boundary.
    */
   modelsOverride?: ModelPair;
+
+  constructor(ctx: AgentContext, env: TEnv) {
+    super(ctx, env);
+    this.lifecycle.use(this.sessions);
+  }
 
   // --- the seams a subclass fills ------------------------------------------
 
@@ -288,6 +300,7 @@ export abstract class DynamicAgent<
     const { session, model } = this.config;
     return (this.session ??= buildAgentSession(
       this,
+      this.sessions.session(),
       // The pair, not the primary. Compaction runs inside the Session, where
       // there is nowhere to put an attempt ladder, so the second slot reaches it
       // through the model or not at all — and a compaction that fails leaves the

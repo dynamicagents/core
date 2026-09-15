@@ -55,6 +55,13 @@ export {
   type SessionLike
 } from "./session.js";
 
+/**
+ * The message shape every session reader handles, re-exported so a plugin or an
+ * agent names it through core rather than through the SDK's experimental
+ * subpath — where it lives there is core's to track.
+ */
+export type { SessionMessage } from "agents/sessions";
+
 export {
   deterministicSessionMessage,
   finalReplyMessageId,

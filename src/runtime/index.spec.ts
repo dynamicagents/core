@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { TEST_MODELS } from "../testing/fixtures.js";
 import { z } from "zod";
 import { tool, type ToolSet } from "ai";
-import type { SessionMessage } from "agents/experimental/memory/session";
+import type { SessionMessage } from "agents/sessions";
 import { createAgentRuntime, RuntimeSetupError } from "./index.js";
 import { deterministicSessionMessage } from "../agent/history.js";
 import { buildRecipeTools, collectToolFamilies } from "./tool-families.js";
