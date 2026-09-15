@@ -40,7 +40,15 @@ export interface SessionHost {
  * one object — lets tests inject a fake.
  */
 export interface SessionLike {
-  appendMessage(message: SessionMessage): Promise<unknown> | unknown;
+  /**
+   * Append a message, optionally onto a named parent: `undefined` attaches to
+   * the current leaf, `null` starts a root, an id branches from that message.
+   * Core itself never branches — this is here because a consumer may.
+   */
+  appendMessage(
+    message: SessionMessage,
+    parentId?: string | null
+  ): Promise<unknown> | unknown;
   getHistory(): Promise<SessionMessage[]>;
   /**
    * Read one message by id, or null. Reads the **raw stored row**, so it is
@@ -191,7 +199,12 @@ export function buildAgentSession(
   ]);
 
   return {
-    appendMessage: (message) => session.appendMessage(message),
+    // `parentId` is passed only when the caller named one: the SDK reads an
+    // explicit `null` as "start a root", which is not what omitting it means.
+    appendMessage: (message, parentId) =>
+      parentId === undefined
+        ? session.appendMessage(message)
+        : session.appendMessage(message, { parentId }),
     getHistory: () => session.getHistory(),
     getMessage: (id) => session.getMessage(id),
     getCompactions: () => session.getCompactions(),

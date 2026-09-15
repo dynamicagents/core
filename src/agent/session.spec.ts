@@ -190,12 +190,25 @@ describe("buildAgentSession on a real Durable Object", () => {
         VALUES ('memory', 'the user prefers tabs')`;
 
       const session = build(agent);
-      const prompt = await session.refreshSystemPrompt();
-      expect(prompt).toContain("SOUL");
-      expect(prompt).toContain("the user prefers tabs");
+      // Pinned whole, not by substring. What the model reads is the prompt's
+      // exact bytes: the block order, the rules, the usage line. A change to any
+      // of it changes every prompt this package sends and invalidates the
+      // provider's prefix cache, so it must not pass unnoticed.
+      const rule = "\u2550".repeat(46);
+      expect(await session.refreshSystemPrompt()).toBe(
+        `${rule}\nSOUL [readonly]\n${rule}\nSOUL\n\n` +
+          `${rule}\nMEMORY (facts worth keeping) [1% \u2014 6/500 tokens] [writable]\n${rule}\n` +
+          "the user prefers tabs"
+      );
 
       const tools = await session.tools();
       expect(Object.keys(tools)).toEqual(["set_context"]);
+      // No `search_context`: a soul block is read-only and memory is a plain
+      // writable block, so this is the whole tool surface a session contributes.
+      expect(tools.set_context!.description).toBe(
+        'Write to a context block. Available blocks:\n- "memory" (writable): ' +
+          "facts worth keeping\n\nWrites are durable and persist across sessions."
+      );
       await tools.set_context!.execute!(
         { label: "memory", content: "the user prefers spaces" },
         { toolCallId: "c1", messages: [], context: undefined }
@@ -203,6 +216,22 @@ describe("buildAgentSession on a real Durable Object", () => {
       const [row] = agent.sql<{ content: string }>`
         SELECT content FROM cf_agents_context_blocks WHERE label = 'memory'`;
       expect(row?.content).toBe("the user prefers spaces");
+    });
+  });
+
+  it("appends onto a named parent, so a caller can still branch", async () => {
+    await inAgent(async (agent) => {
+      const session = build(agent);
+      await session.appendMessage(msg("root", "the question", "user"));
+      await session.appendMessage(msg("first", "one answer"));
+      await session.appendMessage(msg("second", "another answer"), "root");
+
+      // The second answer hangs off the question rather than off the first
+      // answer, so the active path is the branch it created.
+      expect((await session.getHistory()).map((m) => m.id)).toEqual([
+        "root",
+        "second"
+      ]);
     });
   });
 

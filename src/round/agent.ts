@@ -223,8 +223,8 @@ export abstract class RoundAgentBase<
    * every round runs its loop over. The control tools that *end* a round are not
    * here; `runTurn` adds those.
    *
-   * The Session's own `set_context` comes first, with the installed
-   * plugins' tools layered over them: a soul that instructs the model to record
+   * The context blocks' own `set_context` comes first, with the installed
+   * plugins' tools layered over it: a soul that instructs the model to record
    * durable facts with `set_context` needs it actually on the call.
    *
    * Which plugin tools appear is the plugins' business, not this class's. A
