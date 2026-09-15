@@ -48,9 +48,10 @@ Generate a keypair with `npm run keys`.
 
 ## Publishing constraints
 
-**Development lands on `next`; `main` is the released line.** A release is a merge
-from `next` into `main` carrying a version bump — so a bump is a deliberate act at
-release time rather than something that rides every merge.
+**Development lands on `main`, and a release is a PR that bumps the version.** npm is
+the released line, not a branch: a merge without a bump ships nothing, so changes
+batch on `main` until someone decides to release them, and a bump is a deliberate act
+rather than something that rides every merge.
 
 A version bump reaching `main` is what ships it: on the first green Test run for
 a commit carrying that version, `.github/workflows/release.yml` publishes it to
