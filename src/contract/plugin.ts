@@ -1,5 +1,5 @@
 import type { ModelMessage, ToolApprovalStatus, ToolSet } from "ai";
-import type { SessionMessage } from "agents/experimental/memory/session";
+import type { SessionMessage } from "agents/sessions";
 import type { SessionLike } from "../agent/session.js";
 import type { PluginStore } from "../db/db.js";
 import type {

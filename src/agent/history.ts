@@ -1,5 +1,5 @@
 import type { ModelMessage } from "ai";
-import type { SessionMessage } from "agents/experimental/memory/session";
+import type { SessionMessage } from "agents/sessions";
 
 /**
  * Session-history glue for the agent runtime: parse the gatekeeper-authored `<turn>`

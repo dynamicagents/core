@@ -25,7 +25,7 @@
  *
  * **Experimental, and that reaches consumers.** Every type in `agents/schedules`
  * carries "The API surface may change before stabilizing", the same caveat this
- * package already accepts for `agents/experimental/memory/*`. The difference is
+ * package already accepts for `agents/sessions`. The difference is
  * that `/alarm` is a published subpath, so the churn is inherited rather than
  * absorbed. Keeping the assembly here is what makes that one file's problem.
  *
@@ -120,9 +120,10 @@ export interface InstallSchedulerOptions<
    *
    * **`fetch` and the WebSocket handlers usually should not be.** A lifecycle's
    * `fetch` claims capability routes, falls through to a host's `onRequest`, and
-   * takes any upgrade request into its own connection handling. A host serving
-   * its own protocol over a WebSocket wants none of that, and delegating would
-   * hijack the upgrade. Declare it and keep it.
+   * declines any upgrade request no installed capability claims — and this
+   * assembly installs none that does. A host serving its own protocol over a
+   * WebSocket wants none of that, and delegating would refuse the upgrade.
+   * Declare it and keep it.
    */
   readonly hostOwns?: readonly HostHandler[];
 }

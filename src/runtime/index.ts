@@ -1,5 +1,5 @@
 import type { ToolSet } from "ai";
-import type { SessionMessage } from "agents/experimental/memory/session";
+import type { SessionMessage } from "agents/sessions";
 import {
   resolveConfig,
   type CoreConfig,

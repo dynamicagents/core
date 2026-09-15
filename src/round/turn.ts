@@ -16,7 +16,7 @@ import {
   isStepCount,
   ToolChoiceViolationError
 } from "ai";
-import type { SessionMessage } from "agents/experimental/memory/session";
+import type { SessionMessage } from "agents/sessions";
 import { MAX_TOOL_CALL_MS, TOOL_CALL_GRACE_MS } from "../platform.js";
 import type { AgentLimits } from "../config.js";
 import type { SubtaskTypeRegistry } from "../subtasks/subtask-types.js";

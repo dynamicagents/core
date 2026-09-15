@@ -111,7 +111,7 @@ const cachedResultSchema = z.discriminatedUnion("status", [
  * completed work; a different request for the same child name is rejected
  * ({@link FINGERPRINT_MISMATCH}). Transient platform faults throw and cache
  * nothing, so the enclosing Workflow step can retry. The parent deletes the child
- * (`deleteSubAgent`) only after its durable copy of the result succeeds, which
+ * (`dynamicAgents.delete`) only after its durable copy of the result succeeds, which
  * wipes this storage — the workspace and run state included.
  *
  * Not "stateless" like the single-shot original: it owns per-execution durable

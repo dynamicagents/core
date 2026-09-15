@@ -1,5 +1,15 @@
 import { describe, it, expect, vi } from "vitest";
-import { appendOnce, notifyingCompaction } from "./session.js";
+// From `cloudflare:workers`, not `cloudflare:test` — the latter's `env` is
+// deprecated, and the repo's type-aware `no-deprecated` rule fails the build on it.
+import { env } from "cloudflare:workers";
+import { runInDurableObject } from "cloudflare:test";
+import { isCompactionMessage } from "agents/sessions";
+import {
+  appendOnce,
+  buildAgentSession,
+  notifyingCompaction,
+  type AgentSessionOptions
+} from "./session.js";
 import {
   deterministicSessionMessage,
   sessionText,
@@ -8,7 +18,9 @@ import {
 import { FakeSession } from "../testing/fake-session.js";
 import { TEST_MODELS } from "../testing/fixtures.js";
 import { ConfigError, DEFAULT_CORE_CONFIG, resolveConfig } from "../config.js";
-import type { SessionMessage } from "agents/experimental/memory/session";
+import type { SessionMessage } from "agents/sessions";
+import { mockModel } from "../testing/mock-model.js";
+import type { TestAgent } from "../../test/worker.js";
 
 /**
  * The session seam the round loop depends on.
@@ -79,7 +91,7 @@ describe("notifyingCompaction", () => {
       }
     );
 
-    await wrapped(history as never, {} as never);
+    await wrapped(history as never);
 
     // Inclusive of both ends: m1..m2 is what the summary replaced.
     expect(displaced[0].map((m) => m.id)).toEqual(["m1", "m2"]);
@@ -101,9 +113,7 @@ describe("notifyingCompaction", () => {
       }
     );
 
-    await expect(wrapped(history as never, {} as never)).resolves.toEqual(
-      result
-    );
+    await expect(wrapped(history as never)).resolves.toEqual(result);
   });
 
   it("skips the notification when the displaced range is not in the history it saw", async () => {
@@ -113,8 +123,112 @@ describe("notifyingCompaction", () => {
       onMessagesDisplaced
     );
 
-    await wrapped(history as never, {} as never);
+    await wrapped(history as never);
     expect(onMessagesDisplaced).not.toHaveBeenCalled();
+  });
+});
+
+describe("buildAgentSession on a real Durable Object", () => {
+  /**
+   * The SDK's message store and prompt blocks, assembled by core. A fake cannot
+   * stand in here: what these pin is where the rows land and what the SDK does
+   * with them, and every deployed caller's history and memory are those rows.
+   */
+  const ns = (
+    env as unknown as { TEST_AGENT: DurableObjectNamespace<TestAgent> }
+  ).TEST_AGENT;
+  const inAgent = <R>(fn: (agent: TestAgent) => Promise<R>) =>
+    runInDurableObject(
+      ns.get(ns.idFromName(`session:${crypto.randomUUID()}`)),
+      fn
+    );
+
+  const options = (
+    over: Partial<AgentSessionOptions> = {}
+  ): AgentSessionOptions => ({
+    soul: () => "SOUL",
+    memoryDescription: "facts worth keeping",
+    memoryMaxTokens: 500,
+    compactAfterTokens: 100_000,
+    compactTailTokens: 20_000,
+    maxOutputTokens: 256,
+    ...over
+  });
+
+  const build = (agent: TestAgent, over?: Partial<AgentSessionOptions>) =>
+    buildAgentSession(
+      agent,
+      agent.sessions.session(),
+      mockModel({ text: "a summary" }),
+      options(over)
+    );
+
+  it("keeps the first stored text when a re-run appends the same id", async () => {
+    await inAgent(async (agent) => {
+      const session = build(agent);
+      await appendOnce(session, msg("task:t1:reply:final", "the original"));
+
+      expect(
+        await appendOnce(session, msg("task:t1:reply:final", "a retry's reply"))
+      ).toBe("the original");
+      expect((await session.getHistory()).map((m) => m.id)).toEqual([
+        "task:t1:reply:final"
+      ]);
+    });
+  });
+
+  it("reads and writes memory under the row every deployed caller already has", async () => {
+    await inAgent(async (agent) => {
+      // The row an existing caller's scratchpad is stored under, written
+      // directly. Renaming the block would strand it.
+      agent.sql`CREATE TABLE IF NOT EXISTS cf_agents_context_blocks (
+        label TEXT PRIMARY KEY,
+        content TEXT NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`;
+      agent.sql`INSERT INTO cf_agents_context_blocks (label, content)
+        VALUES ('memory', 'the user prefers tabs')`;
+
+      const session = build(agent);
+      const prompt = await session.refreshSystemPrompt();
+      expect(prompt).toContain("SOUL");
+      expect(prompt).toContain("the user prefers tabs");
+
+      const tools = await session.tools();
+      expect(Object.keys(tools)).toEqual(["set_context"]);
+      await tools.set_context!.execute!(
+        { label: "memory", content: "the user prefers spaces" },
+        { toolCallId: "c1", messages: [], context: undefined }
+      );
+      const [row] = agent.sql<{ content: string }>`
+        SELECT content FROM cf_agents_context_blocks WHERE label = 'memory'`;
+      expect(row?.content).toBe("the user prefers spaces");
+    });
+  });
+
+  it("compacts past the threshold and hands over what it folded", async () => {
+    await inAgent(async (agent) => {
+      const displaced: string[] = [];
+      const session = build(agent, {
+        compactAfterTokens: 50,
+        compactTailTokens: 10,
+        onMessagesDisplaced: async (messages) => {
+          displaced.push(...messages.map((m) => m.id));
+        }
+      });
+
+      const ids = Array.from({ length: 8 }, (_, i) => `m${i}`);
+      for (const id of ids) {
+        await session.appendMessage(msg(id, `${id} `.repeat(60)));
+      }
+
+      expect((await session.getCompactions()).length).toBeGreaterThan(0);
+      expect((await session.getHistory()).some(isCompactionMessage)).toBe(true);
+      expect(displaced.length).toBeGreaterThan(0);
+      expect(displaced.every((id) => ids.includes(id))).toBe(true);
+      // The raw rows outlive the overlay, which is what `appendOnce` reads back.
+      expect(await session.getMessage(displaced[0]!)).not.toBeNull();
+    });
   });
 });
 

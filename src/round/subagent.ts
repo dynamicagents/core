@@ -127,9 +127,9 @@ export abstract class RecipeSubagentHost<
 }
 
 /**
- * A **concrete** facet constructor, as `subAgent()` requires one.
+ * A **concrete** facet constructor, as `dynamicAgents.get()` requires one.
  *
- * {@link RecipeSubagentHost} is abstract, and `subAgent()` rightly refuses an
+ * {@link RecipeSubagentHost} is abstract, and `dynamicAgents.get()` rightly refuses an
  * abstract class — it is what constructs one. So the seam on the agent side is
  * typed as this: any named subclass below it.
  */

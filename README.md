@@ -421,8 +421,9 @@ messages nor knows who wants them. An episodic-memory plugin, an audit log, and 
 cold-storage dump all want exactly this callback, and each gets it:
 
 ```ts
-// in your DO, wiring the runtime's fan-out into the session
-buildAgentSession(this, model, {
+// in your DO, wiring the runtime's fan-out into the session — `this.sessions` is
+// an `agents/sessions` capability the constructor installed with `lifecycle.use`
+buildAgentSession(this, this.sessions.session(), model, {
   …,
   onMessagesDisplaced: this.runtime.onMessagesDisplaced
 });

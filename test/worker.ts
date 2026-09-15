@@ -1,4 +1,5 @@
-import { Agent } from "agents";
+import { Agent, type AgentContext } from "agents";
+import { Sessions } from "agents/sessions";
 import { DurableObject } from "cloudflare:workers";
 import { installScheduler } from "../src/alarm/index.js";
 import { AgentDB, type AgentDBOptions } from "../src/db/db.js";
@@ -13,7 +14,8 @@ import {
  * `@dynamicagents/core` is a library, not a Worker — but its Durable Object pieces
  * (`AgentDB` migrations, the subagent facet's own SQLite) can only be exercised
  * inside workerd. So this file is the minimal host that gives the pool something
- * to bind: a DO that owns an `AgentDB`, and a concrete subclass of the facet.
+ * to bind: a DO that owns an `AgentDB` and a session store, and a concrete
+ * subclass of the facet.
  *
  * It is deliberately thin. Anything richer belongs in `starter`, where a
  * real agent is the thing being tested rather than the harness.
@@ -21,6 +23,14 @@ import {
 
 export class TestAgent extends Agent<Cloudflare.Env> {
   private _db?: AgentDB;
+
+  /** Installed the way `DynamicAgent` installs it, for `buildAgentSession`. */
+  readonly sessions = new Sessions();
+
+  constructor(ctx: AgentContext, env: Cloudflare.Env) {
+    super(ctx, env);
+    this.lifecycle.use(this.sessions);
+  }
 
   db(options: AgentDBOptions = { maxSubtasks: 8 }): AgentDB {
     return (this._db ??= new AgentDB(this.ctx.storage, options));
