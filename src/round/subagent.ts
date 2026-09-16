@@ -1,7 +1,7 @@
 import { createAgentRuntime } from "../runtime/index.js";
 import type { AgentPlugin } from "../contract/plugin.js";
 import type { CoreConfigOverrides, ModelConfig } from "../config.js";
-import type { AiEnv } from "../env.js";
+import type { A2ASecretsEnv, AiEnv } from "../env.js";
 import type { ModelRuntime } from "../agent/model.js";
 import { workersAIModels } from "../agent/workers-ai/index.js";
 import { RecipeSubagentBase, type SubagentRuntime } from "../subagent/index.js";
@@ -48,7 +48,9 @@ import type { PluginHost } from "../host/plugin-host.js";
  * Vitest pool only marks bound classes as DO classes.
  */
 export abstract class RecipeSubagentHost<
-  TEnv extends Cloudflare.Env & AiEnv = Cloudflare.Env & AiEnv
+  TEnv extends Cloudflare.Env & AiEnv & A2ASecretsEnv = Cloudflare.Env &
+    AiEnv &
+    A2ASecretsEnv
 > extends RecipeSubagentBase<TEnv> {
   private _rt?: SubagentRuntime;
 

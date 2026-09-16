@@ -26,6 +26,7 @@ import type { AiGatewayMetadata } from "../agent/model.js";
 import { FINGERPRINT_MISMATCH, subagentName } from "../subagent/index.js";
 import { labelSubagentNote } from "../subtasks/progress.js";
 import type {
+  ChunkProgressContext,
   CompositionBranch,
   RecipeChunkResult,
   RecipeExecutionRequest,
@@ -785,7 +786,8 @@ export abstract class RoundAgentBase<
       name,
       request,
       chunk,
-      runtime
+      runtime,
+      push ? { push, ordinal } : undefined
     );
 
     // The Task may have been canceled while the chunk ran — checked *before* any
@@ -807,12 +809,19 @@ export abstract class RoundAgentBase<
     // Post progress the chunk emitted (best-effort; `working` never throws).
     // Deterministic keys let the gatekeeper dedupe a re-posted event on replay.
     //
-    // The only place a subagent's words reach the gatekeeper, which is why the
-    // attribution goes on here: everything arriving in `outcome.progress` is by
-    // definition a subagent's, so the main agent's own messages need no
-    // discrimination and stay unlabelled. The key is *not* labelled — it is the
-    // replay-dedupe id and must stay derived from position alone — and neither
-    // is `outcome.progress` itself, which rides back to the Workflow.
+    // **What a chunk returned**, which is not everything a subagent said: a facet
+    // handed the same context posts its own notes as it works and returns none
+    // here, because a chunk boundary can be minutes away from the note. Both
+    // paths label identically — see
+    // {@link file://../subtasks/types.ts ChunkProgressContext} for when a facet
+    // takes the other one, and `RecipeSubagentBase.emitProgress` for the rest.
+    //
+    // The attribution goes on at the post rather than at the source either way:
+    // everything arriving here is by definition a subagent's, so the main
+    // agent's own messages need no discrimination and stay unlabelled. The key is
+    // *not* labelled — it is the replay-dedupe id and must stay derived from
+    // position alone — and neither is `outcome.progress` itself, which rides back
+    // to the Workflow.
     if (push) {
       const channel = this.push(push);
       const source = { type: request.type, ordinal };
@@ -1010,7 +1019,14 @@ export abstract class RoundAgentBase<
     name: string,
     request: RecipeExecutionRequest,
     chunk: number,
-    runtime: SubtaskRuntime
+    runtime: SubtaskRuntime,
+    /**
+     * The callback channel, for a facet that posts its own notes as it works
+     * rather than returning them for the loop below to post when the chunk ends.
+     * Undefined when this turn has no gatekeeper behind it. See
+     * {@link file://../subtasks/types.ts ChunkProgressContext}.
+     */
+    progress?: ChunkProgressContext
   ): Promise<RecipeChunkResult> {
     // A facet has no request path of its own: it is reached only from here, so
     // this is the only way it can learn what this deployment is called. Passed
@@ -1023,13 +1039,25 @@ export abstract class RoundAgentBase<
     const selfOrigin = this.selfOrigin();
     const child = await this.dynamicAgents.get(this.subagentClass(), name);
     try {
-      return await child.executeChunk(request, chunk, runtime, selfOrigin);
+      return await child.executeChunk(
+        request,
+        chunk,
+        runtime,
+        selfOrigin,
+        progress
+      );
     } catch (err) {
       if (!String(err).includes(FINGERPRINT_MISMATCH)) throw err;
       console.warn("[agent] stale subagent state, recreating", { name });
       await this.dynamicAgents.delete(this.subagentClass(), name);
       const fresh = await this.dynamicAgents.get(this.subagentClass(), name);
-      return await fresh.executeChunk(request, chunk, runtime, selfOrigin);
+      return await fresh.executeChunk(
+        request,
+        chunk,
+        runtime,
+        selfOrigin,
+        progress
+      );
     }
   }
 

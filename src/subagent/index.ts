@@ -10,6 +10,7 @@ import {
   type RecipePolicy
 } from "../contract/validation.js";
 import type {
+  ChunkProgressContext,
   ProgressEvent,
   RecipeChunkResult,
   RecipeExecutionRequest,
@@ -17,11 +18,25 @@ import type {
   SubtaskId,
   SubtaskRuntime
 } from "../subtasks/types.js";
+import { labelSubagentNote } from "../subtasks/progress.js";
+import {
+  createPushChannel,
+  type PushChannel,
+  type TurnPushContext
+} from "../a2a/push.js";
 import {
   SubtaskParamsError,
   type SubtaskTypeRegistry
 } from "../subtasks/subtask-types.js";
 import { SelfOrigin } from "../a2a/self-origin.js";
+/**
+ * The signing secret is in the bound because {@link RecipeSubagentBase.emitProgress}
+ * posts to the gatekeeper with the deployment's own key. It costs a consumer
+ * nothing they did not already have: a facet only exists beneath a
+ * {@link file://../host/agent.ts DynamicAgent}, whose bound already demands it,
+ * and the two share one Worker and one `Env`.
+ */
+import type { A2ASecretsEnv } from "../env.js";
 import { renderSubagentPrompt } from "./prompt.js";
 import { makeWorkspaceHandle, type WorkspaceBacking } from "./workspace.js";
 import { fingerprintRequest } from "./fingerprint.js";
@@ -119,7 +134,7 @@ const cachedResultSchema = z.discriminatedUnion("status", [
  * with the child.
  */
 export abstract class RecipeSubagentBase<
-  TEnv extends Cloudflare.Env = Cloudflare.Env
+  TEnv extends Cloudflare.Env & A2ASecretsEnv = Cloudflare.Env & A2ASecretsEnv
 > extends Agent<TEnv> {
   /**
    * Supply the host runtime. Called per RPC, not memoized here — an
@@ -161,6 +176,21 @@ export abstract class RecipeSubagentBase<
    * See {@link SelfOrigin}.
    */
   private readonly selfOriginMemo = new SelfOrigin();
+
+  /**
+   * The callback channel for the chunk executing here, if the parent passed one
+   * and this facet asked for it by calling {@link emitProgress}.
+   *
+   * In memory and per-chunk, for the reason {@link inflight} is: it describes
+   * work in flight on this isolate, and an isolate that lost it has no chunk left
+   * to report on. Held as the built channel rather than the context so a chunk
+   * signs its callback JWT once however many notes it posts — see
+   * {@link file://../a2a/push.ts createPushChannel}.
+   */
+  private live?: {
+    channel: PushChannel;
+    source: { type: string; ordinal: number };
+  };
 
   async onStart(): Promise<void> {
     this.ensureTables();
@@ -221,19 +251,25 @@ export abstract class RecipeSubagentBase<
    *
    * A terminal outcome (completed / failed) is cached and replayed on retry. A
    * mid-run chunk persists its rolling state to `run_state` and returns a
-   * `done: false` yield for the Workflow to run another chunk. `chunk` and
-   * `selfOrigin` are separate arguments — never part of `request` — so every
-   * chunk fingerprints identically and the cache/resume keys line up. Only
-   * transient platform faults throw (nothing cached), so a Workflow retry
+   * `done: false` yield for the Workflow to run another chunk. `chunk`,
+   * `selfOrigin` and `progress` are separate arguments — never part of `request`
+   * — so every chunk fingerprints identically and the cache/resume keys line up.
+   * Only transient platform faults throw (nothing cached), so a Workflow retry
    * resumes from the last checkpoint.
+   *
+   * `progress` is what an override needs to post its own notes mid-chunk; this
+   * implementation never does, because the chunk boundary *is* when its runner
+   * has something to say. See {@link emitProgress}.
    */
   async executeChunk(
     request: RecipeExecutionRequest,
     _chunk: number,
     runtime: SubtaskRuntime = {},
-    selfOrigin?: string
+    selfOrigin?: string,
+    live?: ChunkProgressContext
   ): Promise<RecipeChunkResult> {
     this.ensureTables();
+    this.noteProgressContext(request, live);
     // Before `subagentRuntime()`, which is where a host builds its model runtime
     // — and a facet running on a provider it authenticates to mint-signed reads
     // this origin from there.
@@ -366,6 +402,80 @@ export abstract class RecipeSubagentBase<
    * row itself. Reaching a facet mid-`executeChunk` works because it is awaiting
    * a model `fetch` at the time, which does not hold the input gate closed.
    */
+  /**
+   * Record the callback channel for this chunk, or clear it.
+   *
+   * Called at the top of every chunk, including the ones that pass nothing — a
+   * facet resumed on an isolate that ran an earlier chunk would otherwise post
+   * this chunk's notes to the previous turn's gatekeeper callback.
+   *
+   * Protected rather than private because an override that does not call
+   * `super.executeChunk` has to be able to arm this itself.
+   */
+  protected noteProgressContext(
+    request: RecipeExecutionRequest,
+    live?: ChunkProgressContext
+  ): void {
+    this.live = live
+      ? {
+          channel: this.pushChannel(live.push),
+          source: { type: request.type, ordinal: live.ordinal }
+        }
+      : undefined;
+  }
+
+  /**
+   * The gatekeeper callback channel for one chunk.
+   *
+   * The same seam `DynamicAgent.push` is on the parent, and for the same reason:
+   * a deployment that keeps its signing key somewhere other than
+   * `A2A_SIGNING_KEY` overrides this rather than reshaping its `Env` around
+   * core's default name — which is exactly what `createA2AWorker`'s `secrets`
+   * option already allows at the Worker's edge.
+   */
+  protected pushChannel(context: TurnPushContext): PushChannel {
+    return createPushChannel(this.env.A2A_SIGNING_KEY, context);
+  }
+
+  /**
+   * Post one progress note now, instead of returning it for the parent to post
+   * when this chunk ends.
+   *
+   * Not to be confused with the `emitProgress` a tool family is handed below,
+   * which *collects* a note into the chunk's array and ends the chunk early so
+   * the parent posts it. That is the right shape when a chunk boundary is cheap
+   * and close; this one is for a facet whose chunk is neither.
+   *
+   * For a facet driving something that reports as it works — a CLI session, a
+   * long external run — where the chunk boundary is minutes away from the note
+   * and says nothing about when it was written. A facet that emits this way
+   * returns an empty `progress` from its chunk, so the parent's own post loop has
+   * nothing to repeat.
+   *
+   * **Silently a no-op without a context**, which is the common case: every spec,
+   * every local run, and every chunk the Workflow ran without a gatekeeper
+   * behind it. A facet should call this unconditionally rather than testing
+   * first.
+   *
+   * **And a no-op once the run is aborted.** The parent suppresses progress for a
+   * canceled Task before it posts (see `executeSubtaskChunk`), and a note posted
+   * from here never passes that check — so the abort signal stands in for it. It
+   * is a weaker guarantee, deliberately: it is local, so it costs no read, and
+   * what it can miss is a note already in flight when the cancel landed.
+   *
+   * Never throws. `PushChannel.working` swallows its own failures, on the
+   * principle that a run which cannot report its progress is still a run that
+   * should deliver its answer.
+   */
+  protected async postProgress(event: ProgressEvent): Promise<void> {
+    const live = this.live;
+    if (!live || this.inflight?.signal.aborted) return;
+    await live.channel.working(
+      labelSubagentNote(event.text, live.source),
+      event.key
+    );
+  }
+
   async abortRun(): Promise<boolean> {
     if (!this.inflight) return false;
     this.inflight.abort();

@@ -7,6 +7,7 @@ import {
   RecipeSubagentBase,
   type SubagentRuntime
 } from "../src/subagent/index.js";
+import type { A2ASecretsEnv } from "../src/env.js";
 
 /**
  * The Worker under test.
@@ -53,7 +54,9 @@ export function setSubagentRuntime(runtime: SubagentRuntime): void {
   testRuntime = runtime;
 }
 
-export class TestSubagent extends RecipeSubagentBase<Cloudflare.Env> {
+export class TestSubagent extends RecipeSubagentBase<
+  Cloudflare.Env & A2ASecretsEnv
+> {
   protected subagentRuntime(): SubagentRuntime {
     if (!testRuntime) {
       throw new Error(
