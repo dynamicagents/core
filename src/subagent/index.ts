@@ -30,7 +30,7 @@ import {
 } from "../subtasks/subtask-types.js";
 import { SelfOrigin } from "../a2a/self-origin.js";
 /**
- * The signing secret is in the bound because {@link RecipeSubagentBase.emitProgress}
+ * The signing secret is in the bound because {@link RecipeSubagentBase.postProgress}
  * posts to the gatekeeper with the deployment's own key. It costs a consumer
  * nothing they did not already have: a facet only exists beneath a
  * {@link file://../host/agent.ts DynamicAgent}, whose bound already demands it,
@@ -179,7 +179,7 @@ export abstract class RecipeSubagentBase<
 
   /**
    * The callback channel for the chunk executing here, if the parent passed one
-   * and this facet asked for it by calling {@link emitProgress}.
+   * and this facet asked for it by calling {@link postProgress}.
    *
    * In memory and per-chunk, for the reason {@link inflight} is: it describes
    * work in flight on this isolate, and an isolate that lost it has no chunk left
@@ -259,7 +259,7 @@ export abstract class RecipeSubagentBase<
    *
    * `progress` is what an override needs to post its own notes mid-chunk; this
    * implementation never does, because the chunk boundary *is* when its runner
-   * has something to say. See {@link emitProgress}.
+   * has something to say. See {@link postProgress}.
    */
   async executeChunk(
     request: RecipeExecutionRequest,
@@ -392,17 +392,6 @@ export abstract class RecipeSubagentBase<
   }
 
   /**
-   * Interrupt the chunk running here right now, so a cancellation lands on the
-   * current model call instead of at the next chunk boundary (up to `chunkSoftMs`
-   * later — minutes, for a long recipe). Returns whether there was one to stop.
-   *
-   * Distinct from {@link abortExecution}, which releases *external* state after
-   * the fact; this only stops local work. An aborted run yields rather than
-   * producing a terminal result, so nothing is cached and the parent resolves the
-   * row itself. Reaching a facet mid-`executeChunk` works because it is awaiting
-   * a model `fetch` at the time, which does not hold the input gate closed.
-   */
-  /**
    * Record the callback channel for this chunk, or clear it.
    *
    * Called at the top of every chunk, including the ones that pass nothing — a
@@ -441,10 +430,11 @@ export abstract class RecipeSubagentBase<
    * Post one progress note now, instead of returning it for the parent to post
    * when this chunk ends.
    *
-   * Not to be confused with the `emitProgress` a tool family is handed below,
-   * which *collects* a note into the chunk's array and ends the chunk early so
-   * the parent posts it. That is the right shape when a chunk boundary is cheap
-   * and close; this one is for a facet whose chunk is neither.
+   * Not to be confused with the `emitProgress` a tool family is handed in
+   * {@link executeChunk}, which *collects* a note into the chunk's array and
+   * ends the chunk early so the parent posts it. That is the right shape when a
+   * chunk boundary is cheap and close; this one is for a facet whose chunk is
+   * neither.
    *
    * For a facet driving something that reports as it works — a CLI session, a
    * long external run — where the chunk boundary is minutes away from the note
@@ -469,14 +459,46 @@ export abstract class RecipeSubagentBase<
    */
   protected async postProgress(event: ProgressEvent): Promise<void> {
     const live = this.live;
-    if (!live || this.inflight?.signal.aborted) return;
+    if (!live) return;
     await live.channel.working(
       labelSubagentNote(event.text, live.source),
       event.key
     );
   }
 
+  /**
+   * Stop posting for this chunk, whatever is still parsing notes.
+   *
+   * The disarm a cancellation needs, and it cannot be inferred from the abort
+   * signal: {@link inflight} tracks a *model call*, so a facet overriding
+   * `executeChunk` outright never sets one — and an absent controller reads as
+   * "not aborted", which would leave such a facet posting for the whole time it
+   * takes a canceled session to unwind.
+   *
+   * {@link abortRun} calls it unconditionally. **An override that does not reach
+   * `super.abortRun()` must call this itself**, which is the one obligation
+   * posting live adds to a facet.
+   */
+  protected stopProgress(): void {
+    this.live = undefined;
+  }
+
+  /**
+   * Interrupt the chunk running here right now, so a cancellation lands on the
+   * current model call instead of at the next chunk boundary (up to `chunkSoftMs`
+   * later — minutes, for a long recipe). Returns whether there was one to stop.
+   *
+   * Distinct from {@link abortExecution}, which releases *external* state after
+   * the fact; this only stops local work. An aborted run yields rather than
+   * producing a terminal result, so nothing is cached and the parent resolves the
+   * row itself. Reaching a facet mid-`executeChunk` works because it is awaiting
+   * a model `fetch` at the time, which does not hold the input gate closed.
+   */
   async abortRun(): Promise<boolean> {
+    // First and unconditionally, including on the path that reports nothing to
+    // stop: whether this instance holds an interruptible model call says nothing
+    // about whether it is still narrating one. See {@link stopProgress}.
+    this.stopProgress();
     if (!this.inflight) return false;
     this.inflight.abort();
     return true;

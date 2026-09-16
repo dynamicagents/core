@@ -814,7 +814,7 @@ export abstract class RoundAgentBase<
     // here, because a chunk boundary can be minutes away from the note. Both
     // paths label identically — see
     // {@link file://../subtasks/types.ts ChunkProgressContext} for when a facet
-    // takes the other one, and `RecipeSubagentBase.emitProgress` for the rest.
+    // takes the other one, and `RecipeSubagentBase.postProgress` for the rest.
     //
     // The attribution goes on at the post rather than at the source either way:
     // everything arriving here is by definition a subagent's, so the main

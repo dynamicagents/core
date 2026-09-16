@@ -16,9 +16,9 @@ import type { TestSubagent } from "../../test/worker.js";
  *
  * The rules worth pinning are the three that decide whether a note reaches a
  * person, and every one of them is a *refusal* — the posting itself is
- * `PushChannel.working`, which has its own coverage. What is this module's is
- * when it declines to call it, because each of those was a way for a subagent to
- * keep talking after it should have stopped.
+ * `PushChannel.working`, which has its own coverage. What belongs to this module
+ * is when it declines to call it, because each of those is a way for a subagent
+ * to keep talking after it should have stopped.
  *
  * A real facet rather than a fake, because `noteProgressContext` reads `request`
  * and the instance field it writes is the thing under test. `pushChannel` is
@@ -106,13 +106,35 @@ describe("a facet's own progress notes", () => {
       await facet.postProgress({ key: "claude:0", text: "before" });
 
       // What a cancellation actually does to a facet. The parent's own
-      // suppression runs before *it* posts and a note from here never reaches
-      // that check, so this signal is the only thing standing in for it.
+      // suppression runs before *it* posts, and a note from here never reaches
+      // that check.
       facet.inflight = new AbortController();
       await facet.abortRun();
       await facet.postProgress({ key: "claude:1", text: "after" });
 
       expect(posted.map((p) => p.key)).toEqual(["claude:0"]);
+    });
+  });
+
+  it("stops posting for a facet that holds no interruptible model call", async () => {
+    await withFacet(async (facet, posted) => {
+      /**
+       * The case the abort *signal* cannot answer, and the one that matters.
+       *
+       * `inflight` tracks a model call, and a facet overriding `executeChunk`
+       * outright never sets one — so an absent controller has to mean "nothing
+       * to interrupt", not "not canceled". Read the other way, such a facet goes
+       * on narrating a canceled Task for the whole time its session takes to
+       * unwind, which for a container command is a minute of talking about work
+       * nobody asked for any more.
+       */
+      facet.noteProgressContext(REQUEST, { push: PUSH, ordinal: 0 });
+      expect(facet.inflight).toBeUndefined();
+
+      expect(await facet.abortRun()).toBe(false);
+      await facet.postProgress({ key: "claude:0", text: "after the cancel" });
+
+      expect(posted).toEqual([]);
     });
   });
 
