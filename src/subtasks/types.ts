@@ -1,5 +1,6 @@
 import type { ResolvedRecipe, SubtaskParams } from "../contract/recipe.js";
 import type { RoundFailureKind } from "../agent/inference.js";
+import type { TurnPushContext } from "../a2a/push.js";
 
 export type SubtaskStatus =
   "pending" | "running" | "completed" | "failed" | "canceled";
@@ -77,6 +78,39 @@ export function runtimeAs<T>(runtime: SubtaskRuntime): T {
 export interface ProgressEvent {
   key: string;
   text: string;
+}
+
+/**
+ * What a facet needs to post its own progress, rather than accumulating it for
+ * the parent to post at the chunk boundary.
+ *
+ * **A chunk boundary is the wrong clock for a note.** The parent posts what a
+ * chunk returned, so a note is invisible until the chunk ends — and a facet that
+ * drives a long external process legitimately runs one chunk for its whole
+ * length. A Claude Code session measured thirteen minutes in a single chunk and
+ * delivered sixteen notes in the eleven seconds after it finished. Nothing about
+ * the note was late; the only moment it could be sent was.
+ *
+ * So a facet that knows better may post as it goes. It is opt-in — core's own
+ * resumable runner does not, because a chunk boundary is exactly when it has
+ * something to say — and a facet that takes it returns an empty `progress` so the
+ * parent's loop posts nothing twice.
+ *
+ * `ordinal` travels because attribution needs both halves and only one of them is
+ * on the request: {@link file://./progress.ts labelSubagentNote} takes `type` and
+ * `ordinal` together, and `ordinal` lives on the Subtask row, which a facet never
+ * reads.
+ *
+ * Passed as its own argument and never folded into
+ * {@link RecipeExecutionRequest}, for the reason `chunk` and `selfOrigin` are:
+ * the request is fingerprinted, a push context changes between turns, and folding
+ * it in would make every retry look like a different execution.
+ */
+export interface ChunkProgressContext {
+  /** The gatekeeper callback for the turn that delegated this Subtask. */
+  push: TurnPushContext;
+  /** The Subtask's Task-wide ordinal — the other half of the attribution label. */
+  ordinal: number;
 }
 
 /**
