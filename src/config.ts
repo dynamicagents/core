@@ -359,6 +359,53 @@ export function resolveConfig(overrides: CoreConfigOverrides): CoreConfig {
     );
   }
 
+  // The deferral bounds, on both limit sets. Absent is the default and means the
+  // feature is off, so these are validated only when named — but a named one is
+  // held to what it says it is: `maxDeferrals` is a count of waits, and a
+  // fractional one enables a wait the config did not ask for (0.5 admits the
+  // first and refuses the second). A non-finite duration is worse than wrong: it
+  // compares false against every bound and silently turns the tool off.
+  for (const [which, limits] of [
+    ["mainAgentLimits", config.mainAgentLimits],
+    ["subagentLimits", config.subagentLimits]
+  ] as const) {
+    const { maxDeferrals, maxDeferredMs } = limits;
+    if (
+      maxDeferrals !== undefined &&
+      (!Number.isInteger(maxDeferrals) || maxDeferrals < 0)
+    ) {
+      throw new ConfigError(
+        `${which}.maxDeferrals must be a non-negative integer, got ${maxDeferrals} — 0 turns waiting off`
+      );
+    }
+    if (
+      maxDeferredMs !== undefined &&
+      (!Number.isFinite(maxDeferredMs) || maxDeferredMs < 0)
+    ) {
+      throw new ConfigError(
+        `${which}.maxDeferredMs must be a non-negative number of milliseconds, got ${maxDeferredMs} — 0 turns waiting off`
+      );
+    }
+  }
+
+  // Waiting depends on the observation window, and the dependency is invisible
+  // from either side. A deferring round records why it stopped as an observation;
+  // a window of zero — legal, and documented above as opting out entirely — reads
+  // none of them back, so the round that wakes sees the evidence that made it
+  // wait and nothing about having waited. It waits again, identically, until the
+  // allowance is gone. Refused here rather than left to be discovered as a task
+  // that quietly spends its whole allowance on one decision.
+  if (
+    config.roundObservationWindow === 0 &&
+    (config.mainAgentLimits.maxDeferrals ?? 0) > 0 &&
+    (config.mainAgentLimits.maxDeferredMs ?? 0) > 0
+  ) {
+    throw new ConfigError(
+      "mainAgentLimits deferrals need roundObservationWindow > 0: a round that waits " +
+        "records why as an observation, and a window of 0 carries nothing between rounds"
+    );
+  }
+
   // See SessionConfig.compactTailTokens — below this gap the fixed floor eats
   // the headroom and compaction fires on nearly every append.
   const headroom =

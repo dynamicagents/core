@@ -112,8 +112,10 @@ export interface RoundPolicy {
    * Appended to an **open** round that has spent its deferral budget — every
    * other ending is still available, and only `check_back` is gone.
    *
-   * Required of an agent that sets {@link AgentLimits.maxDeferrals}, and unused
-   * by one that does not; `buildTurnInstructions` throws rather than invent it,
+   * Required of an agent whose deferrals are **enabled** — both
+   * {@link AgentLimits.maxDeferrals} and `maxDeferredMs` positive, since either
+   * one at zero is a tool that could never be used — and unused by every other
+   * agent; `buildTurnInstructions` throws rather than invent it,
    * for the reason nothing else here has a default. Write it as a fact about
    * what is left, the way a `no-progress` note is: a round told it "cannot" wait
    * looks for a way around it, and a round told the waiting is over gets on with
