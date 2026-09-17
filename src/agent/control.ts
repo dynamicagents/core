@@ -10,6 +10,11 @@ import {
   askUserInputSchema,
   askUserTool
 } from "./ask-user.js";
+import {
+  CHECK_BACK_TOOL_NAME,
+  checkBackInputSchema,
+  checkBackTool
+} from "./check-back.js";
 import type { ReferenceCatalogEntry } from "../subtasks/catalog.js";
 import {
   makeDecompositionProposalSchema,
@@ -50,7 +55,9 @@ export type TurnDecision =
   | { kind: "reply"; text: string }
   | { kind: "delegate"; reply: string; drafts: SubtaskDraft[] }
   /** Stop, and put `question` to the person the Task is for. */
-  | { kind: "ask"; question: string; options?: string[] };
+  | { kind: "ask"; question: string; options?: string[] }
+  /** Stop, wait `seconds`, and let the round after it look again. */
+  | { kind: "defer"; seconds: number; why: string };
 
 /**
  * Thrown by a {@link ControlTool.parse} for a call the round cannot use.
@@ -127,6 +134,12 @@ export function controlTools(opts: {
   delegable: boolean;
   /** Whether this round may stop and ask the person (`false` on a `final` round). */
   askable: boolean;
+  /**
+   * Whether this round may stop and come back to itself later — `false` on a
+   * `final` round, and `false` once the Task has spent its deferral budget. See
+   * {@link file://./check-back.ts checkBackTool}.
+   */
+  deferrable: boolean;
   /** The installed subtask types — what `delegate` may name. */
   types: SubtaskTypeRegistry;
   /** `CoreConfig.maxSubtasks`, the per-round fan-out bound. */
@@ -233,6 +246,44 @@ export function controlTools(opts: {
           );
         }
         return { kind: "ask", question, ...(options ? { options } : {}) };
+      }
+    });
+  }
+
+  if (opts.deferrable) {
+    tools.push({
+      name: CHECK_BACK_TOOL_NAME,
+      tool: checkBackTool,
+      // The least committal ending there is: it starts nothing, tells nobody
+      // anything, and changes only what the model knows when it next runs. So it
+      // outranks even `ask_user` — a wait beside any other ending means the model
+      // wants that ending *after* the thing it is waiting for, and every other
+      // ending is still available to the round it wakes into. Ending the Task
+      // instead is the one outcome no later round can undo.
+      precedence: 3,
+      select(inputs) {
+        // Two waits in one turn have no combined meaning: the round stops once,
+        // and picking either silently would be picking for the model.
+        if (inputs.length > 1) {
+          throw new ControlCallError(
+            `${CHECK_BACK_TOOL_NAME} was called ${inputs.length} times in one turn. ` +
+              `Wait once, for as long as the thing you are waiting on needs.`
+          );
+        }
+        return inputs[0];
+      },
+      parse(input) {
+        const parsed = checkBackInputSchema.safeParse(input);
+        if (!parsed.success) {
+          throw new ControlCallError(
+            `${CHECK_BACK_TOOL_NAME} input is invalid — ${issues(parsed.error)}`
+          );
+        }
+        return {
+          kind: "defer",
+          seconds: parsed.data.seconds,
+          why: parsed.data.why.trim()
+        };
       }
     });
   }

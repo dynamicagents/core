@@ -82,10 +82,17 @@ export interface RoundPolicy {
    * name. Per-type guidance is *not* written here: each type declares its own
    * via `SubtaskTypeSpec.delegationGuidance`, and the loop appends it, so this
    * text names no domain.
+   *
+   * `deferrable` says whether `check_back` is among this round's endings. It is
+   * false for every agent that configures no deferral budget, and false again
+   * once a Task has spent it, so a contract that describes the call
+   * unconditionally describes one the model will sometimes not have. Called once
+   * per value when the instructions are built.
    */
   roundContract(ctx: {
     typeKeys: readonly string[];
     maxSubtasks: number;
+    deferrable: boolean;
   }): string;
 
   /**
@@ -100,6 +107,19 @@ export interface RoundPolicy {
    * the second arm.
    */
   finalRoundNote(limits: AgentLimits, reason: FinalRoundReason): string;
+
+  /**
+   * Appended to an **open** round that has spent its deferral budget — every
+   * other ending is still available, and only `check_back` is gone.
+   *
+   * Required of an agent that sets {@link AgentLimits.maxDeferrals}, and unused
+   * by one that does not; `buildTurnInstructions` throws rather than invent it,
+   * for the reason nothing else here has a default. Write it as a fact about
+   * what is left, the way a `no-progress` note is: a round told it "cannot" wait
+   * looks for a way around it, and a round told the waiting is over gets on with
+   * answering.
+   */
+  deferralsSpentNote?(): string;
 
   /** The strings a user can actually read. */
   copy: {

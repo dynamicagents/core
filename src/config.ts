@@ -85,6 +85,28 @@ export interface AgentLimits {
    * in {@link file://./round/workflow.ts runHandleTask}.
    */
   maxWallMs: number;
+  /**
+   * How many times one Task may stop and come back to itself later, and how much
+   * of its own time it may spend doing so. Both default to **0** — a round loop
+   * offers `check_back` only to an agent that asked for it, because the tool is
+   * only worth its place in the contract where something is genuinely worth
+   * waiting on.
+   *
+   * These bound waiting *instead of* the wall clock rather than alongside it. A
+   * deferral holds no concurrency and is not charged to {@link maxWallMs}, for
+   * the reason a person's answer is not — so with nothing here a Task could wait
+   * out its whole existence without ever spending the budget that is supposed to
+   * stop it.
+   *
+   * Set both or neither: whichever is reached first ends the waiting, and one of
+   * them left at 0 turns the tool off however generous the other is. An agent
+   * that sets them must also give
+   * {@link file://./round/policy.ts RoundPolicy.deferralsSpentNote} the words for
+   * running out, which `buildTurnInstructions` refuses to invent.
+   */
+  maxDeferrals?: number;
+  /** See {@link maxDeferrals}. */
+  maxDeferredMs?: number;
 }
 
 /** Session memory + compaction tuning. */

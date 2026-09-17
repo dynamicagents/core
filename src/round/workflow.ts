@@ -409,7 +409,7 @@ const NO_PROGRESS_ROUNDS = 3;
  *
  * **Step names are durable cache keys.** Everything inside the round loop carries
  * its round for that reason: `turn:<round>`, `deadline:<round>`, `scan:<round>`,
- * `cancel:<round>`, `park:<round>`. Renaming one silently re-runs its effect on replay — and the
+ * `cancel:<round>`, `park:<round>`, `sleep:<round>`, `awake:<round>`. Renaming one silently re-runs its effect on replay — and the
  * recovery path in {@link runHandleTask} runs under its own prefix for the same
  * reason, so a second delivery cannot be handed this one's cached results.
  */
@@ -466,6 +466,14 @@ async function orchestrate(
   const startedAtMs = await step.do("started", async () => Date.now());
   let waitedMs = 0;
 
+  // Waiting the Task chose for itself, counted separately from `waitedMs` even
+  // though every deferral moves both. `waitedMs` is what the deadline forgives;
+  // these two are what stop the forgiveness being unbounded, and a Task that also
+  // asked a person must not have that person's time charged against its own
+  // allowance to wait.
+  let deferrals = 0;
+  let deferredMs = 0;
+
   // At most one round per turn of the budget, **plus one**: an `open` round always
   // spends at least one turn, so `maxTurns` of them exhaust the budget — and the
   // forced-answer round that follows needs an iteration of its own to happen in.
@@ -499,6 +507,12 @@ async function orchestrate(
     // ceiling and the one that will still be there next round.
     const finalReason: FinalRoundReason | undefined =
       mode === "open" ? undefined : spent ? "budget" : "no-progress";
+    // Both bounds, because either one reached ends the waiting — and both
+    // default to 0, so an agent that configured none never sees the tool.
+    const deferrable =
+      mode === "open" &&
+      deferrals < (limits.maxDeferrals ?? 0) &&
+      deferredMs < (limits.maxDeferredMs ?? 0);
     if (mode === "final") {
       // Worth its own line either way: from the outside, a round that was forced
       // is indistinguishable from a model that simply chose to answer.
@@ -546,6 +560,7 @@ async function orchestrate(
           mode,
           finalReason,
           turnsRemaining,
+          deferrable,
           push
         });
         if (result.status === "replied")
@@ -559,6 +574,13 @@ async function orchestrate(
             status: result.status,
             kind: result.kind,
             error: result.error,
+            turns: result.turns
+          };
+        if (result.status === "deferred")
+          return {
+            status: result.status,
+            seconds: result.seconds,
+            why: result.why,
             turns: result.turns
           };
         return { status: result.status, turns: result.turns };
@@ -600,6 +622,31 @@ async function orchestrate(
       return told
         ? { outcome: "replied", rounds, turns: turnsUsed }
         : { outcome: "canceled", rounds, turns: turnsUsed };
+    }
+
+    // The round chose to wait and look again. Nobody is told: the Task stays
+    // `working` and the gatekeeper sees what it would see during any long round.
+    if (turn.status === "deferred") {
+      const slept = await deferRound(
+        p,
+        step,
+        agent,
+        round,
+        turn.seconds,
+        Math.max(0, (limits.maxDeferredMs ?? 0) - deferredMs),
+        tag,
+        turn.why
+      );
+      if (slept === "canceled")
+        return { outcome: "canceled", rounds, turns: turnsUsed };
+      waitedMs += slept;
+      deferredMs += slept;
+      deferrals += 1;
+      // Waiting is progress in the one sense this counter measures: what the next
+      // round reads is not what this one read. See the parked branch below.
+      repeated = 0;
+      lastFailures = "";
+      continue;
     }
 
     // The round asked the person something: post it, wait, and let the next
@@ -669,6 +716,54 @@ async function orchestrate(
         turns: turnsUsed
       }
     : { outcome: "canceled", rounds: limits.maxTurns + 1, turns: turnsUsed };
+}
+
+/**
+ * Sleep out a round's chosen wait, and say whether the Task survived it.
+ *
+ * `step.sleep` rather than a step of work, for the reason
+ * {@link askHuman} parks rather than polls: the instance holds no concurrency
+ * while it waits and survives a deploy. Unlike a question, nothing has to arrive
+ * for this to end — so there is no event, no timeout to reconcile, and the wake
+ * needs only to establish that the Task is still wanted.
+ *
+ * That check is `markWorking`, not a probe: it is the same guarded write the loop
+ * opens with, it is idempotent on an already-working Task, and it reports a
+ * cancellation that landed during the sleep. Reading the Task and acting on what
+ * it said would reopen the window the guarded write exists to close.
+ *
+ * The wait is clamped to what the Task has left rather than refused, so a model
+ * that asks for more than remains gets the remainder and the round that follows
+ * finds `check_back` withdrawn — which is the state its policy has words for.
+ */
+async function deferRound(
+  p: HandleTaskParams,
+  step: WorkflowStep,
+  agent: ResolveAgent,
+  round: number,
+  seconds: number,
+  /** What is left of `maxDeferredMs`. */
+  remainingMs: number,
+  /** The agent's log prefix — see the note where it is resolved. */
+  tag: string,
+  why: string
+): Promise<number | "canceled"> {
+  const ms = Math.min(seconds * 1_000, remainingMs);
+  console.info(`[${tag}] round waiting`, {
+    taskId: p.taskId,
+    round,
+    ms,
+    why
+  });
+  await step.sleep(`sleep:${round}`, ms);
+  // Each deferral is its own round, so the round alone makes these names unique —
+  // unlike a repeated wait on one question, which carries its count. Step names
+  // are durable cache keys; see {@link orchestrate}.
+  const alive = await step.do(
+    `awake:${round}`,
+    async () => (await agent().markWorking(p.taskId)) === "ok"
+  );
+  return alive ? ms : "canceled";
 }
 
 /**

@@ -6,6 +6,11 @@ import { z } from "zod";
 import { FINAL_REPLY_TOOL_NAME } from "../agent/final-reply.js";
 import { ASK_USER_TOOL_NAME } from "../agent/ask-user.js";
 import {
+  CHECK_BACK_TOOL_NAME,
+  MAX_CHECK_BACK_SECONDS,
+  MIN_CHECK_BACK_SECONDS
+} from "../agent/check-back.js";
+import {
   deterministicSessionMessage,
   roundAnswerMessageId,
   roundAskMessageId
@@ -93,13 +98,15 @@ const types = makeSubtaskTypes([generalType]);
  * and the caller context and adds no separator of its own.
  */
 const policy: RoundPolicy = {
-  roundContract: ({ typeKeys, maxSubtasks }) => `
+  roundContract: ({ typeKeys, maxSubtasks, deferrable }) =>
+    (deferrable ? "\n\nYou may call check_back to wait." : "") +
+    `
 
 # Answering this request
 
 You may delegate up to ${maxSubtasks} subtasks, each of type ${typeKeys
-    .map((k) => `"${k}"`)
-    .join(", ")}, or answer with final_reply.`,
+      .map((k) => `"${k}"`)
+      .join(", ")}, or answer with final_reply.`,
   finalRoundNote: (limits, reason) =>
     reason === "no-progress"
       ? `
@@ -145,6 +152,7 @@ function args(overrides: Partial<RunTurnArgs> = {}): RunTurnArgs {
     round: 0,
     text: "hello",
     mode: "open",
+    deferrable: false,
     budget: newTurnBudget(20),
     systemSuffix: "",
     tools: {},
@@ -192,6 +200,85 @@ describe("the round contract", () => {
     // leave the round with an instruction and no schema.
     for (const note of Object.values(instructions.final)) {
       expect(note.startsWith(instructions.open)).toBe(true);
+    }
+  });
+
+  it("collapses the two open variants when no deferrals are configured", () => {
+    // The whole feature is off for this policy's limits, and an agent that never
+    // configured it must never read a sentence about a call it will not be given
+    // — nor a note about having run out of something it never had.
+    expect(instructions.openWithoutDeferral).toBe(instructions.open);
+  });
+
+  it("builds a `final` round from the contract without `check_back`", () => {
+    // A forced answer is not deferrable, so describing the call to it advertises
+    // one it is not handed. Built from the plain contract for that reason, which
+    // is also what keeps `final` a superset of the open round it is appended to.
+    const deferring = buildTurnInstructions(
+      { ...policy, deferralsSpentNote: () => "\n\nno waits left" },
+      types,
+      8,
+      {
+        maxTurns: 20,
+        maxWallMs: 60_000,
+        maxDeferrals: 4,
+        maxDeferredMs: 60_000
+      }
+    );
+
+    expect(deferring.open).toContain("check_back");
+    for (const note of Object.values(deferring.final))
+      expect(note).not.toContain("check_back");
+  });
+
+  it("tells a round that has spent its waits, without withdrawing the rest", () => {
+    const deferring = buildTurnInstructions(
+      { ...policy, deferralsSpentNote: () => "\n\nno waits left" },
+      types,
+      8,
+      {
+        maxTurns: 20,
+        maxWallMs: 60_000,
+        maxDeferrals: 4,
+        maxDeferredMs: 60_000
+      }
+    );
+
+    // Still an open round: it may delegate, ask and answer — only the waiting is
+    // over, which is why this is not a `final` note.
+    expect(deferring.openWithoutDeferral).toContain("no waits left");
+    expect(deferring.openWithoutDeferral).not.toContain("check_back");
+    expect(deferring.openWithoutDeferral).toContain("delegate");
+  });
+
+  it("refuses to invent the words for having run out of waits", () => {
+    // The one rule this package does not bend: core ships no prompt copy. An
+    // agent that turns deferrals on owes the sentence for turning them off.
+    expect(() =>
+      buildTurnInstructions(policy, types, 8, {
+        maxTurns: 20,
+        maxWallMs: 60_000,
+        maxDeferrals: 4,
+        maxDeferredMs: 60_000
+      })
+    ).toThrow(/deferralsSpentNote/);
+  });
+
+  it("treats either bound left at zero as the feature being off", () => {
+    // Whichever is reached first ends the waiting, so one of them at zero is a
+    // tool that could never be used — and must therefore never be described, nor
+    // demand the note for exhausting it.
+    for (const limits of [
+      { maxDeferrals: 4, maxDeferredMs: 0 },
+      { maxDeferrals: 0, maxDeferredMs: 60_000 }
+    ]) {
+      const built = buildTurnInstructions(policy, types, 8, {
+        maxTurns: 20,
+        maxWallMs: 60_000,
+        ...limits
+      });
+      expect(built.open).not.toContain("check_back");
+      expect(built.openWithoutDeferral).toBe(built.open);
     }
   });
 
@@ -1982,5 +2069,173 @@ describe("a round that holds calls for approval", () => {
 
     expect(outcome.status).toBe("replied");
     expect(runs.push).toBe(1);
+  });
+});
+
+/**
+ * Waiting, which is the one ending that starts nothing, tells nobody anything and
+ * can be taken back by the round it wakes into. That is what its precedence
+ * encodes, and what these pin.
+ *
+ * The sleep itself is the Workflow's — `workflow.spec.ts` owns it. What is here
+ * is the decision: whether the tool was offered, what it accepted, and what it
+ * beat.
+ */
+describe("a round that waits", () => {
+  const wait = (seconds: number, why = "the review is still running") => ({
+    toolName: CHECK_BACK_TOOL_NAME,
+    input: { seconds, why }
+  });
+
+  it("ends on the wait, carrying what it saw to the round that wakes", async () => {
+    const session = new FakeSession();
+
+    const outcome = await runTurn(
+      args({
+        session,
+        deferrable: true,
+        models: pair(mockModel({ toolCall: wait(30) }))
+      })
+    );
+
+    expect(outcome).toMatchObject({
+      status: "deferred",
+      seconds: 30,
+      why: "the review is still running"
+    });
+    // Nothing is said to anyone: a wait is not an answer and not a question.
+    expect(session.messages.map((m) => m.role)).toEqual(["user"]);
+  });
+
+  it("waits instead of answering, in a step that does both", async () => {
+    const outcome = await runTurn(
+      args({
+        deferrable: true,
+        models: pair(
+          mockModel({
+            toolCalls: [
+              { toolName: FINAL_REPLY_TOOL_NAME, input: { text: "done" } },
+              wait(60)
+            ]
+          })
+        )
+      })
+    );
+
+    // Answering ends the Task and no later round can take it back; waiting keeps
+    // every ending — this one included — available to the round that wakes.
+    expect(outcome.status).toBe("deferred");
+  });
+
+  it("waits instead of asking, in a step that does both", async () => {
+    const outcome = await runTurn(
+      args({
+        deferrable: true,
+        models: pair(
+          mockModel({
+            toolCalls: [
+              {
+                toolName: ASK_USER_TOOL_NAME,
+                input: { question: "Should I keep waiting?" }
+              },
+              wait(30)
+            ]
+          })
+        )
+      })
+    );
+
+    // A person asked to wait is a person interrupted for nothing: the round can
+    // look again itself, and only needs them if looking again does not settle it.
+    expect(outcome.status).toBe("deferred");
+  });
+
+  it("is offered only to a round the caller says may wait", async () => {
+    const offered = inspectingModel(finalReply("done"));
+    await runTurn(args({ deferrable: true, models: pair(offered.model) }));
+    expect(offered.asked()[0].tools).toContain(CHECK_BACK_TOOL_NAME);
+
+    // The default, and what every agent that configured no deferral budget gets.
+    const withheld = inspectingModel(finalReply("done"));
+    await runTurn(args({ deferrable: false, models: pair(withheld.model) }));
+    expect(withheld.asked()[0].tools).not.toContain(CHECK_BACK_TOOL_NAME);
+  });
+
+  it("never offers it to a round that has to answer", async () => {
+    // Belt and braces: the caller already computes `deferrable` false for a
+    // `final` round, and a caller that got that wrong must still not produce a
+    // round that waits with nothing left to wake into.
+    const model = inspectingModel(finalReply("what I have"));
+
+    await runTurn(
+      args({ mode: "final", deferrable: true, models: pair(model.model) })
+    );
+
+    expect(model.asked()[0].tools).toEqual([FINAL_REPLY_TOOL_NAME]);
+  });
+
+  it("refuses a wait shorter than the floor, and says so to the model", async () => {
+    const model = inspectingModel(
+      { toolCall: wait(MIN_CHECK_BACK_SECONDS - 1) },
+      { toolCall: wait(MIN_CHECK_BACK_SECONDS) }
+    );
+
+    const outcome = await runTurn(
+      args({ deferrable: true, models: pair(model.model) })
+    );
+
+    // Repaired on the retry, from a message naming the field — the same loop a
+    // work tool gets from the SDK.
+    expect(outcome).toMatchObject({ status: "deferred" });
+    expect(JSON.stringify(model.asked()[1].messages)).toContain("seconds");
+  });
+
+  it("refuses a wait longer than the ceiling", async () => {
+    const model = inspectingModel(
+      { toolCall: wait(MAX_CHECK_BACK_SECONDS + 1) },
+      { toolCall: wait(MAX_CHECK_BACK_SECONDS) }
+    );
+
+    const outcome = await runTurn(
+      args({ deferrable: true, models: pair(model.model) })
+    );
+
+    expect(outcome).toMatchObject({
+      status: "deferred",
+      seconds: MAX_CHECK_BACK_SECONDS
+    });
+  });
+
+  it("refuses a wait with no reason given", async () => {
+    const model = inspectingModel(
+      {
+        toolCall: {
+          toolName: CHECK_BACK_TOOL_NAME,
+          input: { seconds: 30, why: "   " }
+        }
+      },
+      { toolCall: wait(30) }
+    );
+
+    const outcome = await runTurn(
+      args({ deferrable: true, models: pair(model.model) })
+    );
+
+    // The next round has nothing else to read about why this one stopped.
+    expect(outcome).toMatchObject({ status: "deferred" });
+    expect(JSON.stringify(model.asked()[1].messages)).toContain("why");
+  });
+
+  it("hands two waits in one step back, to be made one", async () => {
+    const model = inspectingModel(
+      { toolCalls: [wait(30), wait(60)] },
+      { toolCall: wait(60) }
+    );
+
+    const outcome = await runTurn(
+      args({ deferrable: true, models: pair(model.model) })
+    );
+
+    expect(outcome).toMatchObject({ status: "deferred", seconds: 60 });
   });
 });
