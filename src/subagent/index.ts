@@ -2,6 +2,7 @@ import { Agent } from "agents";
 import { z } from "zod";
 import { CHUNK_SOFT_MS } from "../platform.js";
 import type { ModelPair, ModelRuntime } from "../agent/model.js";
+import { gatewayLogFields } from "../agent/gateway-log.js";
 import { buildRecipeTools } from "../runtime/tool-families.js";
 import type { ToolFamilyBuilder } from "../contract/plugin.js";
 import {
@@ -57,6 +58,8 @@ export interface SubagentRuntime {
   policy: RecipePolicy;
   types: SubtaskTypeRegistry;
   models: ModelRuntime;
+  /** `CoreConfig.agentName`, for the `agent` key on this facet's gateway logs. */
+  agentName?: string;
   toolFamilies: ReadonlyMap<string, ToolFamilyBuilder>;
   /** `CoreConfig.toolOutputWindow`. */
   toolOutputWindow: number;
@@ -342,8 +345,12 @@ export abstract class RecipeSubagentBase<
       rt.models.createModelPair({
         primaryModelId: recipe.primaryModelId,
         fallbackModelId: recipe.fallbackModelId,
-        // AI Gateway correlation: tie this child's model calls to its Subtask.
-        metadata: { taskId: request.taskId, subtaskId: request.subtaskId }
+        ...gatewayLogFields({
+          agent: rt.agentName,
+          taskId: request.taskId,
+          phase: "subagent",
+          subtaskId: request.subtaskId
+        })
       });
     const workspace = makeWorkspaceHandle(this.workspace());
     const progress: ProgressEvent[] = [];

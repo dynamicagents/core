@@ -1,5 +1,6 @@
 import type { LanguageModel } from "ai";
 import type { ModelConfig } from "../config.js";
+import type { GatewayLogFields } from "./gateway-log.js";
 
 /**
  * The provider contract every loop runs against — and nothing that implements
@@ -29,15 +30,12 @@ import type { ModelConfig } from "../config.js";
  */
 
 /**
- * Custom metadata attached to the AI Gateway log for every call a pair makes.
- * AI Gateway's own `metadata` is otherwise `null`, so a model call can only be
- * tied back to its task by timestamp; stamping `{ taskId, round }` (a turn) or
- * `{ taskId, subtaskId }` (a chunk) makes correlation exact. Values are limited
- * to AI Gateway's accepted scalar set.
+ * `metadata` and `eventId` are what every call the pair makes tells AI Gateway
+ * about itself. Build them with
+ * {@link file://./gateway-log.ts gatewayLogFields} rather than by hand: the key
+ * budget is enforced there.
  */
-export type AiGatewayMetadata = Record<string, number | string | boolean>;
-
-export interface ModelOverrides {
+export interface ModelOverrides extends GatewayLogFields {
   /** Test override for the primary slot. */
   model?: LanguageModel;
   /** Test override for the fallback slot. */
@@ -54,8 +52,6 @@ export interface ModelOverrides {
   primaryModelId?: string;
   /** The provider's model id for the fallback slot. See {@link primaryModelId}. */
   fallbackModelId?: string;
-  /** AI Gateway log metadata for correlation — see {@link AiGatewayMetadata}. */
-  metadata?: AiGatewayMetadata;
 }
 
 /** The primary/fallback models (lazily memoized) plus their ids for logging. */

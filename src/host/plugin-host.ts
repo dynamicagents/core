@@ -39,6 +39,12 @@ export interface PluginHost<TEnv extends object = object> {
   callerKey: () => string;
   /** `config.model.aiGatewayId`, already resolved over core's baseline. */
   aiGatewayId: string;
+  /**
+   * `config.agentName`, for a plugin's own model calls to carry the same `agent`
+   * key as the agent's. A correlation tag rather than a model, so it belongs here
+   * for the same reason the note closing this interface gives for `aiGatewayId`.
+   */
+  agentName?: string;
 
   // No `primaryModelId` / `fallbackModelId`.
   //

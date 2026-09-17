@@ -2,8 +2,8 @@ import { createWorkersAI } from "workers-ai-provider";
 import type { LanguageModel } from "ai";
 import type { ModelConfig } from "../../config.js";
 import type { AiEnv } from "../../env.js";
+import type { GatewayLogFields } from "../gateway-log.js";
 import type {
-  AiGatewayMetadata,
   ModelOverrides,
   ModelPair,
   ModelRuntime,
@@ -40,22 +40,30 @@ export function createWorkersAIModelRuntime(
 ): ModelRuntime {
   const { config } = deps;
   let provider: ReturnType<typeof createWorkersAI> | undefined;
-  const workersai = () =>
-    (provider ??= createWorkersAI({
-      binding: deps.ai,
-      gateway: { id: config.aiGatewayId }
-    }));
+  /**
+   * No `gateway` here, and it must stay that way. `workers-ai-provider` resolves
+   * a model's gateway as the provider's first and the model's second
+   * (`this.config.gateway ?? settings.gateway`), so a gateway set on both is the
+   * provider's alone: the model's `metadata` and `eventId` are discarded before
+   * the binding sees them, and nothing fails. `chatSettings` is the only route.
+   * `runtime.spec.ts` asserts the options the binding actually receives.
+   */
+  const workersai = () => (provider ??= createWorkersAI({ binding: deps.ai }));
 
   /**
-   * Per-model Workers-AI settings: pin the AI Gateway id (so per-call metadata does
-   * not drop the AI Gateway route), attach correlation metadata when supplied, and
-   * set the reasoning budget.
+   * Per-model Workers-AI settings: the AI Gateway route and what the call tells
+   * it about itself, and the reasoning budget.
    *
-   * Always returns a settings object, even with no metadata: `reasoning_effort`
-   * has to reach the binding on every call, and an `undefined` return drops it.
+   * Always returns a settings object, even with nothing to tell the gateway: the
+   * route and `reasoning_effort` have to reach the binding on every call, and an
+   * `undefined` return drops both.
    */
-  const chatSettings = (metadata?: AiGatewayMetadata) => ({
-    gateway: { id: config.aiGatewayId, ...(metadata ? { metadata } : {}) },
+  const chatSettings = ({ metadata, eventId }: GatewayLogFields) => ({
+    gateway: {
+      id: config.aiGatewayId,
+      ...(metadata ? { metadata } : {}),
+      ...(eventId ? { eventId } : {})
+    },
     reasoning_effort: config.reasoningEffort
   });
 
@@ -66,7 +74,7 @@ export function createWorkersAIModelRuntime(
         overrides.fallbackModelId ?? config.fallbackChatModelId;
       let primary: LanguageModel | undefined;
       let fallback: LanguageModel | undefined;
-      const settings = chatSettings(overrides.metadata);
+      const settings = chatSettings(overrides);
       return {
         primary: () =>
           (primary ??= overrides.model ?? workersai()(primaryId, settings)),

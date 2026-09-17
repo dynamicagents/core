@@ -24,11 +24,11 @@ import {
 import { SelfOrigin } from "../a2a/self-origin.js";
 import { buildAgentSession, type SessionLike } from "../agent/session.js";
 import { withFallback } from "../agent/fallback.js";
-import type {
-  AiGatewayMetadata,
-  ModelPair,
-  ModelRuntime
-} from "../agent/model.js";
+import {
+  gatewayLogFields,
+  type GatewayCorrelation
+} from "../agent/gateway-log.js";
+import type { ModelPair, ModelRuntime } from "../agent/model.js";
 import { workersAIModels } from "../agent/workers-ai/index.js";
 import type { PluginHost } from "./plugin-host.js";
 
@@ -209,31 +209,30 @@ export abstract class DynamicAgent<
 
   /**
    * What this agent's plugins are handed. Built from
-   * {@link resolvedModelIds} rather than `this.config`, which would be a cycle —
+   * {@link resolvedConfig} rather than `this.config`, which would be a cycle —
    * building the runtime is what needs these.
    */
   protected pluginHost(): PluginHost<TEnv> {
-    const model = this.resolvedModelIds();
+    const config = this.resolvedConfig();
     return {
       env: this.env,
       storage: this.ctx.storage,
       // A thunk, not a value — see `identityKey`.
       callerKey: () => this.requireIdentityKey(),
-      aiGatewayId: model.aiGatewayId
+      aiGatewayId: config.model.aiGatewayId,
+      ...(config.agentName !== undefined ? { agentName: config.agentName } : {})
     };
   }
 
   /**
-   * The model settings a locally-declared recipe runs on, resolved *before* the
-   * runtime exists.
+   * The config, resolved *before* the runtime exists.
    *
    * Deliberately not `this.config` — that would be a cycle. `resolveConfig` is
    * cheap and pure and fills in core's baseline, so this is the same result the
-   * runtime lands on; that matters because every recipe runs on exactly this
-   * pair — `RecipePolicy` carries it and `validateRecipe` stamps it on.
+   * runtime lands on.
    */
-  private resolvedModelIds(): CoreConfig["model"] {
-    return resolveConfig(this.agentConfig()).model;
+  private resolvedConfig(): CoreConfig {
+    return resolveConfig(this.agentConfig());
   }
 
   async onStart(): Promise<void> {
@@ -275,15 +274,25 @@ export abstract class DynamicAgent<
   protected cleanupAgentState(): void {}
 
   /**
-   * The main agent's primary/fallback pair. With `metadata` it builds a fresh
-   * pair carrying that AI Gateway correlation tag (so an AI Gateway log ties the call
-   * to its task and round); without it — the Session's own compaction model — it
-   * reuses a memoized default. A test `modelsOverride` always wins.
+   * The main agent's primary/fallback pair, telling AI Gateway which call site
+   * it serves. With a correlation it builds a fresh pair carrying it; without
+   * one it reuses a memoized default that names only the agent. The agent's
+   * name is always this config's, never the caller's. A test `modelsOverride`
+   * always wins.
    */
-  protected modelPair(metadata?: AiGatewayMetadata): ModelPair {
+  protected modelPair(
+    correlation?: Omit<GatewayCorrelation, "agent">
+  ): ModelPair {
     if (this.modelsOverride) return this.modelsOverride;
-    if (!metadata) return (this._pair ??= this.models.createModelPair());
-    return this.models.createModelPair({ metadata });
+    const agent = this.config.agentName;
+    if (!correlation) {
+      return (this._pair ??= this.models.createModelPair(
+        gatewayLogFields({ agent })
+      ));
+    }
+    return this.models.createModelPair(
+      gatewayLogFields({ ...correlation, agent })
+    );
   }
 
   /**
@@ -305,7 +314,7 @@ export abstract class DynamicAgent<
       // there is nowhere to put an attempt ladder, so the second slot reaches it
       // through the model or not at all — and a compaction that fails leaves the
       // history unshortened, to be attempted again with more of it.
-      withFallback(this.modelPair(), {
+      withFallback(this.modelPair({ phase: "compaction" }), {
         onFallback: ({ modelId, error }) => {
           console.warn(
             "[agent] compaction model failed, trying the other slot",

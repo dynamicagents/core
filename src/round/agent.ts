@@ -16,13 +16,13 @@ import { appendOnce, type SessionLike } from "../agent/session.js";
 import {
   deterministicSessionMessage,
   finalReplyMessageId,
+  parseTurn,
   roundAckMessageId,
   roundAnswerMessageId,
   roundAskMessageId,
   sessionText
 } from "../agent/history.js";
 import { newTurnBudget, type TurnBudget } from "../agent/budget.js";
-import type { AiGatewayMetadata } from "../agent/model.js";
 import { FINGERPRINT_MISMATCH, subagentName } from "../subagent/index.js";
 import { labelSubagentNote } from "../subtasks/progress.js";
 import type {
@@ -365,7 +365,6 @@ export abstract class RoundAgentBase<
       return { status: "parked" };
     }
 
-    const metadata: AiGatewayMetadata = { taskId, round };
     const controller = new AbortController();
     this.inflight.set(taskId, controller);
     let outcome: RunTurnOutcome;
@@ -381,7 +380,12 @@ export abstract class RoundAgentBase<
         systemSuffix: this.callerContext(identity),
         ...(await this.mainAgentSurface(session, controller.signal)),
         approval: this.approvalReplay(taskId, round),
-        models: this.modelPair(metadata),
+        models: this.modelPair({
+          phase: "round",
+          taskId,
+          round,
+          channel: parseTurn(text)?.channel
+        }),
         branches: this.compositionBranches(taskId),
         observations: this.db.observations.recent(
           taskId,

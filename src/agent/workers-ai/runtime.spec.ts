@@ -143,3 +143,63 @@ describe("workers-ai failures", () => {
     expect(isTransientAiError(error)).toBe(false);
   });
 });
+
+/**
+ * What the binding is actually handed, which is the only layer where this can be
+ * asserted. `workers-ai-provider` prefers a provider-level gateway over the
+ * model's, so a runtime that sets both passes every check on the settings it
+ * builds and still delivers `{ id }` alone — see `createWorkersAIModelRuntime`.
+ */
+describe("workers-ai gateway options", () => {
+  /** A binding that answers, and keeps the options each call handed it. */
+  const recording = () => {
+    const calls: { gateway?: unknown }[] = [];
+    const ai = {
+      run: async (_model: string, _inputs: unknown, options: object) => {
+        calls.push(options);
+        return { response: "ok" };
+      }
+    } as unknown as Ai;
+    return { ai, calls };
+  };
+
+  it("delivers the call's metadata and event id to the binding", async () => {
+    const { ai, calls } = recording();
+    const pair = createWorkersAIModelRuntime({ ai, config }).createModelPair({
+      metadata: { taskId: "t1", round: 2 },
+      eventId: "t1:r2"
+    });
+
+    await generateText({ model: pair.primary(), prompt: "hello" });
+
+    expect(calls[0]?.gateway).toEqual({
+      id: config.aiGatewayId,
+      metadata: { taskId: "t1", round: 2 },
+      eventId: "t1:r2"
+    });
+  });
+
+  it("tags the fallback slot the same way", async () => {
+    const { ai, calls } = recording();
+    const pair = createWorkersAIModelRuntime({ ai, config }).createModelPair({
+      metadata: { taskId: "t1", subtaskId: 1 },
+      eventId: "t1:s1"
+    });
+
+    await generateText({ model: pair.fallback(), prompt: "hello" });
+
+    expect(calls[0]?.gateway).toMatchObject({
+      metadata: { taskId: "t1", subtaskId: 1 },
+      eventId: "t1:s1"
+    });
+  });
+
+  it("keeps the route when there is nothing to tell the gateway", async () => {
+    const { ai, calls } = recording();
+    const pair = createWorkersAIModelRuntime({ ai, config }).createModelPair();
+
+    await generateText({ model: pair.primary(), prompt: "hello" });
+
+    expect(calls[0]?.gateway).toEqual({ id: config.aiGatewayId });
+  });
+});
