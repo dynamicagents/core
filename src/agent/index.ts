@@ -22,7 +22,15 @@
 export { newTurnBudget, stepAllowance, type TurnBudget } from "./budget.js";
 
 export {
+  GATEWAY_METADATA_MAX,
+  gatewayLogFields,
   type AiGatewayMetadata,
+  type GatewayCorrelation,
+  type GatewayLogFields,
+  type GatewayPhase
+} from "./gateway-log.js";
+
+export {
   type ModelOverrides,
   type ModelPair,
   type ModelRuntime,

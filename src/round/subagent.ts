@@ -109,7 +109,10 @@ export abstract class RecipeSubagentHost<
               "per-caller state on a path where none exists"
           );
         },
-        aiGatewayId: config.model?.aiGatewayId ?? ""
+        aiGatewayId: config.model?.aiGatewayId ?? "",
+        ...(config.agentName !== undefined
+          ? { agentName: config.agentName }
+          : {})
       }),
       env: this.env
     });
@@ -118,6 +121,9 @@ export abstract class RecipeSubagentHost<
       policy: runtime.policy,
       types: runtime.types,
       models: this.modelRuntime(runtime.config.model),
+      ...(runtime.config.agentName !== undefined
+        ? { agentName: runtime.config.agentName }
+        : {}),
       toolFamilies: runtime.toolFamilies,
       toolOutputWindow: runtime.config.toolOutputWindow,
       maxOutputTokens: runtime.config.model.maxOutputTokens,

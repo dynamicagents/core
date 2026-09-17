@@ -118,6 +118,13 @@ export interface SessionConfig {
 }
 
 export interface CoreConfig {
+  /**
+   * The `agent` key on every AI Gateway log row this agent's model calls write,
+   * so several agents sharing one gateway and one model pair can be told apart.
+   * Match the tenant the agent is mounted under, so the log and the dispatch
+   * name agree. Unset, the key is left out rather than invented.
+   */
+  agentName?: string;
   model: ModelConfig;
   /** What bounds the MAIN agent across every round of one task. */
   mainAgentLimits: AgentLimits;
@@ -253,6 +260,9 @@ export class ConfigError extends Error {
  */
 export function resolveConfig(overrides: CoreConfigOverrides): CoreConfig {
   const config: CoreConfig = {
+    ...(overrides.agentName !== undefined
+      ? { agentName: overrides.agentName }
+      : {}),
     model: { ...DEFAULT_CORE_CONFIG.model, ...overrides.model },
     mainAgentLimits: {
       ...DEFAULT_CORE_CONFIG.mainAgentLimits,
