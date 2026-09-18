@@ -250,11 +250,16 @@ export async function deliverAbandonedTask(
   const label = options.label ?? "agent";
 
   // Logged before anything is attempted: if the delivery below also fails, this
-  // line is the only record of what actually went wrong.
-  console.error(`[${label}] task abandoned after retries were exhausted`, {
-    taskId: options.push.taskId,
-    error: String(cause)
-  });
+  // line is the only record of what actually went wrong. Worded for any throw
+  // that reaches here — a step out of retries, a non-retryable error, the engine
+  // giving up — because this cannot tell them apart and `error` can.
+  console.error(
+    `[${label}] task stopped on an error its workflow could not recover from`,
+    {
+      taskId: options.push.taskId,
+      error: String(cause)
+    }
+  );
 
   try {
     return await deliverTerminalTask(step, {

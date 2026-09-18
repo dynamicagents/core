@@ -767,6 +767,13 @@ async function deferRound(
 }
 
 /**
+ * What the Workflows runtime's error says when it evicts an engine mid-wait
+ * ("Aborting engine: Grace period complete"). Not exported by any type, so
+ * matched on text.
+ */
+const ENGINE_EVICTED = "Aborting engine";
+
+/**
  * Post a round's question, wait for the answer, and say what became of it.
  *
  * The wait is `step.waitForEvent`, not a step of work: the instance sleeps for as
@@ -808,14 +815,18 @@ async function askHuman(
     try {
       await step.waitForEvent(`wait:${round}${suffix}`, { type, timeout });
     } catch (err) {
-      // How a wait that runs out ends. The Durable Object closes the question,
-      // unless an answer got there first.
-      timedOut = true;
-      console.warn(`[${tag}] wait for an answer ended without one`, {
-        taskId: p.taskId,
-        round,
-        err: String(err)
-      });
+      // How a wait that runs out ends: the Durable Object closes the question,
+      // unless an answer got there first. An evicted engine's wait lands here
+      // too, with the question's time still running, and is not passed on as a
+      // timeout — `takeAnswer` closes the question on `timedOut` alone.
+      const evicted = String(err).includes(ENGINE_EVICTED);
+      timedOut = !evicted;
+      console.warn(
+        evicted
+          ? `[${tag}] wait for an answer interrupted by an engine eviction`
+          : `[${tag}] wait for an answer ended without one`,
+        { taskId: p.taskId, round, err: String(err) }
+      );
     }
 
     const answer = await step.do(`answer:${round}${suffix}`, async () => {

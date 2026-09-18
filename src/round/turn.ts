@@ -18,6 +18,7 @@ import {
 } from "ai";
 import type { SessionMessage } from "agents/sessions";
 import { MAX_TOOL_CALL_MS, TOOL_CALL_GRACE_MS } from "../platform.js";
+import { ToolCallAbandonedError } from "../runtime/bound-tools.js";
 import type { AgentLimits } from "../config.js";
 import type { SubtaskTypeRegistry } from "../subtasks/subtask-types.js";
 import { appendOnce, type SessionLike } from "../agent/session.js";
@@ -196,7 +197,9 @@ export function buildTurnInstructions(
       : plain,
     final: {
       budget: plain + policy.finalRoundNote(limits, "budget"),
-      "no-progress": plain + policy.finalRoundNote(limits, "no-progress")
+      "no-progress": plain + policy.finalRoundNote(limits, "no-progress"),
+      "unresponsive-tools":
+        plain + policy.finalRoundNote(limits, "unresponsive-tools")
     }
   };
 }
@@ -685,6 +688,27 @@ type Attempt =
       rejected?: RejectedCall;
     };
 
+/**
+ * Calls a round lets be abandoned at their time limit before it is made to answer.
+ *
+ * One can be a fluke. By the next, whatever the tools share — a workspace, a
+ * container — is not answering, and each further call costs the round
+ * `MAX_TOOL_CALL_MS` while the person hears nothing: four in a row held a round
+ * for forty minutes until the caller's own deadline cancelled the task.
+ */
+const MAX_ABANDONED_CALLS = 2;
+
+/**
+ * The round's count of abandoned calls, shared by every attempt in it, and the
+ * instructions an attempt switches to once the count reaches
+ * {@link MAX_ABANDONED_CALLS}. Round-scoped for the reason `seen` is: a repair or
+ * the fallback would stall on the same dead backend.
+ */
+interface RoundStalls {
+  abandoned: number;
+  instructions: string;
+}
+
 /** What an attempt needs to hold calls for a person, or to replay the answer. */
 interface AttemptApprovals {
   /** The rules as this round applies them — see {@link refuseWithoutAsking}. */
@@ -908,7 +932,8 @@ async function attempt(
    */
   seen: ModelMessage[],
   /** Held calls, and the replay of an answer on them. See {@link ApprovalReplay}. */
-  approvals: AttemptApprovals
+  approvals: AttemptApprovals,
+  stalls: RoundStalls
 ): Promise<Attempt> {
   const final = args.mode === "final";
   // One step per attempt for a `final` round: it exists to produce the answer, and
@@ -980,12 +1005,37 @@ async function attempt(
       // indistinguishable from a real fault and would spend the fallback slot on
       // work that was merely slow.
       timeout: { toolMs: MAX_TOOL_CALL_MS - TOOL_CALL_GRACE_MS },
+      // Once the round has lost enough calls to the time limit, every later step
+      // is handed the answer alone and told why — see `MAX_ABANDONED_CALLS`.
+      prepareStep: () =>
+        stalls.abandoned >= MAX_ABANDONED_CALLS
+          ? {
+              activeTools: [FINAL_REPLY_TOOL_NAME],
+              instructions: stalls.instructions
+            }
+          : undefined,
       // Charged here rather than from `result.steps` so a throw mid-loop still
       // bills the steps already spent — the `catch` below has no `result` to read.
       onStepEnd: async (step) => {
         args.budget.spent += 1;
         stepStart = seen.length;
         seen.push(...step.response.messages);
+        const before = stalls.abandoned;
+        stalls.abandoned += step.content.filter(
+          (part) =>
+            part.type === "tool-error" &&
+            part.error instanceof ToolCallAbandonedError
+        ).length;
+        if (
+          before < MAX_ABANDONED_CALLS &&
+          stalls.abandoned >= MAX_ABANDONED_CALLS
+        ) {
+          console.warn("[turn] tools stopped answering, forcing the answer", {
+            taskId: args.taskId,
+            round: args.round,
+            abandoned: stalls.abandoned
+          });
+        }
         if (content) await content(step);
       }
     });
@@ -1255,14 +1305,18 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
       args.toolOutputWindow ?? Number.POSITIVE_INFINITY
     )
   );
+  const base = (await session.refreshSystemPrompt()) + systemSuffix;
   const system =
-    (await session.refreshSystemPrompt()) +
-    systemSuffix +
+    base +
     (args.mode === "final"
       ? args.instructions.final[args.finalReason ?? "budget"]
       : args.deferrable
         ? args.instructions.open
         : args.instructions.openWithoutDeferral);
+  const stalls: RoundStalls = {
+    abandoned: 0,
+    instructions: base + args.instructions.final["unresponsive-tools"]
+  };
 
   // This round's endings, built with the catalog a `delegate` is checked against.
   const control = controlTools({
@@ -1424,7 +1478,8 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
           ...repairs
         ],
         seen,
-        approvals
+        approvals,
+        stalls
       );
       const modelId = slot === "primary" ? answering : models.fallbackId();
 

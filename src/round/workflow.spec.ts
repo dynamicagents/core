@@ -60,9 +60,10 @@ interface FakeStepOptions {
   retries?: number;
   /**
    * How each `waitForEvent` ends, in order: `"event"` is a wake, `"timeout"`
-   * throws the way a wait that runs out does. Past the end of the list, a wake.
+   * throws the way a wait that runs out does, `"evicted"` the way an engine the
+   * runtime evicts mid-wait does. Past the end of the list, a wake.
    */
-  waits?: ("event" | "timeout")[];
+  waits?: ("event" | "timeout" | "evicted")[];
 }
 
 function fakeStep(options: FakeStepOptions = {}) {
@@ -85,8 +86,10 @@ function fakeStep(options: FakeStepOptions = {}) {
       waited.push({ name, ...config });
       if (Object.hasOwn(options.cached ?? {}, name))
         return options.cached![name];
-      if ((options.waits ?? [])[waits++] === "timeout")
-        throw new Error(`waitForEvent ${name} timed out`);
+      const ends = (options.waits ?? [])[waits++];
+      if (ends === "timeout") throw new Error(`waitForEvent ${name} timed out`);
+      if (ends === "evicted")
+        throw new Error("Aborting engine: Grace period complete");
       return { payload: {}, timestamp: new Date(), type: config.type };
     },
     async do(name: string, a: unknown, b?: unknown): Promise<unknown> {
@@ -1312,7 +1315,7 @@ describe("a task abandoned after its retries are exhausted", () => {
     });
 
     expect(error).toHaveBeenCalledWith(
-      "[claude-coder] task abandoned after retries were exhausted",
+      "[claude-coder] task stopped on an error its workflow could not recover from",
       expect.objectContaining({ taskId: "task-1" })
     );
   });
@@ -1503,6 +1506,34 @@ describe("a round that asks the person", () => {
     expect(calls).toEqual(["parkTask", "takeAnswer:timed-out"]);
     expect(seen).toEqual(["unanswered"]);
     expect(JSON.stringify(saved[0])).toContain("NOBODY ANSWERED IN TIME");
+  });
+
+  it("says an evicted engine interrupted the wait, not that it ran out", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // Spied by earlier specs in this file too, and the history is shared.
+    warn.mockClear();
+    const { stub, calls } = askingAgent([
+      { status: "awaiting", at: 2_000 },
+      { status: "answered", at: 5_000 }
+    ]);
+    const { step } = fakeStep({
+      waits: ["evicted"],
+      cached: { notify: undefined }
+    });
+
+    await runHandleTask(params(), step, deps(stub));
+
+    expect(warn).toHaveBeenCalledWith(
+      "[handle-task] wait for an answer interrupted by an engine eviction",
+      expect.objectContaining({ round: 0 })
+    );
+    expect(warn).not.toHaveBeenCalledWith(
+      expect.stringContaining("ended without one"),
+      expect.anything()
+    );
+    // Not passed on as a timeout, which would close a question that still has
+    // time: it is read like a wake, and waited on again.
+    expect(calls).toEqual(["parkTask", "takeAnswer:woken", "takeAnswer:woken"]);
   });
 
   it("ends canceled, delivering nothing, for a Task canceled while it waits", async () => {

@@ -14,8 +14,13 @@ import type { AgentLimits } from "../config.js";
  *   the identical way. The budget is intact and the work is going nowhere, so a
  *   round told its budget was spent would be told something false, and would tell
  *   the user so in turn.
+ * - `unresponsive-tools` — calls in this round ran past their time limit and were
+ *   abandoned. Whatever they reach is not answering, and each further call would
+ *   cost the full limit while the user hears nothing. Unlike the other two, this
+ *   is imposed partway through an open round, from the step after the call that
+ *   tipped it.
  */
-export type FinalRoundReason = "budget" | "no-progress";
+export type FinalRoundReason = "budget" | "no-progress" | "unresponsive-tools";
 
 /**
  * Everything about a round loop that is **yours**, not core's.
@@ -101,10 +106,10 @@ export interface RoundPolicy {
    * rather than imposing one.
    *
    * Called once per {@link FinalRoundReason} when the instructions are built, so
-   * both arms exist before either is needed. An implementation that ignores the
-   * reason still satisfies this and gets one note for both — accurate about the
-   * constraint, wrong about the cause, which is the whole argument for writing
-   * the second arm.
+   * every arm exists before any is needed. An implementation that ignores the
+   * reason still satisfies this and gets one note for all of them — accurate
+   * about the constraint, wrong about the cause, which is the whole argument for
+   * writing an arm per reason.
    */
   finalRoundNote(limits: AgentLimits, reason: FinalRoundReason): string;
 

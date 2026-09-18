@@ -142,23 +142,32 @@ async function* boundStream(
 }
 
 /**
+ * A call abandoned at its time limit. A class so a round can count them — see
+ * `MAX_ABANDONED_CALLS` in `round/turn.ts`.
+ */
+export class ToolCallAbandonedError extends Error {
+  override readonly name = "ToolCallAbandonedError";
+}
+
+/**
  * What the model reads in place of a call abandoned at its deadline.
  *
  * True of any tool, because this cannot know which one it speaks for: not that
  * the work stopped, only that nothing is waiting for it and that whatever it did
- * may already have happened. Worded so the next move is to look rather than to
- * call again, since a call that outran its limit once will again. It names no
- * figure, because the deadline is whatever the loop set and this never sees it.
+ * may already have happened. Worded to steer the model away from what the call
+ * was waiting on rather than toward another look at it: a check that goes
+ * through the same backend stalls just as long. It names no figure, because the
+ * deadline is whatever the loop set and this never sees it.
  *
  * A cancelled call gets a bare statement: the loop that made it is ending, so no
  * model reads it.
  */
 function abandoned(name: string, timedOut: boolean): Error {
-  return new Error(
-    timedOut
-      ? `${name} did not finish within its time limit, so this call was abandoned. It may still be running, and anything it did may already have taken effect — check before repeating it.`
-      : `${name} was abandoned because this call was cancelled.`
-  );
+  return timedOut
+    ? new ToolCallAbandonedError(
+        `${name} did not finish within its time limit, so this call was abandoned. Whatever it works against is not answering, and other calls that reach the same thing are likely to stall the same way. It may still be running, and anything it did may already have taken effect.`
+      )
+    : new Error(`${name} was abandoned because this call was cancelled.`);
 }
 
 function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {

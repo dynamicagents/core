@@ -2,6 +2,7 @@ import type { Task } from "@a2a-js/sdk";
 import type { OnContent } from "../agent/inference.js";
 import { parsePrivateJwk } from "./card.js";
 import {
+  CALLBACK_TOKEN_TTL_SECONDS,
   buildWorkingTask,
   postNotification,
   signCallbackJwt
@@ -54,7 +55,8 @@ export interface PushChannel {
   working(text: string, key: string): Promise<void>;
   /**
    * An {@link OnContent} sink that posts each intermediate message as a
-   * `working` snapshot, signing the JWT once and reusing it across the turn.
+   * `working` snapshot, reusing one signed JWT for as long as it has more than
+   * a minute to live.
    *
    * `key` maps a 0-based step ordinal to its notification key. An agent running
    * one turn per task can use the bare index; an agent with rounds **must**
@@ -69,6 +71,9 @@ export interface PushChannel {
   deliver(task: Task): Promise<void>;
 }
 
+/** How long a signed callback JWT is reused: its lifetime, less a minute. */
+const REUSE_MS = (CALLBACK_TOKEN_TTL_SECONDS - 60) * 1000;
+
 /**
  * Build the callback channel for one turn.
  *
@@ -82,13 +87,23 @@ export function createPushChannel(
   push: TurnPushContext
 ): PushChannel {
   // Signed lazily and reused: one turn can post many progress snapshots, and
-  // re-signing per message costs a key import each time for no benefit.
-  let jwt: Promise<string> | undefined;
-  const sign = (): Promise<string> =>
-    (jwt ??= signCallbackJwt(parsePrivateJwk(signingKey), {
-      jku: push.jku,
-      aud: push.pushUrl
-    }));
+  // re-signing per message costs a key import each time for no benefit. Reused
+  // only until a minute before it expires, because a round or a facet chunk
+  // outlives the token and the gatekeeper refuses a post that carries a dead one.
+  let signed: { jwt: Promise<string>; at: number } | undefined;
+  const sign = (): Promise<string> => {
+    const now = Date.now();
+    if (!signed || now - signed.at >= REUSE_MS) {
+      signed = {
+        jwt: signCallbackJwt(parsePrivateJwk(signingKey), {
+          jku: push.jku,
+          aud: push.pushUrl
+        }),
+        at: now
+      };
+    }
+    return signed.jwt;
+  };
 
   const post = async (task: Task): Promise<Response> =>
     postNotification(push.pushUrl, push.pushToken, await sign(), task);
