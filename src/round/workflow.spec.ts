@@ -68,8 +68,15 @@ interface FakeStepOptions {
 function fakeStep(options: FakeStepOptions = {}) {
   const ran: string[] = [];
   const waited: { name: string; type: string; timeout?: unknown }[] = [];
+  const slept: { name: string; ms: unknown }[] = [];
   let waits = 0;
   const step = {
+    async sleep(name: string, ms: unknown): Promise<void> {
+      // Recorded, never served from `cached`: a replayed sleep is a sleep the
+      // platform has already served, and either way the body does nothing.
+      ran.push(name);
+      slept.push({ name, ms });
+    },
     async waitForEvent(
       name: string,
       config: { type: string; timeout?: unknown }
@@ -98,25 +105,45 @@ function fakeStep(options: FakeStepOptions = {}) {
       throw last;
     }
   } as unknown as WorkflowStep;
-  return { step, ran, waited };
+  return { step, ran, waited, slept };
 }
 
 interface FakeAgentOptions {
-  markWorking?: "ok" | "canceled";
+  /**
+   * A single verdict, or one per call in order — the loop calls `markWorking`
+   * again after every deferral, and a cancel that lands during a sleep is only
+   * visible as the *second* answer differing from the first.
+   */
+  markWorking?: ("ok" | "canceled") | ("ok" | "canceled")[];
   /** Whether the guarded terminal write applies. `false` ⇒ a cancel won. */
   saveTask?: boolean;
+  /** One turn verdict per round, in order. Past the end, a plain reply. */
+  turns?: unknown[];
 }
 
 function fakeAgent(options: FakeAgentOptions = {}) {
   const calls: string[] = [];
+  /** Every `runTaskTurn` input, for the specs about what a round was handed. */
+  const handed: Record<string, unknown>[] = [];
+  let marks = 0;
+  let rounds = 0;
   const stub = {
     async markWorking() {
       calls.push("markWorking");
-      return options.markWorking ?? "ok";
+      const scripted = options.markWorking;
+      if (Array.isArray(scripted)) return scripted[marks++] ?? "ok";
+      return scripted ?? "ok";
     },
-    async runTaskTurn() {
+    async runTaskTurn(input: Record<string, unknown>) {
       calls.push("runTaskTurn");
-      return { status: "replied", reply: "the answer", turns: 1 };
+      handed.push(input);
+      return (
+        options.turns?.[rounds++] ?? {
+          status: "replied",
+          reply: "the answer",
+          turns: 1
+        }
+      );
     },
     async saveTask() {
       calls.push("saveTask");
@@ -136,7 +163,7 @@ function fakeAgent(options: FakeAgentOptions = {}) {
       return [];
     }
   };
-  return { stub, calls };
+  return { stub, calls, handed };
 }
 
 /**
@@ -171,10 +198,17 @@ function params() {
   };
 }
 
-function deps(stub: unknown): HandleTaskDeps {
+function deps(
+  stub: unknown,
+  limits: Partial<HandleTaskDeps["config"]["mainAgentLimits"]> = {}
+): HandleTaskDeps {
+  const config = resolveConfig({ model: TEST_MODELS });
   return {
     resolveAgent: () => stub as never,
-    config: resolveConfig({ model: TEST_MODELS }),
+    config: {
+      ...config,
+      mainAgentLimits: { ...config.mainAgentLimits, ...limits }
+    },
     policy,
     signingKey: "unused-in-these-specs"
   };
@@ -1524,5 +1558,137 @@ describe("a round that asks the person", () => {
 
     expect(verdict).toEqual({ outcome: "replied", rounds: 2, turns: 2 });
     expect(calls).toEqual([]);
+  });
+});
+
+/**
+ * A round that waits and comes back to itself.
+ *
+ * The sleep holds no concurrency and nobody is told anything, so almost every
+ * fact here is about what the *next* round is handed: whether it may wait again,
+ * what the clock thinks it has spent, and whether it runs at all after a cancel
+ * landed while it slept.
+ */
+describe("a round that waits", () => {
+  const deferred = (seconds: number, why = "the review is still running") => ({
+    status: "deferred",
+    seconds,
+    why,
+    turns: 1
+  });
+
+  const allowance = { maxDeferrals: 5, maxDeferredMs: 600_000 };
+
+  it("sleeps, then runs the round that wakes", async () => {
+    const { stub } = fakeAgent({ turns: [deferred(30)] });
+    const { step, ran, slept } = fakeStep({ cached: { notify: undefined } });
+
+    const result = await runHandleTask(params(), step, deps(stub, allowance));
+
+    expect(slept).toEqual([{ name: "sleep:0", ms: 30_000 }]);
+    expect(ran).toContain("turn:1");
+    expect(result).toEqual({ outcome: "replied", rounds: 2, turns: 2 });
+  });
+
+  it("tells nobody it is waiting", async () => {
+    const { stub, calls } = fakeAgent({ turns: [deferred(30)] });
+    const { step, ran } = fakeStep({ cached: { notify: undefined } });
+
+    await runHandleTask(params(), step, deps(stub, allowance));
+
+    // Not a question, so no `input-required` Task and no push. The Task stays
+    // `working`, which is what the gatekeeper sees during any long round.
+    expect(ran).not.toContain("park:0");
+    expect(calls).not.toContain("parkTask");
+  });
+
+  it("stops when a cancel landed while it slept", async () => {
+    // The guarded write is the authority, and the second `markWorking` is where
+    // a cancel that arrived mid-sleep first becomes visible. Reading the Task and
+    // acting on what it said would reopen the window that write exists to close.
+    const { stub } = fakeAgent({
+      markWorking: ["ok", "canceled"],
+      turns: [deferred(30)]
+    });
+    const { step, ran } = fakeStep({ cached: { notify: undefined } });
+
+    const result = await runHandleTask(params(), step, deps(stub, allowance));
+
+    expect(ran).toContain("awake:0");
+    expect(ran).not.toContain("turn:1");
+    expect(result).toEqual({ outcome: "canceled", rounds: 1, turns: 1 });
+  });
+
+  it("does not charge the wait to the task's wall clock", async () => {
+    // Started 100s ago with a 60s ceiling: the round that wakes is over the wall
+    // unless the 90s it spent waiting is forgiven. It is — for the reason a
+    // person's answer is — so this round is still `open` and may still act.
+    const { stub, handed } = fakeAgent();
+    const { step } = fakeStep({
+      cached: {
+        started: Date.now() - 100_000,
+        "turn:0": deferred(90),
+        notify: undefined
+      }
+    });
+
+    await runHandleTask(
+      params(),
+      step,
+      deps(stub, { ...allowance, maxWallMs: 60_000 })
+    );
+
+    // `turn:0` was served from cache, so this is the round that woke.
+    expect(handed[0]).toMatchObject({ round: 1, mode: "open" });
+  });
+
+  it("stops offering the wait once the allowance is spent", async () => {
+    const { stub, handed } = fakeAgent({
+      turns: [deferred(30), { status: "replied", reply: "done", turns: 1 }]
+    });
+    const { step } = fakeStep({ cached: { notify: undefined } });
+
+    await runHandleTask(
+      params(),
+      step,
+      deps(stub, { maxDeferrals: 1, maxDeferredMs: 600_000 })
+    );
+
+    expect(handed[0]).toMatchObject({ round: 0, deferrable: true });
+    // One wait was the whole allowance. The round that wakes keeps every other
+    // ending — this is not a `final` round — and simply cannot wait again.
+    expect(handed[1]).toMatchObject({ round: 1, deferrable: false });
+  });
+
+  it("clamps a wait to what is left rather than refusing it", async () => {
+    // 45s of allowance and a 60s ask: the round gets the remainder, and the one
+    // after it finds the tool withdrawn — a state its policy has words for.
+    const { stub, handed } = fakeAgent({
+      turns: [deferred(30), deferred(60)]
+    });
+    const { step, slept } = fakeStep({ cached: { notify: undefined } });
+
+    await runHandleTask(
+      params(),
+      step,
+      deps(stub, { maxDeferrals: 5, maxDeferredMs: 45_000 })
+    );
+
+    expect(slept).toEqual([
+      { name: "sleep:0", ms: 30_000 },
+      { name: "sleep:1", ms: 15_000 }
+    ]);
+    expect(handed[2]).toMatchObject({ round: 2, deferrable: false });
+  });
+
+  it("never offers it to an agent that configured no allowance", async () => {
+    // Both bounds default to 0, so the tool costs nothing to leave unconfigured
+    // — which is what every agent that has nothing to wait for does.
+    const { stub, handed } = fakeAgent();
+    const { step } = fakeStep({ cached: { notify: undefined } });
+
+    await runHandleTask(params(), step, deps(stub));
+
+    expect(handed[0]).toMatchObject({ deferrable: false });
   });
 });

@@ -85,6 +85,28 @@ export interface AgentLimits {
    * in {@link file://./round/workflow.ts runHandleTask}.
    */
   maxWallMs: number;
+  /**
+   * How many times one Task may stop and come back to itself later, and how much
+   * of its own time it may spend doing so. Both default to **0** — a round loop
+   * offers `check_back` only to an agent that asked for it, because the tool is
+   * only worth its place in the contract where something is genuinely worth
+   * waiting on.
+   *
+   * These bound waiting *instead of* the wall clock rather than alongside it. A
+   * deferral holds no concurrency and is not charged to {@link maxWallMs}, for
+   * the reason a person's answer is not — so with nothing here a Task could wait
+   * out its whole existence without ever spending the budget that is supposed to
+   * stop it.
+   *
+   * Set both or neither: whichever is reached first ends the waiting, and one of
+   * them left at 0 turns the tool off however generous the other is. An agent
+   * that sets them must also give
+   * {@link file://./round/policy.ts RoundPolicy.deferralsSpentNote} the words for
+   * running out, which `buildTurnInstructions` refuses to invent.
+   */
+  maxDeferrals?: number;
+  /** See {@link maxDeferrals}. */
+  maxDeferredMs?: number;
 }
 
 /** Session memory + compaction tuning. */
@@ -334,6 +356,53 @@ export function resolveConfig(overrides: CoreConfigOverrides): CoreConfig {
     throw new ConfigError(
       `roundObservationWindow must be a non-negative integer, got ` +
         `${config.roundObservationWindow} — 0 carries nothing between rounds`
+    );
+  }
+
+  // The deferral bounds, on both limit sets. Absent is the default and means the
+  // feature is off, so these are validated only when named — but a named one is
+  // held to what it says it is: `maxDeferrals` is a count of waits, and a
+  // fractional one enables a wait the config did not ask for (0.5 admits the
+  // first and refuses the second). A non-finite duration is worse than wrong: it
+  // compares false against every bound and silently turns the tool off.
+  for (const [which, limits] of [
+    ["mainAgentLimits", config.mainAgentLimits],
+    ["subagentLimits", config.subagentLimits]
+  ] as const) {
+    const { maxDeferrals, maxDeferredMs } = limits;
+    if (
+      maxDeferrals !== undefined &&
+      (!Number.isInteger(maxDeferrals) || maxDeferrals < 0)
+    ) {
+      throw new ConfigError(
+        `${which}.maxDeferrals must be a non-negative integer, got ${maxDeferrals} — 0 turns waiting off`
+      );
+    }
+    if (
+      maxDeferredMs !== undefined &&
+      (!Number.isFinite(maxDeferredMs) || maxDeferredMs < 0)
+    ) {
+      throw new ConfigError(
+        `${which}.maxDeferredMs must be a non-negative number of milliseconds, got ${maxDeferredMs} — 0 turns waiting off`
+      );
+    }
+  }
+
+  // Waiting depends on the observation window, and the dependency is invisible
+  // from either side. A deferring round records why it stopped as an observation;
+  // a window of zero — legal, and documented above as opting out entirely — reads
+  // none of them back, so the round that wakes sees the evidence that made it
+  // wait and nothing about having waited. It waits again, identically, until the
+  // allowance is gone. Refused here rather than left to be discovered as a task
+  // that quietly spends its whole allowance on one decision.
+  if (
+    config.roundObservationWindow === 0 &&
+    (config.mainAgentLimits.maxDeferrals ?? 0) > 0 &&
+    (config.mainAgentLimits.maxDeferredMs ?? 0) > 0
+  ) {
+    throw new ConfigError(
+      "mainAgentLimits deferrals need roundObservationWindow > 0: a round that waits " +
+        "records why as an observation, and a window of 0 carries nothing between rounds"
     );
   }
 

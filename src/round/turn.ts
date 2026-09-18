@@ -123,8 +123,21 @@ import {
  * which does not exist at module scope on Workers. The DO memoizes the result.
  */
 export interface TurnInstructions {
-  /** Contract + per-type delegation guidance. Appended to soul + caller context. */
+  /**
+   * Contract + per-type delegation guidance, with `check_back` among the endings
+   * it describes. Appended to soul + caller context.
+   *
+   * Identical to {@link openWithoutDeferral} for an agent that configures no
+   * deferral budget, which is the state in which the two fields collapse: there
+   * is one open round, and it never mentions a call it will not be given.
+   */
   open: string;
+  /**
+   * The same contract without `check_back`, plus the note for having spent the
+   * deferral budget — what an open round is given once it has run out of waits.
+   * Every other ending is still available, so this is not a `final` round.
+   */
+  openWithoutDeferral: string;
   /**
    * The same, plus the note for a round that was forced to answer — one per
    * {@link FinalRoundReason}, because a round stopped by a wall and a round
@@ -157,14 +170,33 @@ export function buildTurnInstructions(
     delegateTool: DELEGATE_TOOL_NAME,
     finalReplyTool: FINAL_REPLY_TOOL_NAME
   });
-  const open =
-    policy.roundContract({ typeKeys: types.keys, maxSubtasks }) +
+  const contract = (deferrable: boolean) =>
+    policy.roundContract({ typeKeys: types.keys, maxSubtasks, deferrable }) +
     (guidance ? `\n\n${guidance}` : "");
+
+  // Both bounds have to be real for the tool to exist at all: whichever is
+  // reached first ends the waiting, so a zero in either one is a zero in both.
+  const deferrable =
+    (limits.maxDeferrals ?? 0) > 0 && (limits.maxDeferredMs ?? 0) > 0;
+  if (deferrable && !policy.deferralsSpentNote) {
+    throw new Error(
+      "RoundPolicy.deferralsSpentNote is required when AgentLimits.maxDeferrals is set: " +
+        "a round that has spent its deferrals is told so in the agent's own words, and core has none to lend."
+    );
+  }
+
+  // A round that cannot defer is the base case, and the one every note is built
+  // on — a `final` round has no deferral left either, so describing `check_back`
+  // to it would advertise a call it is not given.
+  const plain = contract(false);
   return {
-    open,
+    open: deferrable ? contract(true) : plain,
+    openWithoutDeferral: deferrable
+      ? plain + policy.deferralsSpentNote!()
+      : plain,
     final: {
-      budget: open + policy.finalRoundNote(limits, "budget"),
-      "no-progress": open + policy.finalRoundNote(limits, "no-progress")
+      budget: plain + policy.finalRoundNote(limits, "budget"),
+      "no-progress": plain + policy.finalRoundNote(limits, "no-progress")
     }
   };
 }
@@ -460,6 +492,14 @@ export interface RunTurnArgs {
   /** What this round may do — see {@link RoundMode}. */
   mode: RoundMode;
   /**
+   * Whether `check_back` is among this round's endings. The caller owns it
+   * because it is a fact about the **Task** — how many waits it has left and how
+   * much of its allowance it has spent — which a single round cannot see. False
+   * on a `final` round, and false for every agent that configures no deferral
+   * budget.
+   */
+  deferrable: boolean;
+  /**
    * Why a `final` round is final, which decides only which note it is given.
    * Absent means `budget` — the reason core had until a no-progress guard existed,
    * and the only one a caller who names none can mean. Ignored on an `open` round,
@@ -575,6 +615,18 @@ export type RunTurnOutcome =
    * the caller keeps `asked` and the observations, and the Workflow asks.
    */
   | { status: "parked"; asked: ParkedOn; observations: ModelMessage[] }
+  /**
+   * The round chose to wait and look again, and ended there. The observations go
+   * with it for the same reason a delegating round's do — the wait changes what
+   * the model will see, not what it has already seen — and the Workflow owns the
+   * sleep.
+   */
+  | {
+      status: "deferred";
+      seconds: number;
+      why: string;
+      observations: ModelMessage[];
+    }
   /**
    * The round was cancelled while a model call was in flight. Separate from
    * `failed` because the models did nothing wrong and a human is owed no
@@ -1208,13 +1260,19 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
     systemSuffix +
     (args.mode === "final"
       ? args.instructions.final[args.finalReason ?? "budget"]
-      : args.instructions.open);
+      : args.deferrable
+        ? args.instructions.open
+        : args.instructions.openWithoutDeferral);
 
   // This round's endings, built with the catalog a `delegate` is checked against.
   const control = controlTools({
     catalog,
     delegable: args.mode !== "final",
     askable: args.mode !== "final",
+    // Guarded here beside `askable` and `delegable`, not taken on trust from the
+    // caller: a `final` round has nothing left to wake into, and that is a fact
+    // about the round rather than about the Task's allowance.
+    deferrable: args.mode !== "final" && args.deferrable,
     types: args.types,
     maxSubtasks: args.maxSubtasks
   });
@@ -1486,6 +1544,15 @@ export async function runTurn(args: RunTurnArgs): Promise<RunTurnOutcome> {
           )
         );
         return { status: "replied", reply };
+      }
+
+      if (outcome.decision.kind === "defer") {
+        return {
+          status: "deferred",
+          seconds: outcome.decision.seconds,
+          why: outcome.decision.why,
+          observations: observed()
+        };
       }
 
       if (outcome.decision.kind === "ask") {

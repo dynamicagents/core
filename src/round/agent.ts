@@ -282,6 +282,12 @@ export abstract class RoundAgentBase<
     finalReason?: FinalRoundReason;
     /** What the Task has left. Bounds this round. */
     turnsRemaining: number;
+    /**
+     * Whether this round may end in `check_back`. A fact about the Task's
+     * deferral allowance, which only the Workflow is counting — see
+     * {@link file://./turn.ts RunTurnArgs.deferrable}.
+     */
+    deferrable?: boolean;
     push?: TurnPushContext;
   }): Promise<TurnTaskResult> {
     // Before anything can reach a model: a round that calls out mint-signed
@@ -326,6 +332,7 @@ export abstract class RoundAgentBase<
       round: number;
       mode: RoundMode;
       finalReason?: FinalRoundReason;
+      deferrable?: boolean;
       push?: TurnPushContext;
     },
     budget: TurnBudget
@@ -376,6 +383,7 @@ export abstract class RoundAgentBase<
         text,
         mode,
         finalReason,
+        deferrable: input.deferrable ?? false,
         budget,
         systemSuffix: this.callerContext(identity),
         ...(await this.mainAgentSurface(session, controller.signal)),
@@ -445,6 +453,27 @@ export abstract class RoundAgentBase<
             })
       });
       return { status: "parked" };
+    }
+
+    if (outcome.status === "deferred") {
+      // What this round saw, and the wait itself. The marker is the only record
+      // the round that wakes has of why it stopped — without it that round reads
+      // the identical evidence, reaches the identical conclusion and waits again,
+      // until the allowance is gone. Structural, in the register of the `[ref N]`
+      // markers: what it *means* is in the agent's own round contract, which is
+      // the one place that describes `check_back` at all.
+      this.db.observations.put(taskId, round, [
+        ...outcome.observations,
+        {
+          role: "assistant",
+          content: `[check_back] waited ${outcome.seconds}s — ${outcome.why}`
+        }
+      ]);
+      return {
+        status: "deferred",
+        seconds: outcome.seconds,
+        why: outcome.why
+      };
     }
 
     // The ack is durable in the Session before the rows exist. A crash in this

@@ -252,7 +252,13 @@ export type TurnTaskResult =
    * Durable Object; the Workflow posts it and waits, and the next round reads
    * the answer.
    */
-  | { status: "parked"; turns: number };
+  | { status: "parked"; turns: number }
+  /**
+   * The round chose to wait and look again. Nothing is durable but what it saw —
+   * the observations are written like a delegating round's — because the wait
+   * itself belongs to the Workflow, which sleeps and then runs the next round.
+   */
+  | { status: "deferred"; seconds: number; why: string; turns: number };
 
 /**
  * Distributive `Omit` — applies per member, so the discriminated union survives.
