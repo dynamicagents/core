@@ -106,10 +106,10 @@ export interface RoundPolicy {
    * rather than imposing one.
    *
    * Called once per {@link FinalRoundReason} when the instructions are built, so
-   * both arms exist before either is needed. An implementation that ignores the
-   * reason still satisfies this and gets one note for both — accurate about the
-   * constraint, wrong about the cause, which is the whole argument for writing
-   * the second arm.
+   * every arm exists before any is needed. An implementation that ignores the
+   * reason still satisfies this and gets one note for all of them — accurate
+   * about the constraint, wrong about the cause, which is the whole argument for
+   * writing an arm per reason.
    */
   finalRoundNote(limits: AgentLimits, reason: FinalRoundReason): string;
 

@@ -55,7 +55,8 @@ export interface PushChannel {
   working(text: string, key: string): Promise<void>;
   /**
    * An {@link OnContent} sink that posts each intermediate message as a
-   * `working` snapshot, signing the JWT once and reusing it across the turn.
+   * `working` snapshot, reusing one signed JWT for as long as it has more than
+   * a minute to live.
    *
    * `key` maps a 0-based step ordinal to its notification key. An agent running
    * one turn per task can use the bare index; an agent with rounds **must**

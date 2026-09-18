@@ -1531,12 +1531,9 @@ describe("a round that asks the person", () => {
       expect.stringContaining("ended without one"),
       expect.anything()
     );
-    // The Durable Object still decides, and a question with time left waits on.
-    expect(calls).toEqual([
-      "parkTask",
-      "takeAnswer:timed-out",
-      "takeAnswer:woken"
-    ]);
+    // Not passed on as a timeout, which would close a question that still has
+    // time: it is read like a wake, and waited on again.
+    expect(calls).toEqual(["parkTask", "takeAnswer:woken", "takeAnswer:woken"]);
   });
 
   it("ends canceled, delivering nothing, for a Task canceled while it waits", async () => {

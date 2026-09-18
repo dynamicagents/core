@@ -38,10 +38,11 @@ describe("createPushChannel", () => {
     );
 
     await channel.working("first", "r1:step:0");
-    vi.setSystemTime(new Date("2026-01-01T00:02:00Z"));
+    vi.setSystemTime(new Date("2026-01-01T00:03:59Z"));
     await channel.working("second", "r1:step:1");
-    // Six minutes in: the first token expired a minute ago.
-    vi.setSystemTime(new Date("2026-01-01T00:06:00Z"));
+    // Four minutes in: a minute short of the first token's expiry, which is as
+    // long as the channel will carry it.
+    vi.setSystemTime(new Date("2026-01-01T00:04:00Z"));
     await channel.working("third", "r1:step:2");
 
     expect(tokens).toHaveLength(3);

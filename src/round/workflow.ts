@@ -815,12 +815,12 @@ async function askHuman(
     try {
       await step.waitForEvent(`wait:${round}${suffix}`, { type, timeout });
     } catch (err) {
-      // How a wait that runs out ends. The Durable Object closes the question,
-      // unless an answer got there first — or the question still has time, which
-      // is what an evicted engine's wait lands here with. `takeAnswer` reads the
-      // clock itself, so only the log has to tell the two apart.
-      timedOut = true;
+      // How a wait that runs out ends: the Durable Object closes the question,
+      // unless an answer got there first. An evicted engine's wait lands here
+      // too, with the question's time still running, and is not passed on as a
+      // timeout — `takeAnswer` closes the question on `timedOut` alone.
       const evicted = String(err).includes(ENGINE_EVICTED);
+      timedOut = !evicted;
       console.warn(
         evicted
           ? `[${tag}] wait for an answer interrupted by an engine eviction`
