@@ -40,10 +40,10 @@ import type { PlainTask } from "./task.js";
 export { NOTIFICATION_TOKEN_HEADER } from "@dynamicagents/g2a-protocol";
 
 /**
- * Callback-JWT lifetime. The gatekeeper enforces `maxTokenAge: 10m` with a 60s clock
- * tolerance, so keep this comfortably under that.
+ * Callback-JWT lifetime, in seconds. The gatekeeper enforces `maxTokenAge: 10m` with a
+ * 60s clock tolerance, so keep this comfortably under that.
  */
-const CALLBACK_TOKEN_TTL = "5m";
+export const CALLBACK_TOKEN_TTL_SECONDS = 5 * 60;
 
 /**
  * The SDK's canonical v1.0 push-notification body encoder: the `StreamResponse`
@@ -222,7 +222,7 @@ export async function signCallbackJwt(
     })
     .setAudience(opts.aud)
     .setIssuedAt()
-    .setExpirationTime(CALLBACK_TOKEN_TTL)
+    .setExpirationTime(`${CALLBACK_TOKEN_TTL_SECONDS}s`)
     .sign(privateJwk);
 }
 

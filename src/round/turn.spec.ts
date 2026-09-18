@@ -44,6 +44,7 @@ import {
   type RunTurnOutcome
 } from "./turn.js";
 import { captureObservations } from "./observations.js";
+import { ToolCallAbandonedError } from "../runtime/bound-tools.js";
 import type { RoundPolicy } from "./policy.js";
 
 /**
@@ -108,14 +109,21 @@ You may delegate up to ${maxSubtasks} subtasks, each of type ${typeKeys
       .map((k) => `"${k}"`)
       .join(", ")}, or answer with final_reply.`,
   finalRoundNote: (limits, reason) =>
-    reason === "no-progress"
+    reason === "unresponsive-tools"
       ? `
+
+# Your tools are not answering
+
+Calls kept running past their time limit. Call final_reply now and tell the
+user what is stuck.`
+      : reason === "no-progress"
+        ? `
 
 # The work is not getting anywhere
 
 Every recent attempt came back failing the same way. Call final_reply now, say
 plainly what could not be done, and give the user the rest.`
-      : `
+        : `
 
 # Your budget is spent
 
@@ -816,6 +824,38 @@ describe("what an attempt is handed", () => {
 
     expect(model.asked()[0].system).toContain("not getting anywhere");
     expect(model.asked()[0].system).not.toContain("Your budget is spent");
+  });
+
+  it("makes a round answer once its calls keep running past their limit", async () => {
+    const stuck = tool({
+      description: "reach a backend that has stopped answering",
+      inputSchema: z.object({}),
+      // What `boundToolCalls` rejects with at the limit, thrown directly: the
+      // limit itself is far too long for a spec to wait out.
+      execute: async (): Promise<string> => {
+        throw new ToolCallAbandonedError("stuck did not finish in time");
+      }
+    });
+    const model = inspectingModel(
+      { toolCall: { toolName: "stuck" } },
+      { toolCall: { toolName: "stuck" } },
+      finalReply("the workspace is not answering")
+    );
+
+    const outcome = await runTurn(
+      args({ tools: { ...tools, stuck }, models: pair(model.model) })
+    );
+
+    expect(outcome).toEqual({
+      status: "replied",
+      reply: "the workspace is not answering"
+    });
+    const asked = model.asked();
+    // One abandoned call leaves the round its tools.
+    expect(asked[1].tools).toContain("stuck");
+    // The second takes them away, and the round is told why.
+    expect(asked[2].tools).toEqual([FINAL_REPLY_TOOL_NAME]);
+    expect(asked[2].system).toContain("Your tools are not answering");
   });
 
   it("treats a final round that names no reason as a spent budget", async () => {

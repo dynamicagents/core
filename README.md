@@ -219,17 +219,22 @@ the one that applies:
 
 ```ts
 finalRoundNote: (limits, reason) =>
-  reason === "no-progress"
-    ? "\n\n# This keeps coming back the same way\n…"
-    : `\n\n# Your budget is spent\n…${limits.maxTurns} turns…`;
+  reason === "unresponsive-tools"
+    ? "\n\n# Your tools are not answering\n…"
+    : reason === "no-progress"
+      ? "\n\n# This keeps coming back the same way\n…"
+      : `\n\n# Your budget is spent\n…${limits.maxTurns} turns…`;
 ```
 
 `budget` is the Task's turns or wall clock running out. `no-progress` is several
 rounds in a row whose every subtask failed with the identical message: the budget
 is intact, and a round told otherwise passes that on to the user as the
-explanation for what went wrong. An implementation that ignores the argument
-still satisfies the interface and gets one note for both — accurate about the
-constraint, wrong about the cause.
+explanation for what went wrong. `unresponsive-tools` is a round whose tool calls
+kept running past their time limit: whatever they reach has stopped answering,
+so the round is made to answer from the next step rather than spend the limit on
+each call after it. An implementation that ignores the argument still satisfies
+the interface and gets one note for all of them — accurate about the constraint,
+wrong about the cause.
 
 #### What a round remembers
 

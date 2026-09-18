@@ -516,8 +516,13 @@ export abstract class RecipeSubagentBase<
    * run their `abort` hooks (e.g. release an external resource recorded in the
    * workspace session file). Reconstructible from the workspace, so it is safe on a fresh
    * isolate. The parent supplies the validated tool families it resolved.
+   *
+   * Called for every failed or canceled branch, with no families too. A subclass
+   * that overrides `executeChunk` holds its external state outside any family,
+   * and overrides this to release it.
    */
   async abortExecution(toolFamilies: string[]): Promise<void> {
+    if (toolFamilies.length === 0) return;
     this.ensureTables();
     const rt = this.subagentRuntime();
     const ctx = {

@@ -14,8 +14,13 @@ import type { AgentLimits } from "../config.js";
  *   the identical way. The budget is intact and the work is going nowhere, so a
  *   round told its budget was spent would be told something false, and would tell
  *   the user so in turn.
+ * - `unresponsive-tools` — calls in this round ran past their time limit and were
+ *   abandoned. Whatever they reach is not answering, and each further call would
+ *   cost the full limit while the user hears nothing. Unlike the other two, this
+ *   is imposed partway through an open round, from the step after the call that
+ *   tipped it.
  */
-export type FinalRoundReason = "budget" | "no-progress";
+export type FinalRoundReason = "budget" | "no-progress" | "unresponsive-tools";
 
 /**
  * Everything about a round loop that is **yours**, not core's.

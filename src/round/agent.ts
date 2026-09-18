@@ -768,6 +768,12 @@ export abstract class RoundAgentBase<
     if (!this.db.subtasks.fail(id, error)) return;
     const name = subagentName(subtask.taskId, id);
     await this.releaseRuntimeQuietly(subtask);
+    // Stopped before it is dropped, as a cancel stops it: a branch that failed
+    // at its step can still have work running under it — a claude-code session
+    // whose drain lost its subscriber goes on editing the checkout — and a later
+    // round that re-delegates the work would run a second copy beside it. Only
+    // a `running` row has a child to stop; `get` would create one for a pending row.
+    if (subtask.status === "running") await this.abortChildRunQuietly(name);
     await this.abortChildQuietly(name, this.toolFamiliesForType(subtask.type));
     await this.deleteChildQuietly(name);
   }
@@ -1123,6 +1129,19 @@ export abstract class RoundAgentBase<
     }
   }
 
+  /** Best-effort `abortRun` on a child, for a branch that ended without it. */
+  private async abortChildRunQuietly(name: string): Promise<void> {
+    try {
+      const child = await this.dynamicAgents.get(this.subagentClass(), name);
+      await child.abortRun();
+    } catch (err) {
+      console.warn("[agent] subagent abortRun failed", {
+        name,
+        err: String(err)
+      });
+    }
+  }
+
   /** The validated tool families for a Subtask type, or none if unusable. */
   private toolFamiliesForType(type: string): string[] {
     try {
@@ -1139,12 +1158,15 @@ export abstract class RoundAgentBase<
    * Best-effort release of a child's external state on cancellation (e.g. close a
    * leased resource recorded in its workspace). Swallows failures — an unreleased
    * resource is a documented residual, not a reason to fail cancellation.
+   *
+   * Delivered with no tool families too: a subagent that overrides
+   * `executeChunk` holds its external state outside any family, and its
+   * `abortExecution` override is the only place that state is released.
    */
   private async abortChildQuietly(
     name: string,
     toolFamilies: string[]
   ): Promise<void> {
-    if (toolFamilies.length === 0) return;
     try {
       const child = await this.dynamicAgents.get(this.subagentClass(), name);
       await child.abortExecution(toolFamilies);

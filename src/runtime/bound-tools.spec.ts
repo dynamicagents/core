@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { generateText, isStepCount, tool, type ToolSet } from "ai";
 import { z } from "zod";
 import { mockModel } from "../testing/mock-model.js";
-import { boundToolCalls } from "./bound-tools.js";
+import { boundToolCalls, ToolCallAbandonedError } from "./bound-tools.js";
 
 /**
  * The wrapper core puts around every plugin tool. What these pin is the split
@@ -110,6 +110,8 @@ describe("boundToolCalls", () => {
       await expect(pending).rejects.toThrow(
         /^deaf did not finish within its time limit\b.*may still be running/
       );
+      // Its own class, which is what the round counts — see `MAX_ABANDONED_CALLS`.
+      await expect(pending).rejects.toBeInstanceOf(ToolCallAbandonedError);
       // The only trace a tool that ignores its signal leaves.
       expect(warn).toHaveBeenCalledWith(
         "[tools] abandoned a call that did not stop at its signal",
