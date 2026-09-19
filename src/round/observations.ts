@@ -61,11 +61,10 @@ const MAX_OBSERVATION_OUTPUT_CHARS = 4_000;
 /**
  * The most one round's exchanges may carry in total.
  *
- * The multiplication is the point, and it is the same one
- * {@link file://../subtasks/delegate.ts MAX_OUTPUT_CHARS} was written for: a
- * round's messages hold every carried round, so this is paid once per round in
- * the window and not once per task. Overflow drops the **oldest** pairs, because
- * a round's later calls are the ones its ending was reasoning from.
+ * The multiplication is the point: a round's messages hold every carried
+ * round, so this is paid once per round in the window and not once per task.
+ * Overflow drops the **oldest** pairs, because a round's later calls are the
+ * ones its ending was reasoning from.
  */
 const MAX_OBSERVATION_CHARS = 12_000;
 
