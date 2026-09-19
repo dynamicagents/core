@@ -102,9 +102,11 @@ export function delegateToolCallId(taskId: string, round: number): string {
  *
  * What replaces the old rule is a constraint on the writer rather than a filter
  * here: **an `error` is model-visible, so a facet must write it in words that
- * are safe for one to read and act on.** Bounded by {@link MAX_OUTPUT_CHARS} on
- * the way through, because a facet that ignores that is a context-window
- * problem rather than a disclosure one.
+ * are safe for one to read and act on.**
+ *
+ * **Neither half is clipped.** A report cut short reads as complete, and its
+ * tail is where it says what was left undone. A facet that can produce a
+ * runaway `error` bounds it where it writes it.
  *
  * Still one field, not two. The model's question is "what came back from this
  * branch", and `status` already says which kind of answer it is getting.
@@ -118,22 +120,6 @@ export type DelegateSubtaskOutcome = {
   status: SubtaskStatus;
   output: string | null;
 };
-
-/**
- * Ceiling on one branch's `output`, applied to both halves of it.
- *
- * A round's history holds every branch of every earlier round, so this is
- * multiplied by the whole delegation history rather than paid once. Generous
- * enough for a report a subagent meant to be read, far short of a build log a
- * failing one dumped into `error`.
- */
-const MAX_OUTPUT_CHARS = 8_000;
-
-function bounded(text: string): string {
-  if (text.length <= MAX_OUTPUT_CHARS) return text;
-  const suffix = "\n…[truncated]";
-  return `${text.slice(0, MAX_OUTPUT_CHARS - suffix.length)}${suffix}`;
-}
 
 /**
  * Rebuild one round's call input from its durable rows, in stable ordinal order.
@@ -182,11 +168,7 @@ export function delegateCallOutput(
     status: branch.status,
     output:
       branch.status === "completed"
-        ? bounded(
-            (branch.resultParts ?? []).map((part) => part.text).join("\n")
-          )
-        : branch.error
-          ? bounded(branch.error)
-          : null
+        ? (branch.resultParts ?? []).map((part) => part.text).join("\n")
+        : branch.error || null
   }));
 }

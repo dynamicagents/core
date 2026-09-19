@@ -58,17 +58,18 @@ describe("delegateCallOutput", () => {
     expect(outcome?.output).toBeNull();
   });
 
-  /**
-   * The bound applies to the failure path too, and that is the point of testing
-   * it here: a *failing* branch is the likelier one to have dumped a build log
-   * into `error`, and every earlier round's branches are replayed into every
-   * later round's history.
-   */
-  it("bounds a runaway error rather than replaying it every round", () => {
-    const [outcome] = delegateCallOutput([
-      branch({ status: "failed", resultParts: null, error: "x".repeat(20_000) })
+  /** A clipped report reads as complete — see `DelegateSubtaskOutcome`. */
+  it("carries a long report and a long error whole", () => {
+    const report = "x".repeat(20_000);
+    const error = "y".repeat(20_000);
+    const [done, failed] = delegateCallOutput([
+      branch({
+        status: "completed",
+        resultParts: [{ kind: "text", text: report }]
+      }),
+      branch({ status: "failed", resultParts: null, error })
     ]);
-    expect(outcome?.output?.length).toBeLessThan(9_000);
-    expect(outcome?.output).toContain("truncated");
+    expect(done?.output).toBe(report);
+    expect(failed?.output).toBe(error);
   });
 });
