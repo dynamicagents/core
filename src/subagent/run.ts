@@ -9,10 +9,7 @@ import {
 } from "../agent/inference.js";
 import { withFallback } from "../agent/fallback.js";
 import type { ModelPair } from "../agent/model.js";
-import type {
-  ProgressEvent,
-  RecipeChunkResult
-} from "../subtasks/types.js";
+import type { ProgressEvent, RecipeChunkResult } from "../subtasks/types.js";
 import type { RecipeLimits } from "../contract/recipe.js";
 
 /**

@@ -154,6 +154,10 @@ export interface CoreConfig {
    * The baseline every subagent branch runs under. A recipe may override either
    * field — to any positive integer, larger included — and inherits the baseline
    * for whatever it does not validly declare. A default, not a ceiling.
+   *
+   * `resolveConfig` bounds `maxTurns` and `maxWallMs` here, and passes the
+   * deferral fields through unvalidated: those are checked on
+   * {@link mainAgentLimits} only, the one limit set a deferral is read from.
    */
   subagentLimits: AgentLimits;
   /**
