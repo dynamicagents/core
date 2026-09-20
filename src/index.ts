@@ -64,6 +64,7 @@ export {
   type AgentLimits,
   type CoreConfig,
   type CoreConfigOverrides,
+  type MainAgentLimits,
   type ModelConfig,
   type SessionConfig
 } from "./config.js";

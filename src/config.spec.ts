@@ -89,4 +89,38 @@ describe("the deferral bounds", () => {
       resolveConfig({ ...base, roundObservationWindow: 0 })
     ).not.toThrow();
   });
+
+  it("does not let a subagent budget declare waiting at all", () => {
+    // The boundary this file is written against: a deferral on `subagentLimits`
+    // is not a value `resolveConfig` refuses, it is one that cannot be written.
+    // Nothing reads it there — a subagent ends in a report rather than a round —
+    // so the only honest failure is the compiler's.
+    //
+    // `@ts-expect-error` asserts in both directions: if the field were ever
+    // admitted again, the unused directive is itself the error. A directive
+    // covers a *line*, not a field, so one object naming both deferral fields
+    // would stay satisfied by whichever was still refused — hence a case per
+    // field, here and below.
+    resolveConfig({
+      ...base,
+      // @ts-expect-error - maxDeferrals is on MainAgentLimits, not AgentLimits
+      subagentLimits: { maxTurns: 20, maxWallMs: 60_000, maxDeferrals: 30 }
+    });
+  });
+
+  it("does not let a subagent budget declare a duration of waiting either", () => {
+    // The other half of the pair above, which says why each field needs its own
+    // case. The directive sits on the offending property rather than on the
+    // object, because that is where the excess-property error is reported — the
+    // case above reads the same way, with the whole literal on one line.
+    resolveConfig({
+      ...base,
+      subagentLimits: {
+        maxTurns: 20,
+        maxWallMs: 60_000,
+        // @ts-expect-error - maxDeferredMs is on MainAgentLimits, not AgentLimits
+        maxDeferredMs: 900_000
+      }
+    });
+  });
 });

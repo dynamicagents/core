@@ -85,6 +85,25 @@ export interface AgentLimits {
    * in {@link file://./round/workflow.ts runHandleTask}.
    */
   maxWallMs: number;
+}
+
+/**
+ * The main agent's budget: a subagent's, plus the allowance for waiting.
+ *
+ * Waiting is a main-agent-only capability, and this type is where that is
+ * enforced rather than documented. A deferral is spent by the round loop and
+ * offered by the turn instructions, both of which run only for the main agent; a
+ * subagent's runner ends in a report and never opens a round, so it has nothing
+ * to read these with. `resolveLimits` confirms it from the other side — it
+ * rebuilds a recipe's budget from `maxTurns` and `maxWallMs` alone, so a
+ * `maxDeferrals` or `maxDeferredMs` written there is dropped rather than
+ * carried.
+ *
+ * So the deferral fields live here and not on {@link AgentLimits}: a subagent
+ * budget that names a `maxDeferrals` nothing could act on does not typecheck,
+ * which is the one form of this mistake that cannot be made quietly.
+ */
+export interface MainAgentLimits extends AgentLimits {
   /**
    * How many times one Task may stop and come back to itself later, and how much
    * of its own time it may spend doing so. Both default to **0** — a round loop
@@ -93,10 +112,10 @@ export interface AgentLimits {
    * waiting on.
    *
    * These bound waiting *instead of* the wall clock rather than alongside it. A
-   * deferral holds no concurrency and is not charged to {@link maxWallMs}, for
-   * the reason a person's answer is not — so with nothing here a Task could wait
-   * out its whole existence without ever spending the budget that is supposed to
-   * stop it.
+   * deferral holds no concurrency and is not charged to
+   * {@link AgentLimits.maxWallMs}, for the reason a person's answer is not — so
+   * with nothing here a Task could wait out its whole existence without ever
+   * spending the budget that is supposed to stop it.
    *
    * Set both or neither: whichever is reached first ends the waiting, and one of
    * them left at 0 turns the tool off however generous the other is. An agent
@@ -149,15 +168,11 @@ export interface CoreConfig {
   agentName?: string;
   model: ModelConfig;
   /** What bounds the MAIN agent across every round of one task. */
-  mainAgentLimits: AgentLimits;
+  mainAgentLimits: MainAgentLimits;
   /**
    * The baseline every subagent branch runs under. A recipe may override either
    * field — to any positive integer, larger included — and inherits the baseline
    * for whatever it does not validly declare. A default, not a ceiling.
-   *
-   * `resolveConfig` bounds `maxTurns` and `maxWallMs` here, and passes the
-   * deferral fields through unvalidated: those are checked on
-   * {@link mainAgentLimits} only, the one limit set a deferral is read from.
    */
   subagentLimits: AgentLimits;
   /**
@@ -363,12 +378,11 @@ export function resolveConfig(overrides: CoreConfigOverrides): CoreConfig {
     );
   }
 
-  // The deferral bounds, on `mainAgentLimits` only: that is the one limit set a
-  // deferral is ever read from ({@link file://./round/workflow.ts} spends the
+  // The deferral bounds. Only `mainAgentLimits` can carry them — see
+  // {@link MainAgentLimits} for why a subagent's cannot — so this is the whole
+  // population to check ({@link file://./round/workflow.ts} spends the
   // allowance, {@link file://./round/turn.ts buildTurnInstructions} decides
-  // whether `check_back` exists). A subagent's copy cannot reach a runner at all
-  // — `resolveLimits` merges a recipe's budget field by field and carries only
-  // `maxTurns` and `maxWallMs` — so validating it polices a value nothing reads.
+  // whether `check_back` exists).
   //
   // Absent is the default and means the feature is off, so these are validated
   // only when named — but a named one is held to what it says it is:
