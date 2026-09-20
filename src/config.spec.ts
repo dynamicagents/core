@@ -89,4 +89,19 @@ describe("the deferral bounds", () => {
       resolveConfig({ ...base, roundObservationWindow: 0 })
     ).not.toThrow();
   });
+
+  it("does not let a subagent budget declare waiting at all", () => {
+    // The boundary this file is written against: a deferral on `subagentLimits`
+    // is not a value `resolveConfig` refuses, it is one that cannot be written.
+    // Nothing reads it there — a subagent ends in a report rather than a round —
+    // so the only honest failure is the compiler's.
+    //
+    // `@ts-expect-error` asserts in both directions: if the field were ever
+    // admitted again, the unused directive is itself the error.
+    resolveConfig({
+      ...base,
+      // @ts-expect-error - maxDeferrals is on MainAgentLimits, not AgentLimits
+      subagentLimits: { maxTurns: 20, maxWallMs: 60_000, maxDeferrals: 30 }
+    });
+  });
 });

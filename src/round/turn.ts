@@ -19,7 +19,7 @@ import {
 import type { SessionMessage } from "agents/sessions";
 import { MAX_TOOL_CALL_MS, TOOL_CALL_GRACE_MS } from "../platform.js";
 import { ToolCallAbandonedError } from "../runtime/bound-tools.js";
-import type { AgentLimits } from "../config.js";
+import type { MainAgentLimits } from "../config.js";
 import type { SubtaskTypeRegistry } from "../subtasks/subtask-types.js";
 import { appendOnce, type SessionLike } from "../agent/session.js";
 import {
@@ -165,7 +165,7 @@ export function buildTurnInstructions(
   policy: RoundPolicy,
   types: SubtaskTypeRegistry,
   maxSubtasks: number,
-  limits: AgentLimits
+  limits: MainAgentLimits
 ): TurnInstructions {
   const guidance = types.renderDelegationGuidance({
     delegateTool: DELEGATE_TOOL_NAME,
@@ -181,7 +181,7 @@ export function buildTurnInstructions(
     (limits.maxDeferrals ?? 0) > 0 && (limits.maxDeferredMs ?? 0) > 0;
   if (deferrable && !policy.deferralsSpentNote) {
     throw new Error(
-      "RoundPolicy.deferralsSpentNote is required when AgentLimits.maxDeferrals is set: " +
+      "RoundPolicy.deferralsSpentNote is required when MainAgentLimits.maxDeferrals is set: " +
         "a round that has spent its deferrals is told so in the agent's own words, and core has none to lend."
     );
   }

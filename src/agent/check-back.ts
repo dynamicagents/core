@@ -15,7 +15,7 @@ import { nonBlank } from "../subtasks/decomposition.js";
  * person and is answered when they get to it; this needs only time, and nobody is
  * told anything. That is also what makes it cheap enough to offer: waiting holds
  * no concurrency and is not charged to the Task's wall clock, so what bounds it is
- * {@link file://../config.ts AgentLimits.maxDeferrals} and `maxDeferredMs` rather
+ * {@link file://../config.ts MainAgentLimits.maxDeferrals} and `maxDeferredMs` rather
  * than the budget the work itself spends.
  *
  * Offered on an `open` round whose deferral budget is intact — withheld from a

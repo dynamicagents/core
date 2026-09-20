@@ -118,7 +118,8 @@ export interface RoundPolicy {
    * other ending is still available, and only `check_back` is gone.
    *
    * Required of an agent whose deferrals are **enabled** — both
-   * {@link AgentLimits.maxDeferrals} and `maxDeferredMs` positive, since either
+   * {@link file://../config.ts MainAgentLimits.maxDeferrals} and `maxDeferredMs`
+   * positive, since either
    * one at zero is a tool that could never be used — and unused by every other
    * agent; `buildTurnInstructions` throws rather than invent it,
    * for the reason nothing else here has a default. Write it as a fact about
