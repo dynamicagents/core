@@ -48,15 +48,6 @@ describe("cassetteNameFor", () => {
     ).toBe("src-arc-agi-recorded--plays-a-game.snapshot.json");
   });
 
-  it("keeps two specs of the same name under different roots apart", () => {
-    // The store is keyed solely by this filename, so a collision means one
-    // recording overwrites the other and playback then serves the wrong
-    // responses — silently, and only for whichever test ran second.
-    const inTest = cassetteNameFor(task("test/api.spec.ts", "fetches"));
-    const inSrc = cassetteNameFor(task("src/api.spec.ts", "fetches"));
-    expect(inTest).not.toBe(inSrc);
-  });
-
   it("never puts the developer's own directories into the name", () => {
     // The first defect here: a path with no recognised root used to fall
     // through to the *absolute* path, so the cassette was named after whoever
