@@ -35,16 +35,16 @@ import { collectToolFamilies } from "./tool-families.js";
 export { buildRecipeTools, collectToolFamilies } from "./tool-families.js";
 
 /**
- * The agent runtime: everything that used to be a module-level constant,
+ * The agent runtime: everything that would otherwise be a module-level constant,
  * resolved once per Durable Object instance from the host's config and its
  * installed plugins.
  *
- * This is the whole point of the package split. In the predecessor repo the
- * subtask registry was imported at module scope and every derived value — the
- * type map, the delegate tool's enum and description, the round contract, the
- * known-tool-family allowlist — was computed at *import time*. That made the
- * registry unoverridable, pulled every domain's module into every bundle, and
- * could not read `env`, which does not exist at module scope on Workers.
+ * This is the whole point of the package split. Importing the subtask registry
+ * at module scope computes every derived value — the type map, the delegate
+ * tool's enum and description, the round contract, the known-tool-family
+ * allowlist — at *import time*, which makes the registry unoverridable, pulls
+ * every domain's module into every bundle, and cannot read `env`, which does not
+ * exist at module scope on Workers.
  *
  * Build it in `onStart`:
  *

@@ -11,18 +11,18 @@ import type { TurnWake } from "../a2a/hitl.js";
 /**
  * One agent's wiring, declared once.
  *
- * ## What this replaces
+ * ## Why one declaration
  *
- * Mounting an agent used to mean writing the same four things by hand and keeping
- * them in agreement: a `getAgent(identity)` that guards `identity.key` and reads a
+ * Mounting an agent by hand means writing the same four things and keeping them
+ * in agreement: a `getAgent(identity)` that guards `identity.key` and reads a
  * Durable Object binding, a `startTurn` that derives an idempotent workflow id and
  * swallows the already-exists race, an entry in the `tenants` map, and — in the
  * agent's own Workflow entrypoint — a second reference to the same DO binding.
  *
- * Four copies of one fact, and only the first two were even adjacent. The wiring
- * also type-checked when it was **wrong**: naming a sibling's workflow binding on
- * a tenant compiles perfectly and fails at runtime, after auth, after the turn was
- * accepted, as a task that simply never calls back.
+ * Four copies of one fact, only two of them adjacent, and the wiring type-checks
+ * when it is **wrong**: naming a sibling's workflow binding on a tenant compiles
+ * perfectly and fails at runtime, after auth, after the turn was accepted, as a
+ * task that simply never calls back.
  *
  * ```ts
  * export const reactive = defineAgent({

@@ -18,9 +18,9 @@ export type DB = DrizzleSqliteDODatabase<typeof schema>;
  * What a plugin cannot share is the **migrator**. `drizzle-orm/durable-sqlite/
  * migrator` keeps one flat integer journal and one global
  * `__drizzle_migrations` table, and two independently-versioned npm packages
- * cannot share that index space — not hypothetically: the two predecessor
- * agents, both consuming the same `notify_tasks` module, had already forked the
- * journal at index 1 (`0001_unusual_nova` vs `0001_great_goliath`). Worse,
+ * cannot share that index space — not hypothetically: two packages consuming one
+ * shared table module fork the journal at index 1 (`0001_unusual_nova` vs
+ * `0001_great_goliath`). Worse,
  * `drizzle-kit generate` diffs against a snapshot in one output directory, so a
  * plugin shipping from its own repo cannot produce a correct diff at all.
  *

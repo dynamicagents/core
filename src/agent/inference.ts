@@ -110,11 +110,11 @@ export function isTransientAiError(err: unknown): boolean {
  * - `unknown-credential` — a `401`/`403` matching none of the shapes. Says so,
  *   rather than picking one and sending an operator to rotate a working secret.
  *
- * A fourth, `proxy-credential`, was removed in 0.8.0 along with
- * {@link file://./errors.ts CredentialRejectedBy}'s `"proxy"` arm. Adding a kind
- * back is a breaking change for every consumer, because the `Record` they map it
- * with is total — which is the property that makes a new kind impossible to
- * ignore, and the reason to remove one rather than leave it unreachable.
+ * Adding a kind here is a breaking change for every consumer, because the
+ * `Record` they map it with is total — which is the property that makes a new
+ * kind impossible to ignore, and the reason to remove an unused one rather than
+ * leave it unreachable. The arms track
+ * {@link file://./errors.ts CredentialRejectedBy}'s.
  */
 export type NonRecoverableKind =
   "credential" | "gateway-credential" | "unknown-credential";

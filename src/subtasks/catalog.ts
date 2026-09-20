@@ -20,19 +20,15 @@ export interface ReferenceCatalogEntry extends SubtaskReference {
  * Compaction summaries are excluded via the SDK's `isCompactionMessage` (their
  * `compaction_` id prefix) — they are generated text, never original conversation
  * evidence. Whitespace-only turns are excluded because there is nothing to
- * reference.
+ * reference, and since the model only ever selects from the catalog the renderer
+ * returns, skipping them cannot misalign indices. System prompts, context blocks,
+ * and anything a tool injected never appear as plain history messages, so they
+ * are excluded structurally.
  *
  * This is the single eligibility rule, and it has exactly one caller:
  * {@link file://../round/turn.ts renderTurnMessages} numbers the messages it accepts
  * *and* marks those same messages with their `[ref N]` index, in one pass. One
  * predicate, one walk — the marked messages and the catalog indices cannot drift.
- *
- * What that leaves eligible: verbatim `user` and `assistant` turns with content.
- * System prompts, context blocks, and anything a tool injected never appear as
- * plain history messages, so they are excluded structurally. Whitespace-only
- * turns are skipped — there is nothing to reference, and since the model only
- * ever selects from the catalog the renderer returns, skipping them cannot
- * misalign indices.
  *
  * The inbound user turn is appended to the Session before the round infers, so
  * one catalog covers both the current task input and past turns. The selected

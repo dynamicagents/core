@@ -35,20 +35,17 @@ import {
 /**
  * The wire contract — claim names, algorithm, identity shape — comes from
  * `@dynamicagents/g2a-protocol`, which the gatekeeper also depends on directly.
+ * The gatekeeper is not an agent and must not import this package, so declaring
+ * the contract on each side is the alternative — and it drifts silently: the two
+ * land on different claim namespaces, verification reads an empty tenant, and
+ * every request 401s with both builds green.
  *
- * It used to be declared here and again in the gatekeeper, each with a comment
- * saying it must match the other, because the gatekeeper is not an agent and must
- * not import this package. That failed exactly as it always does: the two sides
- * drifted onto different claim namespaces, verification read an empty tenant, and
- * every request 401'd with both builds green.
+ * A namespace change is survivable only because both sides read it from one
+ * package: bump the protocol dependency and ship core and `slack-gatekeeper` in
+ * the same deploy.
  *
- * The namespace moved again in g2a-protocol 0.3.0, to `dynamicagents.dev` — the
- * same class of change, made deliberately this time. It is survivable only
- * because both sides now read it from one package: bump the protocol dependency
- * and ship core and `slack-gatekeeper` in the same deploy.
- *
- * Re-exported below so nothing downstream of `@dynamicagents/core/a2a` has to know
- * the split happened — an agent still imports these from here.
+ * Re-exported below so nothing downstream of `@dynamicagents/core/a2a` has to
+ * know about the split — an agent imports these from here.
  */
 export {
   IDENTITY_CLAIM,

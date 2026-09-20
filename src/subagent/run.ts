@@ -1,27 +1,19 @@
 import type { LanguageModel, ModelMessage, StepResult, ToolSet } from "ai";
 import { generateText, isStepCount } from "ai";
-import {
-  CHUNK_SOFT_MS,
-  MAX_TOOL_CALL_MS,
-  TOOL_CALL_GRACE_MS
-} from "../platform.js";
+import { MAX_TOOL_CALL_MS, TOOL_CALL_GRACE_MS } from "../platform.js";
 import { stepAllowance } from "../agent/budget.js";
 import {
   isTransientAiError,
   nonRecoverableKind,
   type NonRecoverableKind
 } from "../agent/inference.js";
-import { validateRecipe, type RecipePolicy } from "../contract/validation.js";
 import { withFallback } from "../agent/fallback.js";
 import type { ModelPair } from "../agent/model.js";
 import type {
   ProgressEvent,
-  RecipeChunkResult,
-  RecipeExecutionRequest,
-  RecipeExecutionResult
+  RecipeChunkResult
 } from "../subtasks/types.js";
 import type { RecipeLimits } from "../contract/recipe.js";
-import { renderSubagentPrompt } from "./prompt.js";
 
 /**
  * The resumable execution runner — ONE loop for every Recipe, from a single-shot
@@ -622,73 +614,4 @@ async function summarizeBudget(
         "Reached the execution budget.",
         deps.models.fallbackId()
       );
-}
-
-/** Everything a whole-run (non-chunked) execution needs — for tests and callers
- * that want a single terminal result rather than driving chunks themselves. */
-export interface RecipeRunDeps {
-  models: ModelPair;
-  tools: ToolSet;
-  now?: () => number;
-  /** The capability boundary a recipe is re-validated against inside the child. */
-  policy: RecipePolicy;
-  /** `CoreConfig.toolOutputWindow`. */
-  toolOutputWindow: number;
-  /** `CoreConfig.model.maxOutputTokens`. */
-  maxOutputTokens: number;
-}
-
-/**
- * Run one recipe execution to a terminal result, driving {@link runResumableChunk}
- * chunk by chunk in memory. A run that fits its budget finishes in one chunk;
- * otherwise it loops until the budget yields a summary. Used by tests and any
- * caller wanting the whole outcome; the facet drives chunks durably instead, for
- * crash-safety across the Workflow.
- *
- * Throws only on a transient platform fault (as {@link runResumableChunk} does).
- */
-export async function runRecipeExecution(
-  request: RecipeExecutionRequest,
-  deps: RecipeRunDeps
-): Promise<RecipeExecutionResult> {
-  if (request.prompt.trim() === "") {
-    return { status: "failed", error: "empty subtask prompt", modelId: null };
-  }
-
-  const recipe = validateRecipe(request.recipe, deps.policy);
-  const { system, prompt } = renderSubagentPrompt({ ...request, recipe });
-  const now = deps.now ?? Date.now;
-
-  let state: ChunkRunState | null = null;
-  // A chunk always advances ≥1 turn unless it completes, so `maxTurns` chunks is
-  // the ceiling and this can never spin. Turn-derived on purpose: `maxWallMs` and
-  // `chunkSoftMs` only ever end a run *sooner*, so neither can loosen the bound.
-  const maxChunks = recipe.limits.maxTurns + 2;
-
-  for (let chunk = 0; chunk < maxChunks; chunk++) {
-    const chunkDeps: ChunkRunDeps = {
-      system,
-      seedPrompt: prompt,
-      models: deps.models,
-      tools: deps.tools,
-      limits: recipe.limits,
-      chunkSoftMs: CHUNK_SOFT_MS,
-      historyWindow: recipe.historyWindow,
-      toolOutputWindow: deps.toolOutputWindow,
-      reportMetrics: recipe.reportMetrics,
-      maxOutputTokens: deps.maxOutputTokens,
-      now,
-      progress: [],
-      checkpoint: () => {}
-    };
-    const { outcome, state: next } = await runResumableChunk(state, chunkDeps);
-    if (outcome.done) return outcome.result;
-    state = next;
-  }
-
-  return {
-    status: "failed",
-    error: `recipe did not terminate within ${maxChunks} chunks`,
-    modelId: null
-  };
 }

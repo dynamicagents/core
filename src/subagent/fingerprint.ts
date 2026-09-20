@@ -17,19 +17,20 @@ export const FINGERPRINT_VERSION = 1;
  * references from ordinal-ordered rows, so a retry of the same execution is
  * byte-identical.
  *
- * **Limits are canonicalized as *declared*, not as merged.** The predecessor
- * merged them against the house baseline first, on the reasoning that `{}` and
- * an explicit restatement of the baseline are the same execution and should hash
- * alike. That reasoning is sound but its cost is not payable once the baseline
- * lives in a versioned package: a patch release that nudges a default would
- * change every fingerprint at once, and every in-flight subagent run would miss
- * its checkpoint and restart from turn zero having already spent its budget.
+ * **Limits are canonicalized as *declared*, not as merged.** Merging them
+ * against the house baseline first is the tempting alternative — `{}` and an
+ * explicit restatement of the baseline are the same execution and should hash
+ * alike — but its cost is not payable once the baseline lives in a versioned
+ * package: a patch release that nudges a default would change every fingerprint
+ * at once, and every in-flight subagent run would miss its checkpoint and
+ * restart from turn zero having already spent its budget.
  *
  * Hashing the sparse declaration inverts that trade. A recipe that spells out
  * the baseline explicitly gets a different key from one that omits it — worth
  * exactly one redundant execution, once, for a recipe nobody writes — and the
  * host's baseline becomes free to move. {@link FINGERPRINT_VERSION} is the
- * deliberate lever for the invalidation the merge used to cause accidentally.
+ * deliberate lever for that invalidation, rather than a merge causing it by
+ * accident.
  */
 export function canonicalRequest(request: RecipeExecutionRequest): string {
   const canonical = {

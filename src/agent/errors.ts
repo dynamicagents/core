@@ -30,20 +30,18 @@
  * (`cf-aig-authorization`) and the model provider itself (`Authorization`). They
  * fail with the same status code and have completely different remedies, so a
  * rejection that does not say which one it was sends an operator to rotate the
- * wrong secret — which is exactly what happened before this existed.
+ * wrong secret.
  *
  * `"unknown"` is a real answer and the default. Guessing `"provider"` for an
  * unrecognised body is how the misdiagnosis happens; saying "one of these, here
  * is how to check each" is worse copy and better information.
  *
- * A third arm, `"proxy"`, named an optional intermediary between the two — the
- * shape where a deployment terminates the AI Gateway request at its own Worker to
- * attach a credential. It was removed in 0.8.0 with the deployment that had one.
- * If you build that topology again, the honest classification for its refusals
- * is `"unknown"` until you widen this union, because the remedy genuinely
- * differs: an intermediary minting its caller credential per request fails for
- * reasons upstream of any stored secret, so the fix is to look rather than to
- * rotate.
+ * A deployment that terminates the AI Gateway request at its own Worker to
+ * attach a credential puts a third authority on the path, and this union does
+ * not name it. The honest classification for its refusals is `"unknown"` until
+ * you widen the union, because the remedy genuinely differs: an intermediary
+ * minting its caller credential per request fails for reasons upstream of any
+ * stored secret, so the fix is to look rather than to rotate.
  */
 export type CredentialRejectedBy = "provider" | "gateway" | "unknown";
 

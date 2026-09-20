@@ -37,19 +37,18 @@ import type { PluginHost } from "./plugin-host.js";
  *
  * ## Why this is core's and not the app's
  *
- * It was the app's, in the starter, and it was written twice — once for the
- * delegating round agent, once for the single-turn proactive one. The two copies
- * were identical for ~180 lines: the memoized runtime/db/models getters, the
- * `onStart` that must await migrations before the SDK dispatches any RPC, the
- * cron registration guard, the session with its displacement fan-out, the
- * `identityKey` timing, and the task RPC surface.
+ * Left to the app, this body gets written once per loop, and it is ~180 lines
+ * each time: the memoized runtime/db/models getters, the `onStart` that must
+ * await migrations before the SDK dispatches any RPC, the cron registration
+ * guard, the session with its displacement fan-out, the `identityKey` timing,
+ * and the task RPC surface.
  *
- * They did not stay identical. The second copy dropped `markWorking`'s
- * cancellation verdict on the floor and probed with a separate `getTask` before
- * writing a terminal Task — so a canceled task still burned a model call, and the
- * gatekeeper could still receive a `completed` callback for a task the caller had
- * abandoned. Both are lifecycle invariants, both were documented in the first
- * copy, and neither is visible to a type checker or a linter.
+ * Copies do not stay identical, and what they drop is invisible to a type
+ * checker and a linter: honour `markWorking`'s cancellation verdict rather than
+ * dropping it, and write a terminal Task through the guarded write rather than
+ * probing with a separate `getTask` first. Lose either and a canceled task still
+ * burns a model call, and the gatekeeper can still receive a `completed`
+ * callback for a task the caller had abandoned.
  *
  * That is the argument for this class. **None of it is policy.** How a turn is
  * shaped, what ends it, what the model is told — all of that stays with the

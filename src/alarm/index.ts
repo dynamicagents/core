@@ -4,11 +4,9 @@
  * A Durable Object has exactly **one** alarm, and an object that needs to wake
  * for more than one reason cannot simply call `setAlarm` from each of them: the
  * last writer silently wins, and whatever the loser was waiting on never
- * happens. This module is the fix, and it is now a thin assembly over the
- * `agents` SDK rather than an implementation of its own.
+ * happens. This module is the fix: a thin assembly over the `agents` SDK.
  *
- * **Scheduling does not require the `Agent` base class**, and that is the fact
- * worth checking before anyone hand-rolls a wake map here again. A `Lifecycle`
+ * **Scheduling does not require the `Agent` base class.** A `Lifecycle`
  * installs on a **plain** `DurableObject` and a `Scheduler` composes onto it, so
  * nothing in this module pulls `cf_agents_state`, an `MCPClientManager`, or the
  * prototype patching that comes with extending `Agent`.
@@ -18,16 +16,14 @@
  * it costs is named under "The sharp edges" below and in {@link
  * installScheduler} — this is **not** a drop-in for a keyed map.
  *
- * **Its own subpath, still deliberately, but the claim is weaker now.** This is
- * useful to a plain `DurableObject`, not only to a {@link DynamicAgent}. It no
- * longer imports *nothing*, though: it pulls `agents`. That is far smaller than
- * the whole `Agent` base class, and it is not zero.
+ * **Its own subpath, deliberately.** This is useful to a plain `DurableObject`,
+ * not only to a {@link DynamicAgent}. It does import `agents` — far smaller than
+ * the whole `Agent` base class, and not zero.
  *
  * **Experimental, and that reaches consumers.** Every type in `agents/schedules`
- * carries "The API surface may change before stabilizing", the same caveat this
- * package already accepts for `agents/sessions`. The difference is
- * that `/alarm` is a published subpath, so the churn is inherited rather than
- * absorbed. Keeping the assembly here is what makes that one file's problem.
+ * carries "The API surface may change before stabilizing". `/alarm` is a
+ * published subpath, so the churn is inherited rather than absorbed. Keeping the
+ * assembly here is what makes that one file's problem.
  *
  * ## The sharp edges
  *
@@ -56,7 +52,7 @@
  * Cross every deadline as a `Date`.
  *
  * This owns *when* an object wakes. What it owes on waking is the object's own,
- * and now says so by name: a callback is registered under a name in
+ * named: a callback is registered under a name in
  * {@link SchedulerOptions.callbacks}, and the payload is typed against it.
  */
 // The class from `cloudflare:workers`, not the ambient global of the same name:
@@ -183,13 +179,12 @@ export interface ScheduledHost<
 /**
  * One **movable** deadline over a scheduler that has none.
  *
- * The gap this fills is the "no move" edge above, and it is the single most
- * common thing a
- * consumer of a scheduler gets wrong. A schedule is a row with a minted id, so
- * "push this deadline back" is cancel-then-set — and a one-shot `set` is not
- * idempotent, so doing only the second half quietly accumulates rows. An idle
- * timer re-armed on every request is the case that bites: it is the busiest
- * path in the object, and every call leaves another row that will wake it.
+ * The gap this fills is the "no move" edge above. A schedule is a row with a
+ * minted id, so "push this deadline back" is cancel-then-set — and a one-shot
+ * `set` is not idempotent, so doing only the second half quietly accumulates
+ * rows. An idle timer re-armed on every request is the case that bites: it is
+ * the busiest path in the object, and every call leaves another row that will
+ * wake it.
  *
  * A deadline is named by the storage key that holds its current schedule id.
  * That key is the whole of its durable state, so two deadlines differ only by

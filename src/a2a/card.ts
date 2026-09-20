@@ -74,27 +74,21 @@ export interface BuildCardOptions {
   /**
    * Advertise the gatekeeper's Bearer-JWT scheme in `securitySchemes`.
    *
-   * **Defaults to `false` for historical reasons that no longer hold — see
-   * below before relying on the default.**
+   * **Defaults to `false`**, and the reason is deployment ordering rather than
+   * this package. `SecurityScheme` is the card's only protobuf *oneof*, and an
+   * SDK copy whose `SecurityScheme.fromJSON` reads only the wire spelling
+   * (`{ httpAuthSecurityScheme: … }`) and not the decoded `$case` form collapses
+   * `{ gatekeeperJwt: { httpAuthSecurityScheme: … } }` to `{ gatekeeperJwt: {} }`
+   * on the second pass — a different document from the one that was signed, so
+   * the signature fails. A verifier that canonicalizes through
+   * `toJSON(fromJSON(card))` decodes twice; slack-gatekeeper's
+   * `canonicalCardPayload` does exactly that.
    *
-   * `SecurityScheme` is the card's only protobuf *oneof*, and in earlier SDK
-   * releases `SecurityScheme.fromJSON` read only the wire spelling
-   * (`{ httpAuthSecurityScheme: … }`) and not the decoded `$case` form. A
-   * verifier that decodes the fetched card and then canonicalizes it through
-   * `toJSON(fromJSON(card))` decodes twice, and the second pass collapsed
-   * `{ gatekeeperJwt: { httpAuthSecurityScheme: … } }` to `{ gatekeeperJwt: {} }` — a
-   * different document from the one that was signed, so the signature failed.
-   * slack-gatekeeper's `canonicalCardPayload` double-decodes exactly this way.
-   *
-   * **The SDK this package peers no longer does that.** `card.spec.ts` asserts it
-   * directly: an advertised-schemes card is a fixed point under repeated
-   * decoding, and its signature verifies both as served and after a double
-   * decode. So the safety argument for the `false` default is gone, and the
-   * remaining reason to keep it is deployment ordering — a gatekeeper resolving
-   * an older SDK copy would still collapse the oneof. Flip the default once the
-   * gatekeepers in play are known to decode it as a fixed point; the specs will
-   * hold the line if
-   * a later SDK regresses.
+   * The SDK this package peers decodes an advertised-schemes card as a fixed
+   * point, and `card.spec.ts` asserts it directly — the signature verifies both
+   * as served and after a double decode. So flip this default once the
+   * gatekeepers in play are known to resolve an SDK that does the same; the
+   * specs hold the line if a later one regresses.
    *
    * `securityRequirements` is unaffected either way — it is a plain map, not a
    * oneof — so the card always declares that auth is *required*, it just may not
