@@ -10,7 +10,7 @@ import {
   type ModelConfig
 } from "../config.js";
 import type { A2ASecretsEnv, AiEnv } from "../env.js";
-import { AgentDB, stateOf } from "../db/index.js";
+import { AgentDB, isTerminal, stateOf } from "../db/index.js";
 import type { GatekeeperIdentity } from "../a2a/verify.js";
 import { callerContext } from "../a2a/caller.js";
 import type { PlainTask } from "../a2a/task.js";
@@ -493,7 +493,14 @@ export abstract class DynamicAgent<
     if (stateOf(task) === TaskState.TASK_STATE_CANCELED) {
       return (await this.markCanceled(task.id, task)) !== null;
     }
-    return this.db.tasks.save(task);
+    const saved = this.db.tasks.save(task);
+    // Keyed on the guarded write, not on a read of the row afterwards — the same
+    // rule the boolean above exists to enforce. A refused write reached no
+    // terminal state, so nothing settled and nothing is released.
+    if (saved && isTerminal(stateOf(task))) {
+      await this.#settled(task.id, stateOf(task));
+    }
+    return saved;
   }
 
   /**
@@ -600,8 +607,36 @@ export abstract class DynamicAgent<
       : this.db.tasks.cancel(taskId);
     if (!canceled) return null;
     this.db.humanRequests.cancelForTask(taskId, Date.now());
+    // Both hooks, in this order: `onTaskCanceled` stops the work, and only then
+    // is there nothing left running to hold what `onTaskSettled` releases.
     await this.onTaskCanceled(taskId);
+    await this.#settled(taskId, TaskState.TASK_STATE_CANCELED);
     return canceled;
+  }
+
+  /**
+   * {@link onTaskSettled}, with the failure contained here rather than promised
+   * by every override.
+   *
+   * The row is already durable when this runs, so a teardown that throws must
+   * not turn a settled task into a failed call — and the boolean `saveTask`
+   * returns is a cancellation answer that a cleanup failure may not change.
+   * `onTaskCanceled` states the same requirement in prose and leaves it to the
+   * override; this is the requirement enforced.
+   */
+  // `#` rather than this file's usual `private`, because `DynamicAgent` is
+  // subclassed by consumers: `private` is compile-time only, so it spends the
+  // name in every subclass — and `settled` is a name a subclass wants.
+  async #settled(taskId: string, state: TaskState): Promise<void> {
+    try {
+      await this.onTaskSettled(taskId, state);
+    } catch (err) {
+      console.warn("[agent] task settle hook failed", {
+        taskId,
+        state,
+        err: String(err)
+      });
+    }
   }
 
   /**
@@ -615,4 +650,28 @@ export abstract class DynamicAgent<
    * this runs, and it must not fail because cleanup did.
    */
   protected async onTaskCanceled(_taskId: string): Promise<void> {}
+
+  /**
+   * A Task reached a state it never leaves — release what was held for its
+   * lifetime.
+   *
+   * The counterpart to {@link onTaskCanceled}, and the division is what each is
+   * for: that one **stops the work**, this one **releases the resources**. So
+   * this fires for every terminal state including `canceled`, and an agent that
+   * holds something for the length of a task overrides this one alone rather
+   * than repeating itself on both paths.
+   *
+   * Default: nothing, which is right for an agent that holds nothing. A
+   * container is the case this exists for — it outlives the task that started it
+   * and bills until something stops it, and the idle timer that would eventually
+   * do so must be longer than the longest command the agent allows, so it is a
+   * backstop rather than a mechanism.
+   *
+   * Best-effort, and unlike {@link onTaskCanceled} that is enforced rather than
+   * asked for: a throw is logged and swallowed.
+   */
+  protected async onTaskSettled(
+    _taskId: string,
+    _state: TaskState
+  ): Promise<void> {}
 }

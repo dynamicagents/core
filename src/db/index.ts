@@ -18,7 +18,12 @@ export {
   subtasks
 } from "./schema.js";
 
-export { makeTasks, stateOf, type TaskListQuery } from "./models/tasks.js";
+export {
+  makeTasks,
+  stateOf,
+  isTerminal,
+  type TaskListQuery
+} from "./models/tasks.js";
 
 export { makeSubtasks, type SubtaskModelOptions } from "./models/subtasks.js";
 

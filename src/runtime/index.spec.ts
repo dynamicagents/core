@@ -234,6 +234,45 @@ describe("createAgentRuntime — what it composes", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("contains a throwing settle hook instead of failing the chunk", async () => {
+    const calls: string[] = [];
+    const flaky = definePlugin({
+      key: "flaky",
+      subtaskType: subtaskType("flaky-work"),
+      onSettled: async (ctx) => {
+        calls.push(`${ctx.taskId}:${ctx.subtaskId}`);
+        throw new Error("release failed");
+      }
+    });
+
+    const rt = createAgentRuntime({
+      config: { model: TEST_MODELS },
+      plugins: [flaky, beta]
+    });
+    const ctx = {
+      taskId: "t1",
+      subtaskId: 1,
+      type: "flaky-work",
+      params: {},
+      toolFamilies: []
+    };
+
+    // The subtask row is already terminal when this runs, so a plugin that
+    // cannot give its resource back may not turn the chunk that succeeded into a
+    // failure. `onAbort` propagates; this one is caught.
+    await expect(rt.onSettled(ctx)).resolves.toBeUndefined();
+    expect(calls).toEqual(["t1:1"]);
+
+    // And the neutral cases, as `onAbort` has them: a plugin with no hook, and a
+    // type no plugin owns.
+    await expect(
+      rt.onSettled({ ...ctx, type: "beta" })
+    ).resolves.toBeUndefined();
+    await expect(
+      rt.onSettled({ ...ctx, type: "nobody" })
+    ).resolves.toBeUndefined();
+  });
+
   it("merges main-agent tools and capability blocks across plugins", async () => {
     const rt = createAgentRuntime({
       config: { model: TEST_MODELS },

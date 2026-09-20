@@ -768,6 +768,7 @@ export abstract class RoundAgentBase<
     if (!this.db.subtasks.fail(id, error)) return;
     const name = subagentName(subtask.taskId, id);
     await this.releaseRuntimeQuietly(subtask);
+    await this.settleRuntimeForRow(subtask);
     // Stopped before it is dropped, as a cancel stops it: a branch that failed
     // at its step can still have work running under it — a claude-code session
     // whose drain lost its subscriber goes on editing the checkout — and a later
@@ -836,6 +837,7 @@ export abstract class RoundAgentBase<
     if (await this.isTaskCanceled(request.taskId)) {
       this.db.subtasks.cancelRunning(id);
       await this.releaseRuntime(request);
+      await this.settleRuntime(request);
       await this.abortChildQuietly(name, recipe.toolFamilies);
       await this.deleteChildQuietly(name);
       return {
@@ -889,9 +891,14 @@ export abstract class RoundAgentBase<
           `subtask ${id} could not record its result (status=${current.status})`
         );
       }
+      await this.settleRuntime(request);
       await this.deleteChildQuietly(name);
       return { done: true, status: current.status, progress: outcome.progress };
     }
+
+    // The one terminal path with nothing to release, and so the one `onSettled`
+    // exists for: an execution that simply succeeded.
+    await this.settleRuntime(request);
 
     // The result is durable in the parent now, but the child is **not** deleted
     // here. `dynamicAgents.delete` aborts the facet, and aborting it in the same tick
@@ -968,6 +975,7 @@ export abstract class RoundAgentBase<
       if (subtask.status === "running") {
         this.db.subtasks.cancelRunning(id);
         await this.releaseRuntimeQuietly(subtask);
+        await this.settleRuntimeForRow(subtask);
         await this.abortChildQuietly(
           name,
           this.toolFamiliesForType(subtask.type)
@@ -1108,6 +1116,40 @@ export abstract class RoundAgentBase<
       type: request.type,
       params: request.params,
       toolFamilies: request.recipe.toolFamilies
+    });
+  }
+
+  /**
+   * Tell the owning plugin the execution settled — `AgentPlugin.onSettled` carries
+   * why that is a different question from the release beside it.
+   *
+   * Called at every `releaseRuntime*` site **and** on the success path, which has
+   * none, so it fires exactly once per execution. Each of those sites already sits
+   * behind the durable transition that made the row terminal, which is what makes
+   * "exactly once" a property rather than an intention.
+   *
+   * No `Quietly` twin, unlike the release pair: `AgentRuntime.onSettled` contains
+   * a plugin's throw itself, because a row that is already terminal must not be
+   * undone by a cleanup that failed. One home for that rule, and it is not here.
+   */
+  private settleRuntime(request: RecipeExecutionRequest): Promise<void> {
+    return this.runtime.onSettled({
+      taskId: request.taskId,
+      subtaskId: request.subtaskId,
+      type: request.type,
+      params: request.params,
+      toolFamilies: request.recipe.toolFamilies
+    });
+  }
+
+  /** The same, from a durable row rather than a built request. */
+  private settleRuntimeForRow(subtask: Subtask): Promise<void> {
+    return this.runtime.onSettled({
+      taskId: subtask.taskId,
+      subtaskId: subtask.id,
+      type: subtask.type,
+      params: subtask.params,
+      toolFamilies: this.toolFamiliesForType(subtask.type)
     });
   }
 
@@ -1280,6 +1322,7 @@ export abstract class RoundAgentBase<
         if (await child.abortRun()) continue;
         if (this.db.subtasks.cancelRunning(subtask.id)) {
           await this.releaseRuntimeQuietly(subtask);
+          await this.settleRuntimeForRow(subtask);
           await this.abortChildQuietly(
             name,
             this.toolFamiliesForType(subtask.type)

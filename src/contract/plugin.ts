@@ -273,6 +273,24 @@ export interface AgentPlugin<TRuntime = SubtaskRuntime> {
   ) => Promise<RecipeExecutionResult>;
   /** Release anything {@link resolveRuntime} acquired, when an execution is canceled. */
   onAbort?: (ctx: ResolveRuntimeContext) => Promise<void>;
+  /**
+   * The execution reached a terminal outcome — release what was held for its
+   * lifetime.
+   *
+   * **Fires once, on every terminal outcome**: completed, failed and canceled
+   * alike. {@link onAbort} fires only on the abort paths, so the two answer
+   * different questions — this one is *give the resource back*, that one is *you
+   * were interrupted*. A plugin that only needs to release declares this alone;
+   * one whose cleanup differs when it was cut short declares both, and gets both.
+   *
+   * Without it there is no signal on the **success** path at all, which is the
+   * gap this closes: a plugin that acquires something per execution in
+   * {@link resolveRuntime} could give it back only when the execution went wrong.
+   *
+   * Best-effort — a throw is logged against the plugin key and swallowed, because
+   * the row is already terminal by the time this runs.
+   */
+  onSettled?: (ctx: ResolveRuntimeContext) => Promise<void>;
 
   // --- session lifecycle ---
 
