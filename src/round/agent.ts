@@ -835,9 +835,18 @@ export abstract class RoundAgentBase<
     // a yield as much as to a terminal chunk: a run interrupted mid-flight by
     // cancellation yields rather than caching a bogus failure.
     if (await this.isTaskCanceled(request.taskId)) {
-      this.db.subtasks.cancelRunning(id);
-      await this.releaseRuntime(request);
-      await this.settleRuntime(request);
+      // The verdict decides who settles. `onTaskCanceled` sweeps running rows
+      // concurrently with this, and only one of the two wins the transition —
+      // without this both would release the same resource.
+      const won = this.db.subtasks.cancelRunning(id);
+      // `finally`, because `releaseRuntime` is the one release here that is not
+      // contained: a plugin's throwing `onAbort` would otherwise leave a terminal
+      // row that never settled, which is the resource leaking for good.
+      try {
+        await this.releaseRuntime(request);
+      } finally {
+        if (won) await this.settleRuntime(request);
+      }
       await this.abortChildQuietly(name, recipe.toolFamilies);
       await this.deleteChildQuietly(name);
       return {
@@ -891,7 +900,9 @@ export abstract class RoundAgentBase<
           `subtask ${id} could not record its result (status=${current.status})`
         );
       }
-      await this.settleRuntime(request);
+      // No settle: `persistResult` refused because the row is already terminal,
+      // so whichever path took it there settled it. Firing here would be the
+      // second release of one resource.
       await this.deleteChildQuietly(name);
       return { done: true, status: current.status, progress: outcome.progress };
     }
@@ -973,9 +984,10 @@ export abstract class RoundAgentBase<
       // Start no new work. A row left `running` by a crashed attempt is resolved
       // here — `cancelPending` only reaches pending rows.
       if (subtask.status === "running") {
-        this.db.subtasks.cancelRunning(id);
+        // The verdict, for the reason `executeSubtaskChunk`'s cancel path gives.
+        const won = this.db.subtasks.cancelRunning(id);
         await this.releaseRuntimeQuietly(subtask);
-        await this.settleRuntimeForRow(subtask);
+        if (won) await this.settleRuntimeForRow(subtask);
         await this.abortChildQuietly(
           name,
           this.toolFamiliesForType(subtask.type)
@@ -1123,10 +1135,14 @@ export abstract class RoundAgentBase<
    * Tell the owning plugin the execution settled — `AgentPlugin.onSettled` carries
    * why that is a different question from the release beside it.
    *
-   * Called at every `releaseRuntime*` site **and** on the success path, which has
-   * none, so it fires exactly once per execution. Each of those sites already sits
-   * behind the durable transition that made the row terminal, which is what makes
-   * "exactly once" a property rather than an intention.
+   * **Called only by whichever path won the durable transition that made the row
+   * terminal**, which is what makes "exactly once per execution" a property rather
+   * than an intention. A guarded transition reports that in its return value, and
+   * every site here reads it — `cancelRunning` and `fail` race the cancellation
+   * sweep, and `persistResult` refusing means somebody else already settled.
+   *
+   * So this is *not* simply "beside every release": the success path has no release
+   * and settles, and the already-terminal path has no settle at all.
    *
    * No `Quietly` twin, unlike the release pair: `AgentRuntime.onSettled` contains
    * a plugin's throw itself, because a row that is already terminal must not be

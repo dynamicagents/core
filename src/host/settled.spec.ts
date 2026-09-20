@@ -73,6 +73,39 @@ describe("onTaskSettled", () => {
     });
   });
 
+  /**
+   * The case a boolean alone cannot tell apart. `AgentDB` allows a terminal row to
+   * be re-written with the *same* terminal state and reports success, because a
+   * Workflow replay re-runs `complete` and its callback must still go out. A hook
+   * keyed on that boolean would release the same resource once per replay.
+   */
+  it("fires once across a replay that re-saves the same terminal state", async () => {
+    await withAgent("replay", async (agent) => {
+      await agent.saveTask(buildSubmittedTask("t6", "ctx"));
+      const done = terminal("t6", TaskState.TASK_STATE_COMPLETED);
+
+      expect(await agent.saveTask(done)).toBe(true);
+      // The replay still succeeds — suppressing it would suppress the callback.
+      expect(await agent.saveTask(done)).toBe(true);
+
+      expect(agent.settled).toEqual([
+        { taskId: "t6", state: TaskState.TASK_STATE_COMPLETED }
+      ]);
+    });
+  });
+
+  it("fires once when a cancel is recorded twice", async () => {
+    await withAgent("recancel", async (agent) => {
+      await agent.saveTask(buildSubmittedTask("t7", "ctx"));
+      await agent.cancelTask("t7");
+      await agent.cancelTask("t7");
+
+      expect(agent.settled).toEqual([
+        { taskId: "t7", state: TaskState.TASK_STATE_CANCELED }
+      ]);
+    });
+  });
+
   it("does not fire when the guarded write is refused", async () => {
     await withAgent("refused", async (agent) => {
       await agent.saveTask(buildSubmittedTask("t3", "ctx"));

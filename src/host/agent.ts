@@ -493,11 +493,23 @@ export abstract class DynamicAgent<
     if (stateOf(task) === TaskState.TASK_STATE_CANCELED) {
       return (await this.markCanceled(task.id, task)) !== null;
     }
+    // Read before the write, because settling is a **transition** and the write's
+    // boolean is not one. `AgentDB` deliberately allows a terminal row to be
+    // re-written with the same terminal state — a Workflow replay re-runs
+    // `complete` and must still send its callback — and that returns `true`. A
+    // hook keyed on the boolean alone would fire again on every replay and
+    // release a resource twice.
+    //
+    // This is **not** the probe-then-act pattern `saveTask` warns about: the
+    // write is still what decides, and a cancel landing in between makes `save`
+    // refuse, so nothing settles. The read only classifies a write that won.
+    const before = this.db.tasks.get(task.id);
     const saved = this.db.tasks.save(task);
-    // Keyed on the guarded write, not on a read of the row afterwards — the same
-    // rule the boolean above exists to enforce. A refused write reached no
-    // terminal state, so nothing settled and nothing is released.
-    if (saved && isTerminal(stateOf(task))) {
+    if (
+      saved &&
+      isTerminal(stateOf(task)) &&
+      !(before && isTerminal(stateOf(before)))
+    ) {
       await this.#settled(task.id, stateOf(task));
     }
     return saved;
@@ -602,6 +614,10 @@ export abstract class DynamicAgent<
     taskId: string,
     task?: Task
   ): Promise<PlainTask | null> {
+    // Before the write, for the reason `saveTask` gives: re-writing `canceled`
+    // over an already-`canceled` row is allowed and reports success, so only the
+    // crossing is a settlement.
+    const before = this.db.tasks.get(taskId);
     const canceled = task
       ? this.db.tasks.save(task) && this.db.tasks.get(taskId)
       : this.db.tasks.cancel(taskId);
@@ -610,7 +626,9 @@ export abstract class DynamicAgent<
     // Both hooks, in this order: `onTaskCanceled` stops the work, and only then
     // is there nothing left running to hold what `onTaskSettled` releases.
     await this.onTaskCanceled(taskId);
-    await this.#settled(taskId, TaskState.TASK_STATE_CANCELED);
+    if (!(before && isTerminal(stateOf(before)))) {
+      await this.#settled(taskId, TaskState.TASK_STATE_CANCELED);
+    }
     return canceled;
   }
 
