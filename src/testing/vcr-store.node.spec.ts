@@ -297,5 +297,11 @@ describe("requestKey", () => {
     expect(requestKey("GET", "https://api.test/y", "")).not.toBe(key);
     expect(requestKey("POST", "https://api.test/x", "")).not.toBe(key);
     expect(requestKey("GET", "https://api.test/x", "body")).not.toBe(key);
+    // The whole URL, not its path. A key derived from origin + pathname satisfies
+    // every assertion above and still collides `?page=1` with `?page=2`, which
+    // replays the wrong response.
+    expect(requestKey("GET", "https://api.test/x?a=1", "")).not.toBe(
+      requestKey("GET", "https://api.test/x?a=2", "")
+    );
   });
 });
