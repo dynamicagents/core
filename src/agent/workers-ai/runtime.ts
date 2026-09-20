@@ -2,7 +2,6 @@ import { createWorkersAI } from "workers-ai-provider";
 import type { LanguageModel } from "ai";
 import type { ModelConfig } from "../../config.js";
 import type { AiEnv } from "../../env.js";
-import type { GatewayLogFields } from "../gateway-log.js";
 import type {
   ModelOverrides,
   ModelPair,
@@ -52,18 +51,29 @@ export function createWorkersAIModelRuntime(
 
   /**
    * Per-model Workers-AI settings: the AI Gateway route and what the call tells
-   * it about itself, and the reasoning budget.
+   * it about itself, the prefix-cache affinity key, and the reasoning budget.
    *
    * Always returns a settings object, even with nothing to tell the gateway: the
    * route and `reasoning_effort` have to reach the binding on every call, and an
    * `undefined` return drops both.
+   *
+   * `sessionAffinity` leaves as the `x-session-affinity` header on the binding's
+   * `extraHeaders`, not on `gateway` — it steers Workers AI's model-instance
+   * routing, and the gateway neither reads nor logs it. See
+   * {@link file://../model.ts ModelOverrides.sessionAffinity} for what the key
+   * has to be.
    */
-  const chatSettings = ({ metadata, eventId }: GatewayLogFields) => ({
+  const chatSettings = ({
+    metadata,
+    eventId,
+    sessionAffinity
+  }: ModelOverrides) => ({
     gateway: {
       id: config.aiGatewayId,
       ...(metadata ? { metadata } : {}),
       ...(eventId ? { eventId } : {})
     },
+    ...(sessionAffinity ? { sessionAffinity } : {}),
     reasoning_effort: config.reasoningEffort
   });
 

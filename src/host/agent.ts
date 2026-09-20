@@ -278,20 +278,31 @@ export abstract class DynamicAgent<
    * one it reuses a memoized default that names only the agent. The agent's
    * name is always this config's, never the caller's. A test `modelsOverride`
    * always wins.
+   *
+   * Every pair carries the same affinity key — this object's own name — because
+   * every call it makes reads the one Session this object holds. The key is
+   * deliberately coarser than the correlation beside it: a round, a compaction
+   * and the next task all continue one history, so keying any of them finer
+   * would route a call away from the prefix it is about to re-send. See
+   * {@link file://../agent/model.ts ModelOverrides.sessionAffinity}.
    */
   protected modelPair(
     correlation?: Omit<GatewayCorrelation, "agent">
   ): ModelPair {
     if (this.modelsOverride) return this.modelsOverride;
     const agent = this.config.agentName;
+    const key = this.callerKey();
+    const affinity = key ? { sessionAffinity: key } : {};
     if (!correlation) {
-      return (this._pair ??= this.models.createModelPair(
-        gatewayLogFields({ agent })
-      ));
+      return (this._pair ??= this.models.createModelPair({
+        ...gatewayLogFields({ agent }),
+        ...affinity
+      }));
     }
-    return this.models.createModelPair(
-      gatewayLogFields({ ...correlation, agent })
-    );
+    return this.models.createModelPair({
+      ...gatewayLogFields({ ...correlation, agent }),
+      ...affinity
+    });
   }
 
   /**
@@ -366,11 +377,22 @@ export abstract class DynamicAgent<
    * exists.
    */
   protected requireIdentityKey(): string {
-    const key = this.identityKey ?? this.ctx.id.name;
+    const key = this.callerKey();
     if (!key) {
       throw new Error("identity.key is required for per-caller isolation");
     }
-    return (this.identityKey = key);
+    return key;
+  }
+
+  /**
+   * The same read as {@link requireIdentityKey} — which carries the argument for
+   * it — for a caller that can do without one. A model pair is built on paths
+   * that have no identity to require, and a missing key costs it the prefix
+   * cache rather than the call.
+   */
+  private callerKey(): string | undefined {
+    const key = this.identityKey ?? this.ctx.id.name;
+    return key ? (this.identityKey = key) : undefined;
   }
 
   /**

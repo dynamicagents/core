@@ -47,6 +47,23 @@ export interface ModelOverrides extends GatewayLogFields {
   primaryModelId?: string;
   /** The provider's model id for the fallback slot. See {@link primaryModelId}. */
   fallbackModelId?: string;
+  /**
+   * Routes every call this pair makes to the one model instance already holding
+   * this conversation's prefix.
+   *
+   * Workers AI's prefix cache is per-instance and implicit — no breakpoints, no
+   * TTL, 64-token blocks — so a repeated prefix hits only when routing happens
+   * to land back on the right instance. Unsteered that was measured at about
+   * half the time inside the eviction window and never past a five-minute gap,
+   * and a miss is billed as fresh input at five times the cached rate.
+   *
+   * The key is a **continuous history**, not a unit of work. A task boundary is
+   * not a prefix boundary: one Session spans every task a caller sends, so a new
+   * task opens on the previous one's history and a per-task key would route it
+   * away from its own prefix. A Durable Object's own name is the right grain,
+   * because the object is keyed 1:1 with the history it holds.
+   */
+  sessionAffinity?: string;
 }
 
 /** The primary/fallback models (lazily memoized) plus their ids for logging. */

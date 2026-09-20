@@ -345,6 +345,11 @@ export abstract class RecipeSubagentBase<
       rt.models.createModelPair({
         primaryModelId: recipe.primaryModelId,
         fallbackModelId: recipe.fallbackModelId,
+        // This object's own name — see {@link subagentName} — is the history
+        // every chunk of this run re-sends, and the host applies the same rule
+        // to its caller key. The parent's key would be the wrong one: a branch
+        // runs its own prompt, not the Session that delegated it.
+        ...(this.ctx.id.name ? { sessionAffinity: this.ctx.id.name } : {}),
         ...gatewayLogFields({
           agent: rt.agentName,
           taskId: request.taskId,
