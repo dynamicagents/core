@@ -95,8 +95,9 @@ export interface AgentLimits {
  * offered by the turn instructions, both of which run only for the main agent; a
  * subagent's runner ends in a report and never opens a round, so it has nothing
  * to read these with. `resolveLimits` confirms it from the other side — it
- * merges a recipe's budget field by field and carries only the two fields
- * {@link AgentLimits} declares.
+ * rebuilds a recipe's budget from `maxTurns` and `maxWallMs` alone, so a
+ * `maxDeferrals` or `maxDeferredMs` written there is dropped rather than
+ * carried.
  *
  * So the deferral fields live here and not on {@link AgentLimits}: a subagent
  * budget that names a `maxDeferrals` nothing could act on does not typecheck,
