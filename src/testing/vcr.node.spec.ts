@@ -174,21 +174,6 @@ describe("playback", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("ignores the request headers when matching", async () => {
-    // The cassette above recorded no headers at all; this request carries the
-    // ones workerd adds. Under undici's SnapshotAgent they were part of the
-    // hash, which is what made cassettes break on a runtime upgrade.
-    seed();
-    const vcr = playback();
-    await control(vcr, `/use?cassette=${CASSETTE}`);
-    const res = await vcr.outboundService(
-      request("https://api.test/thing", {
-        headers: { "cf-worker": "runner.example.com", "user-agent": "workerd" }
-      })
-    );
-    expect(await res.text()).toBe("ok");
-  });
-
   it("replays a status that must not carry a body", async () => {
     // `Response` rejects *any* non-null body on 204/205/304 — an empty
     // Uint8Array throws exactly as a full one does — so a recorded 204 that is

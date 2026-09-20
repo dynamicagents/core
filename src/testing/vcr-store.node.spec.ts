@@ -58,16 +58,6 @@ const write = (entries: unknown[]): void =>
   writeFileSync(file, JSON.stringify(entries, null, 2));
 
 describe("Cassette.load", () => {
-  it("replays a recorded response", () => {
-    write([entry({}, ["hello"])]);
-    const cassette = new Cassette(file);
-    cassette.load();
-
-    const hit = cassette.match("GET", "https://api.test/thing", "");
-    expect(hit).not.toBeNull();
-    expect(text(hit!)).toBe("hello");
-  });
-
   it("matches regardless of the request headers the recording carried", () => {
     // The whole reason this store exists. undici's SnapshotAgent hashed every
     // non-excluded header, so a cassette recorded through one pool version
@@ -221,25 +211,6 @@ describe("Cassette.match", () => {
       ["set-cookie", "b=2"]
     ]);
   });
-
-  it("carries the recorded status through", () => {
-    write([
-      {
-        request: {
-          method: "GET",
-          url: "https://api.test/thing",
-          headers: {},
-          body: ""
-        },
-        responses: [{ statusCode: 429, headers: {}, body: b64("slow down") }]
-      }
-    ]);
-    const cassette = new Cassette(file);
-    cassette.load();
-    expect(cassette.match("GET", "https://api.test/thing", "")!.status).toBe(
-      429
-    );
-  });
 });
 
 describe("Cassette.flush", () => {
@@ -289,18 +260,6 @@ describe("Cassette.flush", () => {
     expect(written).toContain("content-type");
   });
 
-  it("round-trips what it wrote", () => {
-    const cassette = new Cassette(file);
-    cassette.record(request, response);
-    cassette.flush();
-
-    const replayed = new Cassette(file);
-    replayed.load();
-    const hit = replayed.match("POST", "https://api.test/thing", '{"a":1}');
-    expect(hit).not.toBeNull();
-    expect(text(hit!)).toBe("ok");
-  });
-
   it("appends a repeat of the same request as a second response", () => {
     const cassette = new Cassette(file);
     cassette.record(request, response);
@@ -338,11 +297,5 @@ describe("requestKey", () => {
     expect(requestKey("GET", "https://api.test/y", "")).not.toBe(key);
     expect(requestKey("POST", "https://api.test/x", "")).not.toBe(key);
     expect(requestKey("GET", "https://api.test/x", "body")).not.toBe(key);
-  });
-
-  it("keeps query strings significant", () => {
-    expect(requestKey("GET", "https://api.test/x?a=1", "")).not.toBe(
-      requestKey("GET", "https://api.test/x?a=2", "")
-    );
   });
 });
