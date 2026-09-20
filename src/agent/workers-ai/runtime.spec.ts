@@ -153,7 +153,7 @@ describe("workers-ai failures", () => {
 describe("workers-ai gateway options", () => {
   /** A binding that answers, and keeps the options each call handed it. */
   const recording = () => {
-    const calls: { gateway?: unknown }[] = [];
+    const calls: { gateway?: unknown; extraHeaders?: unknown }[] = [];
     const ai = {
       run: async (_model: string, _inputs: unknown, options: object) => {
         calls.push(options);
@@ -201,5 +201,51 @@ describe("workers-ai gateway options", () => {
     await generateText({ model: pair.primary(), prompt: "hello" });
 
     expect(calls[0]?.gateway).toEqual({ id: config.aiGatewayId });
+  });
+
+  /**
+   * Affinity steers Workers AI's model-instance routing, so it has to arrive as
+   * a header on the binding rather than as a gateway field — the gateway does
+   * not read it. Asserted here for the same reason as the gateway options: the
+   * binding is the only layer where what was actually sent is visible.
+   */
+  it("delivers the affinity key to the binding as a header", async () => {
+    const { ai, calls } = recording();
+    const pair = createWorkersAIModelRuntime({ ai, config }).createModelPair({
+      metadata: { taskId: "t1" },
+      sessionAffinity: "slack:C123"
+    });
+
+    await generateText({ model: pair.primary(), prompt: "hello" });
+
+    expect(calls[0]).toMatchObject({
+      extraHeaders: { "x-session-affinity": "slack:C123" }
+    });
+    expect(calls[0]?.gateway).toEqual({
+      id: config.aiGatewayId,
+      metadata: { taskId: "t1" }
+    });
+  });
+
+  it("carries the same key on the fallback slot", async () => {
+    const { ai, calls } = recording();
+    const pair = createWorkersAIModelRuntime({ ai, config }).createModelPair({
+      sessionAffinity: "slack:C123"
+    });
+
+    await generateText({ model: pair.fallback(), prompt: "hello" });
+
+    expect(calls[0]).toMatchObject({
+      extraHeaders: { "x-session-affinity": "slack:C123" }
+    });
+  });
+
+  it("sends no affinity header when there is no key", async () => {
+    const { ai, calls } = recording();
+    const pair = createWorkersAIModelRuntime({ ai, config }).createModelPair();
+
+    await generateText({ model: pair.primary(), prompt: "hello" });
+
+    expect(calls[0]).not.toHaveProperty("extraHeaders");
   });
 });
