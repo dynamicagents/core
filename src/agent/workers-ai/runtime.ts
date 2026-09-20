@@ -14,10 +14,10 @@ import type {
  * The Workers-AI model pair every loop runs on by default, built per agent
  * instance.
  *
- * The predecessor read `env.AI` and five config constants as module-level
- * imports. Neither survives packaging: `env` does not exist at module scope on
- * Workers, and a module constant cannot be overridden by a consumer. So this is
- * a factory over an injected binding and an injected {@link ModelConfig}.
+ * Reading `env.AI` and the config constants as module-level imports does not
+ * survive packaging: `env` does not exist at module scope on Workers, and a
+ * module constant cannot be overridden by a consumer. So this is a factory over
+ * an injected binding and an injected {@link ModelConfig}.
  */
 
 export interface WorkersAIRuntimeDeps {
@@ -94,11 +94,11 @@ export function createWorkersAIModelRuntime(
  * Core's default provider — what every {@link ModelRuntimeFactory} seam lands on
  * when an agent does not override it.
  *
- * One definition rather than one per base class. The body used to be written
- * twice, once in {@link file://../../host/agent.ts DynamicAgent.modelRuntime}
- * and once in
- * {@link file://../../round/subagent.ts RecipeSubagentHost.modelRuntime}, which
- * is the same duplication the seam exists to let a *consumer* avoid.
+ * One definition rather than one per base class:
+ * {@link file://../../host/agent.ts DynamicAgent.modelRuntime} and
+ * {@link file://../../round/subagent.ts RecipeSubagentHost.modelRuntime} both
+ * land here rather than each writing the body, which is the same duplication the
+ * seam exists to let a *consumer* avoid.
  *
  * Typed on {@link AiEnv} rather than a caller's full `Env`: a factory that
  * accepts the narrow shape is callable with any env that satisfies it, so both

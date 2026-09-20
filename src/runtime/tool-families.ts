@@ -10,11 +10,10 @@ import { boundToolCalls } from "./bound-tools.js";
 /**
  * Assemble a recipe's toolset from the installed families.
  *
- * This replaces the predecessor's dispatcher, which was an `if / else if` chain
- * naming three families inline — including a domain one — inside otherwise
- * generic code, with static imports of that domain's modules at the top of the
- * file. That is the single edit that made every agent's bundle carry every
- * domain, and it is why this takes a map instead.
+ * A dispatcher naming its families inline — an `if / else if` chain inside
+ * otherwise generic code — needs static imports of those domains' modules at the
+ * top of the file, which is what makes every agent's bundle carry every domain.
+ * Hence a map.
  *
  * A family a recipe names but no plugin registered is skipped rather than
  * throwing: `validateRecipe` already dropped unknown families, so reaching one

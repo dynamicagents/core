@@ -12,22 +12,20 @@ import type { ResolvedRecipe, ValidatedRecipe } from "./recipe.js";
  * the model pair comes from the host's config with no declaration involved at
  * all. Its budget is the deliberate exception; see {@link resolveLimits}.
  *
- * In the predecessor repo the two allowlists were module constants, and one of
- * them hardcoded a domain key (`"arc-game"`) inside otherwise generic code. That
- * is the coupling this indirection removes: the set of legal families is now
- * exactly the set of families the installed plugins registered.
+ * The indirection exists to keep a domain key out of otherwise generic code: the
+ * set of legal families is exactly the set the installed plugins registered,
+ * never a module constant naming one.
  */
 export interface RecipePolicy {
   /**
    * The pair every recipe runs on: the host agent's own, copied verbatim onto
    * each {@link ValidatedRecipe}.
    *
-   * There is no allowlist any more, because there is nothing to check against
-   * it — a recipe cannot state a model. `modelAllowlist` existed to police
-   * recipe-stated preferences, and it could only ever contain these same two
-   * ids, so the "preference" it policed could never reach a third model. It
+   * There is no allowlist, because there is nothing to check against it — a
+   * recipe cannot state a model. One could only ever contain these same two
+   * ids, so a recipe-stated preference could never reach a third model: it
    * could only swap the primary for the fallback, which is not a capability
-   * anyone wants and which broke the pair's distinctness.
+   * anyone wants and which breaks the pair's distinctness.
    */
   primaryModelId: string;
   /** See {@link primaryModelId}. Guaranteed distinct from it by `resolveConfig`. */
@@ -133,12 +131,12 @@ export function validateRecipe(
     // The host's pair, copied. Not selected, not substituted, not merged —
     // there is nothing on a `ResolvedRecipe` to select *from*.
     //
-    // This used to substitute a recipe's stated preference against
-    // an allowlist, per slot and independently. That produced a real defect:
-    // a recipe preferring the host's *fallback* as its primary, and stating no
-    // fallback of its own, resolved to the same id in both slots — so the
-    // fallback retried the model that had just failed, defeating the distinct-
-    // pair invariant `resolveConfig` enforces one layer up.
+    // Substituting a recipe's stated preference against an allowlist, per slot
+    // and independently, is what makes that unsafe: a recipe preferring the
+    // host's *fallback* as its primary, and stating no fallback of its own,
+    // resolves to the same id in both slots — so the fallback retries the model
+    // that has just failed, defeating the distinct-pair invariant
+    // `resolveConfig` enforces one layer up.
     //
     // Copying wholesale makes that unrepresentable: the pair here is exactly the
     // pair the agent configured, which `resolveConfig` has already guaranteed is

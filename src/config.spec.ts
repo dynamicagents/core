@@ -74,15 +74,6 @@ describe("the deferral bounds", () => {
     ).not.toThrow();
   });
 
-  it("polices a subagent's bounds too", () => {
-    expect(() =>
-      resolveConfig({
-        ...base,
-        subagentLimits: { maxTurns: 20, maxWallMs: 60_000, maxDeferrals: 1.5 }
-      })
-    ).toThrow(/subagentLimits.maxDeferrals/);
-  });
-
   it("refuses waiting with nothing to carry it between rounds", () => {
     // The dependency neither side can see. A round that waits records why as an
     // observation; a window of 0 — legal, and how an agent opts out of carrying

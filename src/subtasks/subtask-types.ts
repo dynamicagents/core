@@ -11,12 +11,10 @@ import type {
  * runtime uses it: lookup, the delegate enum, param validation, and the
  * catalogue the delegating model is shown.
  *
- * The set is not declared here, and — unlike the predecessor repo — it is not a
- * module constant. There, `SUBTASK_TYPE_SPECS` was imported at module scope and
- * every derived value (`SUBTASK_TYPES`, `SUBTASK_TYPE_KEYS`, the delegate tool's
- * description, the round contract) was computed at *import time*. That made the
- * registry unoverridable, froze it before `env` exists, and pulled every
- * domain's module into the bundle whether or not the agent used it.
+ * The set is not declared here, and it is not a module constant: deriving the
+ * enum, the delegate tool's description and the round contract at *import time*
+ * makes the registry unoverridable, freezes it before `env` exists, and pulls
+ * every domain's module into the bundle whether or not the agent uses it.
  *
  * So it is a factory. The host builds one registry per DO instance from its
  * installed plugins, and everything downstream reads that object.
@@ -82,10 +80,9 @@ export interface SubtaskTypeRegistry {
    * params are missing. What this adds is **visibility**. One tool schema has to
    * serve every type, so the only alternative to naming the union of keys here
    * is naming none of them — and a key the schema does not name is a key the
-   * model has no legal way to send, whatever the description promises. That is
-   * exactly how a domain subtask once reached validation with none of its
-   * declared ids: the field was declared as a free-form record, which the
-   * provider's schema conversion flattens to an object permitting no keys at all.
+   * model has no legal way to send, whatever the description promises. A
+   * free-form record names none; see
+   * {@link file://./decomposition.ts makeSubtaskProposalSchema}.
    *
    * Descriptions are prefixed with the owning type, so a flat namespace still
    * reads unambiguously to the model (and a key two types share names both).
@@ -98,8 +95,7 @@ export interface SubtaskTypeRegistry {
   // {@link file://../runtime/index.ts AgentRuntime.renderCapabilities}, together
   // with the plugin-level blocks and in plugin declaration order. A second
   // renderer over the same strings is not a convenience — it is a host that can
-  // call both and make the main agent read every block twice, which is the exact
-  // failure the type's own prompt fields were introduced to end.
+  // call both and make the main agent read every block twice.
   /** Every type's {@link SubtaskTypeSpec.delegationGuidance}, for the round contract. */
   renderDelegationGuidance(names: DelegationNames): string;
 }

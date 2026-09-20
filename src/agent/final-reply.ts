@@ -6,19 +6,18 @@ import { nonBlank } from "../subtasks/decomposition.js";
  * The `final_reply` tool — the main agent answering the user itself, and the other
  * way a round can end.
  *
- * A round used to end either by calling `delegate` or by stopping with plain text,
- * and that asymmetry was the bug: to the code, "the model answered the user" and
- * "the model narrated an action it never took" were the same outcome — a non-empty
- * string. A model that wrote "I'll start the game" and emitted no call completed the
- * Task successfully, having done nothing.
+ * **Prose is not an outcome.** Both endings are named tools, the round runs with
+ * `toolChoice: "required"`, and a round that ends any other way has failed its
+ * attempt. Let a round end with plain text instead and "the model answered the
+ * user" and "the model narrated an action it never took" become the same outcome
+ * — a non-empty string — so a model that writes "I'll start the game" and emits
+ * no call completes the Task successfully, having done nothing.
  *
- * So prose is no longer an outcome. Both endings are now named tools, the round runs
- * with `toolChoice: "required"`, and a round that ends any other way has failed its
- * attempt. The *choice* is still entirely the model's — the point of the design (see
- * {@link file://../round/turn.ts turn.ts}) was never that the model be steered toward
+ * The *choice* is still entirely the model's — the point of the design (see
+ * {@link file://../round/turn.ts turn.ts}) is not that the model be steered toward
  * delegating, only that it not be forced. Picking between two named tools is also a
  * far easier discrimination for a small model than picking between prose and a tool,
- * which is what the weaker fallback models kept getting wrong.
+ * which is what the weaker fallback models get wrong.
  *
  * This lives outside `subtasks/` deliberately: replying is not a subtask concept.
  */

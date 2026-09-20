@@ -14,11 +14,7 @@ import {
  * Every agent that accepts asynchronously has to do the same four things with
  * the push config the gatekeeper handed it: sign a callback JWT against the
  * deployment's card key, POST `working` snapshots as the model reasons, POST the
- * terminal Task, and never let a failed progress post take down a turn. That was
- * written out longhand in four places across two agents in the starter — twice as
- * a `streamWorking` closure inside a Durable Object, twice as a `notify` step
- * inside a Workflow — with the signing, the header names and the swallow-and-log
- * discipline duplicated each time.
+ * terminal Task, and never let a failed progress post take down a turn.
  *
  * It is one object here because none of it is per-agent. What *is* per-agent is
  * the notification **key**, and that is the one thing a caller supplies.

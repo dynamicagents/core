@@ -82,7 +82,7 @@ export class TaskAlreadyTerminalError extends Error {
  * second would leave a window — between the two calls, and again between this
  * step and `notify` — in which a `tasks/cancel` lands and the gatekeeper still
  * receives a `completed` callback. Keying the notify on "did the write apply"
- * closes it, and that has already been got wrong once.
+ * closes it.
  *
  * In `/a2a` rather than `/round` because the shape is not a round's: an agent
  * whose turn is a single inference ends it the same way, and importing this from
@@ -92,7 +92,7 @@ export class TaskAlreadyTerminalError extends Error {
  * Returns whether it delivered: `false` is that cancellation, and it is the only
  * way a caller can tell "this turn ended and the user was told" from "this turn
  * ended and the user had already stopped listening". A caller with nothing to
- * record may ignore it, as every caller did before there was anything to record.
+ * record may ignore it.
  */
 export async function deliverTerminalTask(
   step: WorkflowStep,
@@ -192,10 +192,6 @@ export interface AbandonedTaskOptions {
  * response"*, which reads like a bug in the workflow rather than a provider that
  * was refusing every request.
  *
- * Observed exactly that way in a deployed agent on 2026-08-19: a turn step
- * exhausted its four attempts against a rate-limited provider, and the agent
- * simply went quiet.
- *
  * ## Three behaviours here are load-bearing
  *
  * **It resolves after a successful delivery — it does not rethrow.** Rethrowing
@@ -214,22 +210,20 @@ export interface AbandonedTaskOptions {
  * **It refuses to run at all once a terminal Task exists.** A
  * {@link TaskAlreadyTerminalError} means the ordinary delivery persisted its
  * result and only the callback failed, so the original fault is rethrown and
- * nothing is written. An earlier draft of this claimed the guarded write alone
- * made that safe; it did not. The write refused only cancellation conflicts, so
- * `completed → failed` applied cleanly and a turn that succeeded would have been
- * rewritten as a generic failure because a webhook was flaky. The guard now
- * refuses any terminal-over-different-terminal write as a backstop, and this
- * check is what stops the attempt being made in the first place — without it the
- * recovery would quietly succeed at doing nothing, swallowing a real callback
- * failure and logging "abandoned" about a completed turn.
+ * nothing is written. The guarded write refuses any
+ * terminal-over-different-terminal write as a backstop — without which
+ * `completed → failed` applies cleanly and a turn that succeeded is rewritten as
+ * a generic failure because a webhook was flaky — and this check is what stops
+ * the attempt being made in the first place, without which the recovery would
+ * quietly succeed at doing nothing, swallowing a real callback failure and
+ * logging "abandoned" about a completed turn.
  *
  * ## Why it is exported rather than private to `/round`
  *
  * `runHandleTask` wraps itself in it, so every round agent gets this without
  * asking. But an agent whose turn is a single inference writes its own workflow
  * body and has the identical exposure — and the alternative to exporting this is
- * that each such host reimplements the delivery, which is precisely the mistake
- * this function was extracted from.
+ * that each such host reimplements the delivery.
  */
 export async function deliverAbandonedTask(
   step: WorkflowStep,
@@ -238,13 +232,12 @@ export async function deliverAbandonedTask(
 ): Promise<boolean> {
   // Nothing was abandoned: the ordinary delivery already persisted a terminal
   // Task and only its callback failed. Rethrow the fault that actually
-  // happened, so the instance still errors exactly as it did before any
-  // recovery existed and the gatekeeper's own backstop clears the pending marker.
+  // happened, so the instance still errors and the gatekeeper's own backstop
+  // clears the pending marker.
   //
-  // Checked **here** rather than in each caller's `catch` on purpose. This whole
-  // change exists because a recovery every host had to remember to wire was one
-  // three hosts forgot; a caveat every host had to remember to check would be
-  // the same mistake a second time.
+  // Checked **here** rather than in each caller's `catch` on purpose: a recovery
+  // every host has to remember to wire is one a host forgets, and a caveat every
+  // host has to remember to check is the same mistake a second time.
   if (cause instanceof TaskAlreadyTerminalError) throw cause.cause;
 
   const label = options.label ?? "agent";

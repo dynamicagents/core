@@ -61,11 +61,11 @@ import type { MountedAgent } from "./define-agent.js";
  * implicit routing: an absent tenant is an error, because guessing one would
  * mean picking an agent the caller never named.
  *
- * This replaces mounting a handler per path prefix. That could not work: the
- * card is a **well-known URI**, which RFC 8615 defines per-authority, so only
- * one card per origin is discoverable at the registered path — a gatekeeper
- * resolving `…/.well-known/agent-card.json` against the origin found whichever
- * agent owned the bare path and pinned *its* key for all of them.
+ * A handler per path prefix cannot serve this: the card is a **well-known
+ * URI**, which RFC 8615 defines per-authority, so only one card per origin is
+ * discoverable at the registered path — a gatekeeper resolving
+ * `…/.well-known/agent-card.json` against the origin reaches whichever agent
+ * owns the bare path and pins *its* key for all of them.
  *
  * Three routes:
  *
@@ -97,8 +97,8 @@ export {
  * From `@dynamicagents/g2a-protocol`, because the gatekeeper serves its own JWKS at
  * the same path and fetches ours from whatever `jku` says — see
  * {@link file://../a2a/verify.ts} for why the two sides share a package rather
- * than a comment. Re-exported so this stays importable from
- * `@dynamicagents/core/worker`, where it has always lived.
+ * than a comment. Re-exported to keep it importable from
+ * `@dynamicagents/core/worker`.
  */
 export { JWKS_PATH } from "@dynamicagents/g2a-protocol";
 
@@ -156,13 +156,13 @@ export interface A2AWorkerOptions<TEnv = A2ASecretsEnv> {
    * behind a single A2A endpoint". A caller names one on every request and this
    * Worker refuses a request that does not.
    *
-   * The tenant chooses *which agent*; the verified `identity.key` still chooses
+   * The tenant chooses *which agent*; the verified `identity.key` chooses
    * *which instance of it*, so two callers of one tenant stay in separate
-   * Durable Objects exactly as before.
+   * Durable Objects.
    *
-   * The escape hatch, and still fully supported: use it for an agent whose
-   * routing or turn-start is genuinely its own. {@link A2AWorkerOptions.agents}
-   * is the shorter form for the ordinary case. Supply at least one of the two.
+   * The escape hatch: use it for an agent whose routing or turn-start is
+   * genuinely its own. {@link A2AWorkerOptions.agents} is the shorter form for
+   * the ordinary case. Supply at least one of the two.
    */
   tenants?: Record<string, TenantAgent>;
   /**
@@ -185,9 +185,9 @@ export interface A2AWorkerOptions<TEnv = A2ASecretsEnv> {
    * names, `env.A2A_SIGNING_KEY` and `env.GATEKEEPER_ORIGINS`.
    *
    * There is **one signing key per origin**, not one per tenant: the card is
-   * per-origin now, so the key the gatekeeper pins is too. Nothing was lost — the
-   * tenants share a Worker and an `env`, so they could always read each other's
-   * secrets, and separate keys never expressed a boundary that existed.
+   * per-origin, so the key the gatekeeper pins is too. The tenants share a
+   * Worker and an `env` and can read each other's secrets anyway, so a
+   * per-tenant key would express a boundary that does not exist.
    *
    * ```ts
    * secrets: (env) => ({
@@ -196,9 +196,9 @@ export interface A2AWorkerOptions<TEnv = A2ASecretsEnv> {
    * })
    * ```
    *
-   * Renaming does not weaken anything: the same key is still Ed25519, still
-   * signs the cards and every callback JWT, and its public half is still what
-   * the gatekeeper pins. Only where it is read from changes.
+   * Renaming changes only where the key is read from: it is still Ed25519, it
+   * still signs the cards and every callback JWT, and its public half is still
+   * what the gatekeeper pins.
    */
   secrets?: (env: TEnv) => A2ASecrets;
   /**
@@ -558,10 +558,10 @@ export function createA2AWorker<TEnv extends object>(
   // Normalized once, here, because each of these is used for two things that
   // must agree: routing compares it against `url.pathname`, and `endpointUrl`
   // composes it into the card's interface URL and the expected audience. A
-  // configured path written without its leading slash used to satisfy neither —
-  // `url.pathname` always has one, so the route simply never matched, and the
-  // audience came out as `https://hostpath`. Normalizing at the split keeps the
-  // two derivations from disagreeing whichever way it is written.
+  // configured path written without its leading slash satisfies neither —
+  // `url.pathname` always has one, so the route never matches, and the audience
+  // comes out as `https://hostpath`. Normalizing at the split keeps the two
+  // derivations from disagreeing whichever way it is written.
   const withSlash = (path: string) =>
     path.startsWith("/") ? path : `/${path}`;
   const jwksPath = withSlash(options.jwksPath ?? JWKS_PATH);
@@ -686,11 +686,11 @@ export function createA2AWorker<TEnv extends object>(
 
     // (3) A2A JSON-RPC — gatekeeper-authenticated, dispatched into the caller's DO.
     //
-    // Matched on `rpcPath`, not on the method alone. Accepting every POST made
+    // Matched on `rpcPath`, not on the method alone. Accepting every POST makes
     // the path this agent advertises purely decorative: a call to any URL on the
-    // origin was served as JSON-RPC, so a mounted agent's isolation rested
-    // entirely on an outer router matching first, and a typo'd endpoint quietly
-    // worked instead of 404ing.
+    // origin is served as JSON-RPC, a mounted agent's isolation rests entirely
+    // on an outer router matching first, and a typo'd endpoint quietly works
+    // instead of 404ing.
     if (request.method === "POST" && url.pathname === rpcPath) {
       const token = bearerToken(request);
       if (!token) return unauthorized("missing gatekeeper bearer token");

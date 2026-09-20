@@ -50,10 +50,10 @@ export type EmitProgress = (event: ProgressEvent) => void;
  * Everything a tool family needs to build its tools, closed over so none of it
  * is ever model input.
  *
- * Note what is **not** here: the Worker `env`. The predecessor passed it, which
- * a published package cannot do — `Env` is the ambient interface `wrangler
- * types` generates into a consumer's `worker-configuration.d.ts` and does not
- * exist outside their app. A plugin takes its secrets and bindings as *config at
+ * Note what is **not** here: the Worker `env`. Passing it is what a published
+ * package cannot do — `Env` is the ambient interface `wrangler types` generates
+ * into a consumer's `worker-configuration.d.ts` and does not exist outside their
+ * app. A plugin takes its secrets and bindings as *config at
  * instantiation* instead, which is also the only thing that works on Workers,
  * where `env` does not exist at module scope.
  */
@@ -326,9 +326,9 @@ export interface AgentPlugin<TRuntime = SubtaskRuntime> {
    * The durable file store a subagent execution's workspace is built over.
    *
    * Core declares the {@link WorkspaceBacking} shape and enforces the caps, but
-   * ships no backend: the predecessor's was `@cloudflare/shell`, which is
-   * experimental ("expect breaking changes"), and an agent that never delegates
-   * file work should not carry it. So the backend arrives here, from a plugin,
+   * ships no backend: the obvious one, `@cloudflare/shell`, is experimental
+   * ("expect breaking changes"), and an agent that never delegates file work
+   * should not carry it. So the backend arrives here, from a plugin,
    * and an agent that installs none falls back to an in-memory one.
    *
    * At most one installed plugin may declare this — two backends would mean two

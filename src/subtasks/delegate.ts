@@ -43,8 +43,8 @@ export const DELEGATE_TOOL_NAME = "delegate";
  *
  * Built per registry rather than declared as a module constant: both the type
  * enum in its schema and the catalogue in its description are facts about which
- * plugins are installed, and in the predecessor repo both were frozen at import
- * time — which is exactly what made the type set unoverridable.
+ * plugins are installed, and a module constant freezes both at import time,
+ * which is what makes the type set unoverridable.
  */
 export function makeDelegateTool(
   types: SubtaskTypeRegistry,
@@ -67,17 +67,14 @@ export function makeDelegateTool(
  *
  * **Underscores, not colons, and this is load-bearing.** Unlike a Session message
  * id, this one is sent to a provider as a `tool_use.id`, and Anthropic validates
- * that field against `^[a-zA-Z0-9_-]+$`. The colon-separated form this used to
- * return failed every round from the first delegation onwards — round 0 was fine
- * because the model authors its own ids, and round 1 reconstructs this one, so
- * the request 400d deterministically on both the primary and the fallback until
- * the deterministic join fired. Workers AI never validated the field, which is
- * why it took a Claude-backed agent to surface it.
+ * that field against `^[a-zA-Z0-9_-]+$`. A colon here 400s deterministically on
+ * both the primary and the fallback, from round 1 onwards — round 0 is fine
+ * because the model authors its own ids, and round 1 reconstructs this one.
+ * Workers AI does not validate the field, so nothing surfaces it there.
  *
  * Nothing persists this: both halves of the pair are rebuilt together on every
- * request, so changing the shape needs no migration. There is no longer a
- * provider-side backstop in core — the adapter that carried one went with
- * `./anthropic` in 0.8.0 — so a provider added here that validates tool-call ids
+ * request, so changing the shape needs no migration. Core carries no
+ * provider-side backstop, so a provider added here that validates tool-call ids
  * needs to sanitize them on its own way out.
  */
 export function delegateToolCallId(taskId: string, round: number): string {
@@ -88,27 +85,22 @@ export function delegateToolCallId(taskId: string, round: number): string {
  * One branch's outcome, as the tool result carries it. `output` carries the
  * branch's report when it completed and its failure reason when it did not.
  *
- * **A failed branch says why, and that is a reversal worth explaining.** This
- * used to be `null` for anything that did not complete, on the principle that
- * internal diagnostics never reach the model. The principle was right about
- * *diagnostics* and wrong about this field: what a facet writes into `error` is
- * not a stack trace, it is a sentence addressed to the delegating model —
- * "there is no checkout in this workspace yet… clone the repository before
- * delegating", "every credential has reached its limit; send this request again
- * after that". Withholding those left the parent with `status: "failed"` and
- * nothing else, and a parent that cannot tell a transient failure from a
- * permanent one retries. In the run that prompted this it retried twelve times
- * over nine minutes, then apologised to the user for a wall it was never shown.
+ * **A failed branch says why.** What a facet writes into `error` is not a stack
+ * trace, it is a sentence addressed to the delegating model — "there is no
+ * checkout in this workspace yet… clone the repository before delegating",
+ * "every credential has reached its limit; send this request again after that".
+ * Withhold it and the parent has `status: "failed"` and nothing else, and a
+ * parent that cannot tell a transient failure from a permanent one retries.
  *
- * What replaces the old rule is a constraint on the writer rather than a filter
- * here: **an `error` is model-visible, so a facet must write it in words that
- * are safe for one to read and act on.**
+ * So the constraint is on the writer rather than a filter here: **an `error` is
+ * model-visible, so a facet must write it in words that are safe for one to read
+ * and act on.**
  *
  * **Neither half is clipped.** A report cut short reads as complete, and its
  * tail is where it says what was left undone. A facet that can produce a
  * runaway `error` bounds it where it writes it.
  *
- * Still one field, not two. The model's question is "what came back from this
+ * One field, not two. The model's question is "what came back from this
  * branch", and `status` already says which kind of answer it is getting.
  *
  * A type alias, not an interface: this is serialized as the tool result's

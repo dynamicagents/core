@@ -54,8 +54,7 @@ export class DurableTaskStore implements TaskStore {
    *
    * An agent whose DO does not implement `listTasks` answers the RPC with the
    * protocol's own "unsupported" error rather than a binding-level failure — the
-   * capability is genuinely optional, and one of the two predecessor agents
-   * shipped without it for its whole life.
+   * capability is genuinely optional.
    */
   async list(params: ListTasksRequest): Promise<ListTasksResponse> {
     const agent = this.resolveAgent(this.identity);

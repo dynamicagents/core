@@ -57,11 +57,10 @@ export type SubtaskRuntime = Record<string, unknown>;
 /**
  * Narrow a {@link SubtaskRuntime} to the shape a plugin resolved for itself.
  *
- * Runtime is an open bag because core cannot know what a domain needs — the
- * predecessor repo declared ARC's four fields (`cardId`, `cookies`, `guid`,
- * `frame`) right here in the delegation types, which meant core imported a
- * domain's types and every unrelated agent carried them. A plugin now writes and
- * reads its own slice, and the only thing core does with the bag is carry it.
+ * Runtime is an open bag because core cannot know what a domain needs. Declaring
+ * a domain's fields here would make core import that domain's types, and every
+ * unrelated agent would carry them. A plugin writes and reads its own slice, and
+ * the only thing core does with the bag is carry it.
  *
  * The unchecked cast is the point: the plugin that wrote the slice is the plugin
  * reading it, so the assertion is local and its blast radius is one module.

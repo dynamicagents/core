@@ -67,10 +67,9 @@ async function signingKeyFor(
  * Sign a short-lived token identifying **this agent as a caller** to another
  * service that trusts its card key.
  *
- * The production sibling of `makeGatekeeperToken`, which core previously shipped
- * only from `/testing` — so an agent that had to call out mint-signed had to
- * hand-write this shape, and every deployment that did so wrote its own subtly
- * different version of the `iss`/`jku` agreement above.
+ * The production sibling of `/testing`'s `makeGatekeeperToken`. Hand-writing
+ * this shape instead is how a deployment ends up with its own subtly different
+ * version of the `iss`/`jku` agreement above.
  *
  * Distinct from {@link signCallbackJwt}, which carries **no** claims: that one
  * proves "the agent you called is calling you back about this task", where this

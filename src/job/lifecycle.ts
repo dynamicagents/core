@@ -208,10 +208,10 @@ export class JobLifecycle<
    * caller needs the stamp because it is what the alarm must present to
    * {@link claim} to get past the single-flight guard.
    *
-   * An arming caller must **not** own the run. The predecessor handed one to
-   * `ctx.waitUntil` from a gate poll that returned in milliseconds, and the
-   * drain was disposed underneath it mid-command. An alarm invocation belongs to
-   * the object rather than to any request, so nothing it awaits can be cut short.
+   * An arming caller must **not** own the run. Hand one to `ctx.waitUntil` from
+   * a gate poll that returns in milliseconds and the drain is disposed
+   * underneath it mid-command. An alarm invocation belongs to the object rather
+   * than to any request, so nothing it awaits can be cut short.
    */
   async arm(
     placeholder: Omit<RunningJob<TExtra>, "state" | "startedAt">

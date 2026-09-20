@@ -154,6 +154,10 @@ export interface CoreConfig {
    * The baseline every subagent branch runs under. A recipe may override either
    * field — to any positive integer, larger included — and inherits the baseline
    * for whatever it does not validly declare. A default, not a ceiling.
+   *
+   * `resolveConfig` bounds `maxTurns` and `maxWallMs` here, and passes the
+   * deferral fields through unvalidated: those are checked on
+   * {@link mainAgentLimits} only, the one limit set a deferral is read from.
    */
   subagentLimits: AgentLimits;
   /**
@@ -359,33 +363,35 @@ export function resolveConfig(overrides: CoreConfigOverrides): CoreConfig {
     );
   }
 
-  // The deferral bounds, on both limit sets. Absent is the default and means the
-  // feature is off, so these are validated only when named — but a named one is
-  // held to what it says it is: `maxDeferrals` is a count of waits, and a
-  // fractional one enables a wait the config did not ask for (0.5 admits the
-  // first and refuses the second). A non-finite duration is worse than wrong: it
-  // compares false against every bound and silently turns the tool off.
-  for (const [which, limits] of [
-    ["mainAgentLimits", config.mainAgentLimits],
-    ["subagentLimits", config.subagentLimits]
-  ] as const) {
-    const { maxDeferrals, maxDeferredMs } = limits;
-    if (
-      maxDeferrals !== undefined &&
-      (!Number.isInteger(maxDeferrals) || maxDeferrals < 0)
-    ) {
-      throw new ConfigError(
-        `${which}.maxDeferrals must be a non-negative integer, got ${maxDeferrals} — 0 turns waiting off`
-      );
-    }
-    if (
-      maxDeferredMs !== undefined &&
-      (!Number.isFinite(maxDeferredMs) || maxDeferredMs < 0)
-    ) {
-      throw new ConfigError(
-        `${which}.maxDeferredMs must be a non-negative number of milliseconds, got ${maxDeferredMs} — 0 turns waiting off`
-      );
-    }
+  // The deferral bounds, on `mainAgentLimits` only: that is the one limit set a
+  // deferral is ever read from ({@link file://./round/workflow.ts} spends the
+  // allowance, {@link file://./round/turn.ts buildTurnInstructions} decides
+  // whether `check_back` exists). A subagent's copy cannot reach a runner at all
+  // — `resolveLimits` merges a recipe's budget field by field and carries only
+  // `maxTurns` and `maxWallMs` — so validating it polices a value nothing reads.
+  //
+  // Absent is the default and means the feature is off, so these are validated
+  // only when named — but a named one is held to what it says it is:
+  // `maxDeferrals` is a count of waits, and a fractional one enables a wait the
+  // config did not ask for (0.5 admits the first and refuses the second). A
+  // non-finite duration is worse than wrong: it compares false against every
+  // bound and silently turns the tool off.
+  const { maxDeferrals, maxDeferredMs } = config.mainAgentLimits;
+  if (
+    maxDeferrals !== undefined &&
+    (!Number.isInteger(maxDeferrals) || maxDeferrals < 0)
+  ) {
+    throw new ConfigError(
+      `mainAgentLimits.maxDeferrals must be a non-negative integer, got ${maxDeferrals} — 0 turns waiting off`
+    );
+  }
+  if (
+    maxDeferredMs !== undefined &&
+    (!Number.isFinite(maxDeferredMs) || maxDeferredMs < 0)
+  ) {
+    throw new ConfigError(
+      `mainAgentLimits.maxDeferredMs must be a non-negative number of milliseconds, got ${maxDeferredMs} — 0 turns waiting off`
+    );
   }
 
   // Waiting depends on the observation window, and the dependency is invisible

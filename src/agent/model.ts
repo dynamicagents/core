@@ -19,14 +19,9 @@ import type { GatewayLogFields } from "./gateway-log.js";
  * a consumer can equally supply one from outside the package, which is the
  * point of the seam.
  *
- * There was a `./anthropic` sibling until 0.8.0 — a hand-written Messages API
- * adapter behind an optional peer dependency. It was removed with the only
- * deployment that used it. Nothing about this contract changed when it went,
- * which is the strongest thing that can be said for the contract.
- *
- * Which is why this file has no runtime imports at all. The Workers AI factory
- * used to live in it, and a contract that ships one implementation inline reads
- * as *the* runtime with an escape hatch, rather than as one of N.
+ * This file has no runtime imports at all, deliberately: a contract that ships
+ * one implementation inline reads as *the* runtime with an escape hatch, rather
+ * than as one of N.
  */
 
 /**

@@ -29,11 +29,11 @@ import type { PlainTask } from "./task.js";
  * carrying the per-task validation `token` — come from
  * `@dynamicagents/g2a-protocol`, the same package the gatekeeper reads them from.
  *
- * The header used to be declared here and again in slack-gatekeeper, each with a
- * comment naming the other file. It is a slightly different case from the claim
- * names: the value is `@a2a-js/sdk`'s own default for `tokenHeaderName`, not
- * Dynamic Agents' choice, but the SDK never *exports* it — it exists only as an
- * inline fallback — so neither side could import it and both wrote it down.
+ * A slightly different case from the claim names: the value is `@a2a-js/sdk`'s
+ * own default for `tokenHeaderName`, not Dynamic Agents' choice, but the SDK
+ * never *exports* it — it exists only as an inline fallback — so neither side
+ * can import it, and the protocol package is where it is written down once
+ * rather than on both sides.
  *
  * Re-exported so `@dynamicagents/core/a2a` keeps being where an agent finds it.
  */
