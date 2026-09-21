@@ -48,8 +48,8 @@ export class DecompositionValidationError extends Error {
  * **invisible to the model**: custom checks do not survive JSON-Schema conversion,
  * so the rule would be one the model is held to without ever being shown it.
  * `/\S/` converts to `"pattern": "\\S"` next to `"minLength": 1`, so the
- * constraint reaches the model as part of the tool schema, on every field, with
- * no per-field `.describe()` needed to restate it.
+ * constraint reaches the model as part of the tool schema, on every field. A
+ * field's `.describe()` says what the field is for, and need not restate it.
  *
  * Being shown a rule is not the same as being held to it. This schema reaches
  * the model through a **control** tool, which has no `execute`, so the SDK never
@@ -67,9 +67,20 @@ function makeSubtaskProposalSchema(types: SubtaskTypeRegistry) {
   return z.object({
     // A closed enum, not prose: an invented type is rejected by the tool schema
     // itself rather than silently resolving to some default recipe.
-    type: z.enum(types.enumKeys()),
-    prompt: nonBlank("prompt"),
-    referenceIndexes: z.array(z.number().int().min(1)).optional(),
+    type: z
+      .enum(types.enumKeys())
+      .describe(
+        "Exactly one of the type names listed in this tool's description. Any other value fails the call."
+      ),
+    prompt: nonBlank("prompt").describe(
+      "The complete instruction for this subtask. Its subagent sees nothing but this and the turns named in referenceIndexes."
+    ),
+    referenceIndexes: z
+      .array(z.number().int().min(1))
+      .optional()
+      .describe(
+        "The N of each conversation turn marked [ref N] that this subtask must read verbatim. Only marked turns can be referenced."
+      ),
     /**
      * The type's required inputs — ids the model quotes from a tool result.
      * Every key any type declares is named here, gathered from those types by
@@ -104,8 +115,19 @@ export function makeDecompositionProposalSchema(
   maxSubtasks: number
 ) {
   return z.object({
-    reply: nonBlank("reply"),
-    subtasks: z.array(makeSubtaskProposalSchema(types)).min(1).max(maxSubtasks)
+    // Said outright, because a model confuses it with a subtask's `prompt` and
+    // sends a top-level `prompt` instead: a missing `reply` is the commonest
+    // rejection this tool gets.
+    reply: nonBlank("reply").describe(
+      "Required. The message the user sees now, while the work runs: what you are doing about their request. Not an instruction — the work itself goes in each subtask's prompt."
+    ),
+    subtasks: z
+      .array(makeSubtaskProposalSchema(types))
+      .min(1)
+      .max(maxSubtasks)
+      .describe(
+        "The units of work. All of them start at once, and none can see another's output."
+      )
   });
 }
 

@@ -8,6 +8,7 @@ import {
   type NonRecoverableKind
 } from "../agent/inference.js";
 import { withFallback } from "../agent/fallback.js";
+import { unwrapEncodedInput } from "../agent/tool-input.js";
 import type { ModelPair } from "../agent/model.js";
 import type { ProgressEvent, RecipeChunkResult } from "../subtasks/types.js";
 import type { RecipeLimits } from "../contract/recipe.js";
@@ -361,6 +362,7 @@ export async function runResumableChunk(
         instructions: deps.system,
         messages: state.messages,
         tools: deps.tools,
+        repairToolCall: unwrapEncodedInput,
         stopWhen: boundaries(),
         maxOutputTokens: deps.maxOutputTokens,
         abortSignal: deps.abortSignal,
