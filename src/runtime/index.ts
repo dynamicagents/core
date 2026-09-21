@@ -144,6 +144,11 @@ export interface AgentRuntime {
   ): Promise<RecipeExecutionResult>;
   /** Let the owning plugin release whatever `resolveRuntime` acquired. */
   onAbort(ctx: ResolveRuntimeContext): Promise<void>;
+  /**
+   * Tell the owning plugin the execution settled, on every terminal outcome
+   * rather than only the aborted ones. Never rejects.
+   */
+  onSettled(ctx: ResolveRuntimeContext): Promise<void>;
 }
 
 export interface CreateAgentRuntimeOptions {
@@ -417,6 +422,24 @@ export function createAgentRuntime(
     async onAbort(ctx: ResolveRuntimeContext): Promise<void> {
       const plugin = pluginForType(ctx.type);
       if (plugin?.onAbort) await plugin.onAbort(ctx);
+    },
+
+    // Contained here rather than promised by every plugin: the subtask row is
+    // already terminal when this runs, so a release that throws must not fail
+    // the chunk that succeeded. `onAbort` is called on paths that are already
+    // tearing down and can afford to propagate; this one is not.
+    async onSettled(ctx: ResolveRuntimeContext): Promise<void> {
+      const plugin = pluginForType(ctx.type);
+      if (!plugin?.onSettled) return;
+      try {
+        await plugin.onSettled(ctx);
+      } catch (err) {
+        console.warn("[runtime] plugin settle hook failed", {
+          plugin: plugin.key,
+          type: ctx.type,
+          err: String(err)
+        });
+      }
     }
   };
 }

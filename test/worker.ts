@@ -8,6 +8,10 @@ import {
   type SubagentRuntime
 } from "../src/subagent/index.js";
 import type { A2ASecretsEnv } from "../src/env.js";
+import { DynamicAgent } from "../src/host/agent.js";
+import type { CoreConfigOverrides } from "../src/config.js";
+import type { AgentPlugin } from "../src/contract/plugin.js";
+import type { TaskState } from "@a2a-js/sdk";
 
 /**
  * The Worker under test.
@@ -113,5 +117,50 @@ export class DelegatingScheduled extends DurableObject<Cloudflare.Env> {
   override async alarm(): Promise<void> {
     this.ownAlarms += 1;
     await this.wake.alarm();
+  }
+}
+
+/**
+ * A real {@link DynamicAgent}, for the lifecycle hooks that only fire on one.
+ *
+ * `TestAgent` above extends `Agent` and hands out an `AgentDB` — enough for the
+ * storage specs, and nothing at all for `saveTask`, which is where settlement is
+ * decided. Three abstract members is the whole cost of driving the real thing,
+ * so the hook is covered against the code that fires it rather than a copy of
+ * its shape.
+ *
+ * The recorder is in memory: a spec asserts *that* the hook ran and with what,
+ * which is the part a refactor breaks silently.
+ */
+export class SettleAgent extends DynamicAgent {
+  readonly settled: { taskId: string; state: TaskState }[] = [];
+  readonly canceled: string[] = [];
+  /** Set by a spec to prove a throwing override cannot fail the write. */
+  throwOnSettle = false;
+
+  protected agentConfig(): CoreConfigOverrides {
+    return {
+      model: { chatModelId: "test-model", fallbackChatModelId: "test-fallback" }
+    };
+  }
+
+  protected agentPlugins(): AgentPlugin[] {
+    return [];
+  }
+
+  protected agentSoul(): string {
+    return "a test agent";
+  }
+
+  protected override async onTaskCanceled(taskId: string): Promise<void> {
+    this.canceled.push(taskId);
+  }
+
+  protected override async onTaskSettled(
+    taskId: string,
+    state: TaskState
+  ): Promise<void> {
+    this.settled.push({ taskId, state });
+    if (this.throwOnSettle) throw new Error("settle hook blew up");
   }
 }

@@ -48,7 +48,12 @@ const TERMINAL_STATES: ReadonlySet<TaskState> = new Set([
   TaskState.TASK_STATE_REJECTED
 ]);
 
-function isTerminal(state: TaskState): boolean {
+/**
+ * Exported because the lifecycle hook that fires on settlement lives on the
+ * agent host, not here: see `onTaskSettled` in `../../host/agent.ts`, which asks
+ * this question of a row it has just written.
+ */
+export function isTerminal(state: TaskState): boolean {
   return TERMINAL_STATES.has(state);
 }
 
