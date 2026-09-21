@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { delegateCallOutput } from "./delegate.js";
+import { asSchema } from "ai";
+import { delegateCallOutput, makeDelegateTool } from "./delegate.js";
+import { makeSubtaskTypes } from "./subtask-types.js";
 import type { CompositionBranch } from "./types.js";
 
 /**
@@ -71,5 +73,57 @@ describe("delegateCallOutput", () => {
     ]);
     expect(done?.output).toBe(report);
     expect(failed?.output).toBe(error);
+  });
+});
+
+/** A converted JSON Schema, as far as these assertions walk it. */
+interface SchemaNode {
+  description?: string;
+  pattern?: string;
+  properties?: Record<string, SchemaNode>;
+  items?: SchemaNode;
+}
+
+describe("the delegate tool's schema", () => {
+  const types = makeSubtaskTypes([
+    {
+      key: "general",
+      description: "General work.",
+      params: null,
+      capability: "You can delegate general work.",
+      recipe: {
+        key: "general",
+        version: 1,
+        soul: "You are a general subagent.",
+        toolFamilies: [],
+        enabled: true,
+        limits: {},
+        historyWindow: 10,
+        reportMetrics: false
+      }
+    }
+  ]);
+
+  /**
+   * What the model reads while it fills the arguments in, which the system
+   * prompt is not: without it, `reply` was sent as a top-level `prompt`.
+   */
+  it("says what every field is for, in the schema the provider is sent", async () => {
+    const root = (await asSchema(makeDelegateTool(types, 4).inputSchema)
+      .jsonSchema) as SchemaNode;
+    const subtask = root.properties?.subtasks?.items?.properties;
+
+    for (const field of [
+      root.properties?.reply,
+      root.properties?.subtasks,
+      subtask?.type,
+      subtask?.prompt,
+      subtask?.referenceIndexes
+    ]) {
+      expect(field?.description).toBeTruthy();
+    }
+    expect(root.properties?.reply?.description).toMatch(/prompt/);
+    // Describing a field keeps the non-blank rule it was already shown.
+    expect(root.properties?.reply?.pattern).toBe("\\S");
   });
 });

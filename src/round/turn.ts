@@ -48,6 +48,7 @@ import { FINAL_REPLY_TOOL_NAME } from "../agent/final-reply.js";
 import { stepAllowance, type TurnBudget } from "../agent/budget.js";
 import { withFallback } from "../agent/fallback.js";
 import type { ModelPair } from "../agent/model.js";
+import { isPlainObject, unwrapEncodedInput } from "../agent/tool-input.js";
 import type { MainAgentToolApproval } from "../contract/plugin.js";
 import {
   DELEGATE_TOOL_NAME,
@@ -641,9 +642,9 @@ export type RunTurnOutcome =
   | { status: "canceled" };
 
 /**
- * A control call the round refused, kept so it can be handed back to the model
- * verbatim. `input` is whatever the model actually sent — unvalidated by
- * definition, since failing validation is why it is here.
+ * A control call the round refused, kept so it can be handed back to the model.
+ * `input` is whatever the model actually sent — unvalidated by definition, since
+ * failing validation is why it is here.
  */
 interface RejectedCall {
   toolName: string;
@@ -981,6 +982,7 @@ async function attempt(
       tools: { ...controlToolSet(control), ...workTools, ...approvals.tools },
       toolApproval: approvals.rules,
       onToolExecutionEnd: approvals.onToolExecutionEnd,
+      repairToolCall: unwrapEncodedInput,
       // Every ending is a control call, so the model must always call something.
       // Work tools stay freely available — `required` constrains the *shape* of a
       // step's output, not which tool is chosen.
@@ -1209,6 +1211,14 @@ function controlCallId(taskId: string, round: number): string {
  * because that is what it is — and an assistant tool-call with no matching result
  * is a malformed message list to every provider.
  *
+ * **The call is echoed as sent only when its input is an object.** Anything else
+ * becomes `{}`, and what was sent travels in the result instead. A provider takes
+ * nothing but an object as a call's arguments — Workers AI 400s on a string — and
+ * the pair sends this exchange to both of its models, so an echo the provider
+ * refuses ends the round on the very call meant to repair it. The SDK makes the
+ * same substitution for an invalid work-tool call, but its `typeof` check lets
+ * `null` and arrays through.
+ *
  * Entirely ephemeral. These messages exist for the next `generateText` call and are
  * never appended to the Session: the durable record of a round is the ending it
  * landed on, and a call that was thrown out is not something a later round should
@@ -1219,6 +1229,11 @@ function repairExchange(
   rejected: RejectedCall,
   error: unknown
 ): ModelMessage[] {
+  const echoed = isPlainObject(rejected.input);
+  const sent =
+    typeof rejected.input === "string"
+      ? rejected.input
+      : String(JSON.stringify(rejected.input));
   return [
     {
       role: "assistant",
@@ -1227,7 +1242,7 @@ function repairExchange(
           type: "tool-call",
           toolCallId,
           toolName: rejected.toolName,
-          input: rejected.input
+          input: echoed ? rejected.input : {}
         }
       ]
     },
@@ -1242,6 +1257,9 @@ function repairExchange(
             type: "error-text",
             value:
               `${String(error)}\n\n` +
+              (echoed
+                ? ""
+                : `Your arguments were not a JSON object. What you sent, verbatim:\n\n${sent}\n\n`) +
               `The round did not end and nothing was started. Call ${rejected.toolName} ` +
               `again, keeping the parts that were fine and fixing only what the error names.`
           }

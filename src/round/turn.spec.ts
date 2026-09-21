@@ -28,7 +28,8 @@ import {
   mockModel,
   inspectingModel,
   rateLimitedModel,
-  throwingModel
+  throwingModel,
+  type ModelCall
 } from "../testing/mock-model.js";
 import { CredentialRejectedError } from "../agent/errors.js";
 import { TEST_MODELS } from "../testing/fixtures.js";
@@ -2277,5 +2278,113 @@ describe("a round that waits", () => {
     );
 
     expect(outcome).toMatchObject({ status: "deferred", seconds: 60 });
+  });
+});
+
+/**
+ * A call whose arguments arrived as something other than an object. Workers AI
+ * refuses a prompt carrying one, so a round that echoed it back in a repair died
+ * there — on both models of the pair, one turn in.
+ */
+describe("a call whose arguments are not an object", () => {
+  const delegation = {
+    reply: "on it",
+    subtasks: [{ type: "general", prompt: "research the thing" }]
+  };
+
+  /** {@link mockModel}, behind a provider that refuses what Workers AI does. */
+  function strictProvider(...steps: Parameters<typeof mockModel>) {
+    const inner = mockModel(...steps);
+    const asked: ModelCall["messages"][] = [];
+    const model = new MockLanguageModelV3({
+      doGenerate: async (options) => {
+        asked.push(options.prompt);
+        const refused = options.prompt.some(
+          (m) =>
+            m.role === "assistant" &&
+            m.content.some(
+              (p) =>
+                p.type === "tool-call" &&
+                (typeof p.input !== "object" ||
+                  p.input === null ||
+                  Array.isArray(p.input))
+            )
+        );
+        if (refused)
+          throw new APICallError({
+            message:
+              "Assistant tool call function.arguments must be a JSON object.",
+            url: "mock:chat:test",
+            requestBodyValues: {},
+            statusCode: 400
+          });
+        return inner.doGenerate(options);
+      }
+    });
+    return { model, asked: () => asked };
+  }
+
+  it("repairs one it cannot unwrap, in a call the provider takes", async () => {
+    // Double-encoded and cut off mid-string, which is how it arrived.
+    const sent = '{"reply":"on it","subtasks":[{"type":"gener';
+    const provider = strictProvider(
+      { toolCall: { toolName: DELEGATE_TOOL_NAME, input: sent } },
+      { toolCall: { toolName: DELEGATE_TOOL_NAME, input: delegation } }
+    );
+
+    const outcome = await runTurn(args({ models: pair(provider.model) }));
+
+    expect(outcome).toMatchObject({ status: "delegated", reply: "on it" });
+    // The repair was the second call, and the last: nothing fell through.
+    expect(provider.asked()).toHaveLength(2);
+    const repair = provider.asked()[1];
+    const echoed = repair
+      .flatMap((m) => (m.role === "assistant" ? m.content : []))
+      .find((p) => p.type === "tool-call");
+    expect(echoed).toMatchObject({ toolName: DELEGATE_TOOL_NAME, input: {} });
+    // What was sent reaches the model in the result instead.
+    expect(JSON.stringify(repair)).toContain(JSON.stringify(sent).slice(1, -1));
+  });
+
+  it("takes one holding the object as a string, with no repair", async () => {
+    const model = inspectingModel({
+      toolCall: {
+        toolName: DELEGATE_TOOL_NAME,
+        input: JSON.stringify(delegation)
+      }
+    });
+
+    const outcome = await runTurn(args({ models: pair(model.model) }));
+
+    expect(outcome).toMatchObject({ status: "delegated", reply: "on it" });
+    expect(model.asked()).toHaveLength(1);
+  });
+
+  it("runs a work tool sent the same way", async () => {
+    let cloned: string | undefined;
+    const tools = {
+      repo_clone: tool({
+        description: "clone a repository",
+        inputSchema: z.object({ url: z.string() }),
+        execute: async ({ url }: { url: string }) => {
+          cloned = url;
+          return "cloned";
+        }
+      })
+    };
+    const model = mockModel(
+      {
+        toolCall: {
+          toolName: "repo_clone",
+          input: JSON.stringify({ url: "https://github.com/o/r" })
+        }
+      },
+      finalReply("done")
+    );
+
+    const outcome = await runTurn(args({ tools, models: pair(model) }));
+
+    expect(outcome).toEqual({ status: "replied", reply: "done" });
+    expect(cloned).toBe("https://github.com/o/r");
   });
 });
