@@ -43,19 +43,21 @@ class GatekeeperUser implements User {
  * stashes the raw headers in the context's state bag, so an executor can reach
  * them the same way it would under the Express binding.
  *
- * `tenant` names which agent on this origin the call is for. The SDK's
- * `JsonRpcTransportHandler` would also lift it off `params.tenant` on its own,
- * but only when the context arrives without one — so passing it here is not
- * redundant: this Worker has already parsed, authorized and routed on the
- * tenant before a handler exists to receive the context, and setting it keeps
- * the value the executor and task store see identical to the one that chose
- * them. It is also what reaches the extended-card provider, which the SDK calls
- * with the context alone.
+ * The context carries **no tenant**, exactly as the SDK's own JSON-RPC binding
+ * builds it. The transport lifts `params.tenant` onto the context it was handed
+ * and refuses to lift it onto one that already has a tenant, so constructing one
+ * here is not a shortcut but an error — every call would come back as an
+ * internal error. Lifting it there is also what keeps *one* context object
+ * across dispatch, which is what {@link extensionHeaders} depends on: the
+ * activations it reads are recorded on the object the transport passed down.
+ *
+ * Nothing is lost by it. The Worker has already parsed, authorized and routed on
+ * `params.tenant` before this is called, and the value the transport lifts is
+ * that same string — see {@link file://../worker/index.ts createA2AWorker}.
  */
 export function buildCallContext(
   request: Request,
-  identity: GatekeeperIdentity,
-  tenant: string
+  identity: GatekeeperIdentity
 ): ServerCallContext {
   const headers: RequestHeaders = {};
   for (const [name, value] of request.headers) headers[name] = value;
@@ -66,8 +68,7 @@ export function buildCallContext(
     ),
     user: new GatekeeperUser(identity),
     headers,
-    requestedVersion: request.headers.get(A2A_VERSION_HEADER) ?? undefined,
-    tenant
+    requestedVersion: request.headers.get(A2A_VERSION_HEADER) ?? undefined
   });
 }
 

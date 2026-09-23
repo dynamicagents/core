@@ -118,7 +118,7 @@
     "prepare": "husky || true && npm run build"
   },
   "dependencies": {
-    "@a2a-js/sdk": "^1.1.0",
+    "@a2a-js/sdk": "^1.2.0",
     "@dynamicagents/g2a-protocol": "^0.4.1",
     "drizzle-orm": "^0.45.2",
     "jose": "^6.2.12",
