@@ -271,8 +271,25 @@ export interface AgentPlugin<TRuntime = SubtaskRuntime> {
     ctx: EnrichResultContext<TRuntime>,
     result: RecipeExecutionResult
   ) => Promise<RecipeExecutionResult>;
-  /** Release anything {@link resolveRuntime} acquired, when an execution is canceled. */
+  /**
+   * Release anything {@link resolveRuntime} acquired, when an execution is
+   * canceled — and when the Workflow gives up on one, for a plugin that declares
+   * no {@link onFail}.
+   */
   onAbort?: (ctx: ResolveRuntimeContext) => Promise<void>;
+  /**
+   * The Workflow gave up on an execution — its step ran out of retries, or of
+   * chunks. Declared, it runs **instead of** {@link onAbort} on that path.
+   *
+   * A different question from a cancel, which is why it is its own hook: a step
+   * running out of retries says nothing about the execution itself, which may
+   * have been healthy to the end — its transport is what failed. So what it did
+   * may be worth keeping rather than discarding, and what is returned here is
+   * appended to the failure the delegating model reads: the one place to say
+   * what the execution left and how to pick it up. Without it a model
+   * re-delegates the work from nothing.
+   */
+  onFail?: (ctx: ResolveRuntimeContext) => Promise<string | void>;
   /**
    * The execution reached a terminal outcome — release what was held for its
    * lifetime.

@@ -300,6 +300,38 @@ describe("subtasks", () => {
     expect(rows.map((r) => r.prompt)).toEqual(["do a", "do b", "do c"]);
   });
 
+  it("appends a note to a failure, and to nothing else", async () => {
+    const outcome = await withDb("failure-notes", async (db) => {
+      await db.ensureReady();
+      const [failed, done] = db.subtasks.createDecomposition("t1", 1, [
+        draft("fails"),
+        draft("completes")
+      ]);
+      db.subtasks.fail(failed.id, "execution exhausted retries");
+      const noted = db.subtasks.noteFailure(failed.id, "Its work is on b.");
+
+      db.subtasks.start(done.id, { recipeId: "r", recipeVersion: 1 });
+      db.subtasks.complete(done.id, [{ kind: "text", text: "done" }]);
+      const notedResult = db.subtasks.noteFailure(done.id, "Its work is on b.");
+
+      return {
+        noted,
+        notedResult,
+        failed: db.subtasks.get(failed.id),
+        done: db.subtasks.get(done.id)
+      };
+    });
+
+    expect(outcome.noted).toBe(true);
+    expect(outcome.failed?.error).toBe(
+      "execution exhausted retries\n\nIts work is on b."
+    );
+    // A row that completed is a result, and a note about kept work would be a
+    // second, contradicting answer beside it.
+    expect(outcome.notedResult).toBe(false);
+    expect(outcome.done?.error ?? null).toBeNull();
+  });
+
   it("guards each status transition so a late loser cannot overwrite a result", async () => {
     const outcome = await withDb("transitions", async (db) => {
       await db.ensureReady();

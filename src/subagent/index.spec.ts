@@ -58,6 +58,7 @@ interface Facet {
   ): void;
   postProgress(event: ProgressEvent): Promise<void>;
   abortRun(): Promise<boolean>;
+  yieldRun(): Promise<void>;
   inflight?: AbortController;
 }
 
@@ -113,6 +114,22 @@ describe("a facet's own progress notes", () => {
       await facet.postProgress({ key: "claude:1", text: "after" });
 
       expect(posted.map((p) => p.key)).toEqual(["claude:0"]);
+    });
+  });
+
+  it("keeps posting when a chunk is only asked to yield", async () => {
+    await withFacet(async (facet, posted) => {
+      facet.noteProgressContext(REQUEST, { push: PUSH, ordinal: 1 });
+      const inflight = new AbortController();
+      facet.inflight = inflight;
+
+      // What a retry does to the attempt it replaces: the run is interrupted,
+      // and nothing is canceled — the retry goes on narrating the same work.
+      await facet.yieldRun();
+      await facet.postProgress({ key: "claude:4", text: "still going" });
+
+      expect(inflight.signal.aborted).toBe(true);
+      expect(posted.map((p) => p.key)).toEqual(["claude:4"]);
     });
   });
 

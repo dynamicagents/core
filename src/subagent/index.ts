@@ -391,7 +391,9 @@ export abstract class RecipeSubagentBase<
         abortSignal: controller.signal
       }));
     } finally {
-      this.inflight = undefined;
+      // Only its own: a chunk unwinding after a retry started must not clear the
+      // retry's controller.
+      if (this.inflight === controller) this.inflight = undefined;
     }
     // The per-step checkpoint already ran; persist the final state too so a chunk
     // that yielded without a completed step still advances durably.
@@ -514,6 +516,23 @@ export abstract class RecipeSubagentBase<
     if (!this.inflight) return false;
     this.inflight.abort();
     return true;
+  }
+
+  /**
+   * End the chunk running here early, as a yield: its state is checkpointed and
+   * the run carries on in the next chunk.
+   *
+   * What a retry of the same chunk asks of the attempt it replaces — see
+   * {@link file://../round/chunk-attempts.ts ChunkAttempts}. Unlike
+   * {@link abortRun} nothing is being canceled, so progress stays armed.
+   *
+   * Returns once the signal is delivered, not once the chunk has unwound: the
+   * parent waits for that on its own call. **An override that holds its work
+   * outside {@link inflight} must override this too**, or its retry waits out
+   * the whole of the chunk it was meant to replace.
+   */
+  async yieldRun(): Promise<void> {
+    this.inflight?.abort();
   }
 
   /**

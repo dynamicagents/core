@@ -41,8 +41,13 @@ import type {
 } from "../subtasks/types.js";
 import { DynamicAgent } from "../host/agent.js";
 import type { SubagentClass } from "./subagent.js";
+import { ChunkAttempts } from "./chunk-attempts.js";
+import { failExecution } from "../runtime/fail.js";
 import type { ApprovalCall, FinalRoundReason, RoundPolicy } from "./policy.js";
-import type { MainAgentToolApproval } from "../contract/plugin.js";
+import type {
+  MainAgentToolApproval,
+  ResolveRuntimeContext
+} from "../contract/plugin.js";
 import {
   buildTurnInstructions,
   declinedReason,
@@ -190,6 +195,19 @@ export abstract class RoundAgentBase<
    * drives the round has none to pass down.
    */
   private readonly inflight = new Map<string, AbortController>();
+
+  /** The chunk each Subtask is running here — see `./chunk-attempts.ts`. */
+  private readonly chunkAttempts = new ChunkAttempts({
+    interrupt: async (id) => {
+      const subtask = this.db.subtasks.get(id);
+      if (!subtask) return;
+      const child = await this.dynamicAgents.get(
+        this.subagentClass(),
+        subagentName(subtask.taskId, id)
+      );
+      await child.yieldRun();
+    }
+  });
 
   // --- the two extra seams a delegating agent fills ------------------------
 
@@ -767,7 +785,13 @@ export abstract class RoundAgentBase<
     // the success as a failure.
     if (!this.db.subtasks.fail(id, error)) return;
     const name = subagentName(subtask.taskId, id);
-    await this.releaseRuntimeQuietly(subtask);
+    // The failure the delegating model reads is the only place a plugin can say
+    // what the execution left and how to continue it — see `AgentPlugin.onFail`.
+    const note = await failExecution(
+      this.runtime,
+      this.runtimeContextForRow(subtask)
+    );
+    if (note) this.db.subtasks.noteFailure(id, note);
     await this.settleRuntimeForRow(subtask);
     // Stopped before it is dropped, as a cancel stops it: a branch that failed
     // at its step can still have work running under it — a claude-code session
@@ -806,8 +830,23 @@ export abstract class RoundAgentBase<
    * checkpoint) and when the row is in a status this cannot accept — a subtask
    * that is neither `pending` nor `running` nor already terminal. Both are bugs,
    * not outcomes.
+   *
+   * **A retry takes over from the attempt it replaces** when that one is still
+   * running here: the Workflow can fail an attempt without cancelling its call.
+   * See `./chunk-attempts.ts`.
    */
   async executeSubtaskChunk(
+    id: SubtaskId,
+    chunk: number,
+    push?: TurnPushContext
+  ): Promise<SubtaskChunkOutcome> {
+    return this.chunkAttempts.run(id, () =>
+      this.runSubtaskChunk(id, chunk, push)
+    );
+  }
+
+  /** One chunk, once it is this attempt's turn — see {@link executeSubtaskChunk}. */
+  private async runSubtaskChunk(
     id: SubtaskId,
     chunk: number,
     push?: TurnPushContext
@@ -1160,31 +1199,30 @@ export abstract class RoundAgentBase<
 
   /** The same, from a durable row rather than a built request. */
   private settleRuntimeForRow(subtask: Subtask): Promise<void> {
-    return this.runtime.onSettled({
-      taskId: subtask.taskId,
-      subtaskId: subtask.id,
-      type: subtask.type,
-      params: subtask.params,
-      toolFamilies: this.toolFamiliesForType(subtask.type)
-    });
+    return this.runtime.onSettled(this.runtimeContextForRow(subtask));
   }
 
   /** The same, from a durable row rather than a built request. Best-effort. */
   private async releaseRuntimeQuietly(subtask: Subtask): Promise<void> {
     try {
-      await this.runtime.onAbort({
-        taskId: subtask.taskId,
-        subtaskId: subtask.id,
-        type: subtask.type,
-        params: subtask.params,
-        toolFamilies: this.toolFamiliesForType(subtask.type)
-      });
+      await this.runtime.onAbort(this.runtimeContextForRow(subtask));
     } catch (err) {
       console.warn("[agent] plugin runtime release failed", {
         subtaskId: subtask.id,
         err: String(err)
       });
     }
+  }
+
+  /** The plugin hooks' context, from a durable row. */
+  private runtimeContextForRow(subtask: Subtask): ResolveRuntimeContext {
+    return {
+      taskId: subtask.taskId,
+      subtaskId: subtask.id,
+      type: subtask.type,
+      params: subtask.params,
+      toolFamilies: this.toolFamiliesForType(subtask.type)
+    };
   }
 
   /** Best-effort `abortRun` on a child, for a branch that ended without it. */
