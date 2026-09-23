@@ -7,6 +7,7 @@ import {
 } from "../config.js";
 import {
   PLUGIN_CONTRACT_VERSION,
+  type AbortContext,
   type AgentPlugin,
   type EnrichResultContext,
   type MainAgentToolApproval,
@@ -142,8 +143,11 @@ export interface AgentRuntime {
     ctx: EnrichResultContext,
     result: RecipeExecutionResult
   ): Promise<RecipeExecutionResult>;
-  /** Let the owning plugin release whatever `resolveRuntime` acquired. */
-  onAbort(ctx: ResolveRuntimeContext): Promise<void>;
+  /**
+   * Let the owning plugin release whatever `resolveRuntime` acquired, and answer
+   * what it said the execution left behind — see `AgentPlugin.onAbort`.
+   */
+  onAbort(ctx: AbortContext): Promise<string | undefined>;
   /**
    * Tell the owning plugin the execution settled, on every terminal outcome
    * rather than only the aborted ones. Never rejects.
@@ -419,9 +423,9 @@ export function createAgentRuntime(
       return plugin.enrichResult(ctx, result);
     },
 
-    async onAbort(ctx: ResolveRuntimeContext): Promise<void> {
+    async onAbort(ctx: AbortContext): Promise<string | undefined> {
       const plugin = pluginForType(ctx.type);
-      if (plugin?.onAbort) await plugin.onAbort(ctx);
+      return (await plugin?.onAbort?.(ctx)) || undefined;
     },
 
     // Contained here rather than promised by every plugin: the subtask row is

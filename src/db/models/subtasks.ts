@@ -1,4 +1,4 @@
-import { and, eq, inArray, lt, max } from "drizzle-orm";
+import { and, eq, inArray, lt, max, sql } from "drizzle-orm";
 import { z } from "zod";
 import { subtasks } from "../schema.js";
 import type { DB } from "../db.js";
@@ -253,6 +253,27 @@ export function makeSubtasks(db: DB, opts: SubtaskModelOptions) {
         error,
         completedAt: Date.now()
       });
+    },
+
+    /**
+     * Append what the owning plugin said a failed execution left behind to the
+     * error already recorded — see `AgentPlugin.onAbort`, which returns it.
+     *
+     * A `failed` row only, so a note can never land on a result, and appended in
+     * SQL rather than read and rewritten, so it cannot drop an error written in
+     * between. Returns false when the row is not failed.
+     */
+    noteFailure(id: SubtaskId, note: string): boolean {
+      const updated = db
+        .update(subtasks)
+        .set({
+          error: sql`coalesce(${subtasks.error}, '') || ${`\n\n${note}`}`,
+          updatedAt: Date.now()
+        })
+        .where(and(eq(subtasks.id, id), eq(subtasks.status, "failed")))
+        .returning({ id: subtasks.id })
+        .all();
+      return updated.length > 0;
     },
 
     /**

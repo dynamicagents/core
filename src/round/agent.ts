@@ -41,8 +41,9 @@ import type {
 } from "../subtasks/types.js";
 import { DynamicAgent } from "../host/agent.js";
 import type { SubagentClass } from "./subagent.js";
+import { ChunkAttempts } from "./chunk-attempts.js";
 import type { ApprovalCall, FinalRoundReason, RoundPolicy } from "./policy.js";
-import type { MainAgentToolApproval } from "../contract/plugin.js";
+import type { AbortReason, MainAgentToolApproval } from "../contract/plugin.js";
 import {
   buildTurnInstructions,
   declinedReason,
@@ -190,6 +191,19 @@ export abstract class RoundAgentBase<
    * drives the round has none to pass down.
    */
   private readonly inflight = new Map<string, AbortController>();
+
+  /** The chunk each Subtask is running here — see `./chunk-attempts.ts`. */
+  private readonly chunkAttempts = new ChunkAttempts({
+    interrupt: async (id) => {
+      const subtask = this.db.subtasks.get(id);
+      if (!subtask) return;
+      const child = await this.dynamicAgents.get(
+        this.subagentClass(),
+        subagentName(subtask.taskId, id)
+      );
+      await child.yieldRun();
+    }
+  });
 
   // --- the two extra seams a delegating agent fills ------------------------
 
@@ -767,7 +781,10 @@ export abstract class RoundAgentBase<
     // the success as a failure.
     if (!this.db.subtasks.fail(id, error)) return;
     const name = subagentName(subtask.taskId, id);
-    await this.releaseRuntimeQuietly(subtask);
+    // The failure the delegating model reads is the only place a plugin can say
+    // what the execution left and how to continue it — see `AgentPlugin.onAbort`.
+    const note = await this.releaseRuntimeQuietly(subtask, "failed");
+    if (note) this.db.subtasks.noteFailure(id, note);
     await this.settleRuntimeForRow(subtask);
     // Stopped before it is dropped, as a cancel stops it: a branch that failed
     // at its step can still have work running under it — a claude-code session
@@ -806,8 +823,23 @@ export abstract class RoundAgentBase<
    * checkpoint) and when the row is in a status this cannot accept — a subtask
    * that is neither `pending` nor `running` nor already terminal. Both are bugs,
    * not outcomes.
+   *
+   * **A retry takes over from the attempt it replaces** when that one is still
+   * running here: the Workflow can fail an attempt without cancelling its call.
+   * See `./chunk-attempts.ts`.
    */
   async executeSubtaskChunk(
+    id: SubtaskId,
+    chunk: number,
+    push?: TurnPushContext
+  ): Promise<SubtaskChunkOutcome> {
+    return this.chunkAttempts.run(id, () =>
+      this.runSubtaskChunk(id, chunk, push)
+    );
+  }
+
+  /** One chunk, once it is this attempt's turn — see {@link executeSubtaskChunk}. */
+  private async runSubtaskChunk(
     id: SubtaskId,
     chunk: number,
     push?: TurnPushContext
@@ -843,7 +875,7 @@ export abstract class RoundAgentBase<
       // contained: a plugin's throwing `onAbort` would otherwise leave a terminal
       // row that never settled, which is the resource leaking for good.
       try {
-        await this.releaseRuntime(request);
+        await this.releaseRuntime(request, "canceled");
       } finally {
         if (won) await this.settleRuntime(request);
       }
@@ -986,7 +1018,7 @@ export abstract class RoundAgentBase<
       if (subtask.status === "running") {
         // The verdict, for the reason `executeSubtaskChunk`'s cancel path gives.
         const won = this.db.subtasks.cancelRunning(id);
-        await this.releaseRuntimeQuietly(subtask);
+        await this.releaseRuntimeQuietly(subtask, "canceled");
         if (won) await this.settleRuntimeForRow(subtask);
         await this.abortChildQuietly(
           name,
@@ -1121,13 +1153,17 @@ export abstract class RoundAgentBase<
   }
 
   /** Let the owning plugin release whatever `resolveRuntime` acquired. */
-  private releaseRuntime(request: RecipeExecutionRequest): Promise<void> {
-    return this.runtime.onAbort({
+  private async releaseRuntime(
+    request: RecipeExecutionRequest,
+    reason: AbortReason
+  ): Promise<void> {
+    await this.runtime.onAbort({
       taskId: request.taskId,
       subtaskId: request.subtaskId,
       type: request.type,
       params: request.params,
-      toolFamilies: request.recipe.toolFamilies
+      toolFamilies: request.recipe.toolFamilies,
+      reason
     });
   }
 
@@ -1169,21 +1205,29 @@ export abstract class RoundAgentBase<
     });
   }
 
-  /** The same, from a durable row rather than a built request. Best-effort. */
-  private async releaseRuntimeQuietly(subtask: Subtask): Promise<void> {
+  /**
+   * The same, from a durable row rather than a built request. Best-effort, and
+   * answers what the plugin said the execution left behind.
+   */
+  private async releaseRuntimeQuietly(
+    subtask: Subtask,
+    reason: AbortReason
+  ): Promise<string | undefined> {
     try {
-      await this.runtime.onAbort({
+      return await this.runtime.onAbort({
         taskId: subtask.taskId,
         subtaskId: subtask.id,
         type: subtask.type,
         params: subtask.params,
-        toolFamilies: this.toolFamiliesForType(subtask.type)
+        toolFamilies: this.toolFamiliesForType(subtask.type),
+        reason
       });
     } catch (err) {
       console.warn("[agent] plugin runtime release failed", {
         subtaskId: subtask.id,
         err: String(err)
       });
+      return undefined;
     }
   }
 
@@ -1337,7 +1381,7 @@ export abstract class RoundAgentBase<
         // cleanup the post-chunk cancellation path does.
         if (await child.abortRun()) continue;
         if (this.db.subtasks.cancelRunning(subtask.id)) {
-          await this.releaseRuntimeQuietly(subtask);
+          await this.releaseRuntimeQuietly(subtask, "canceled");
           await this.settleRuntimeForRow(subtask);
           await this.abortChildQuietly(
             name,

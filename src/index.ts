@@ -27,6 +27,8 @@ export {
   type RestrictMainAgentToolsOptions,
   type WithoutToolApprovalOptions,
   type EmitProgress,
+  type AbortContext,
+  type AbortReason,
   type EnrichResultContext,
   type MainAgentToolApproval,
   type MainAgentToolApprovalRule,
