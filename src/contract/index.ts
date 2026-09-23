@@ -8,8 +8,6 @@
 export {
   PLUGIN_CONTRACT_VERSION,
   definePlugin,
-  type AbortContext,
-  type AbortReason,
   type AgentPlugin,
   type EmitProgress,
   type EnrichResultContext,

@@ -230,42 +230,8 @@ describe("createAgentRuntime — what it composes", () => {
     // …and neither does a type no plugin owns at all.
     expect(await rt.resolveRuntime({ ...ctx, type: "nobody" })).toEqual({});
     await expect(
-      rt.onAbort({ ...ctx, type: "nobody", reason: "failed" })
+      rt.onAbort({ ...ctx, type: "nobody" })
     ).resolves.toBeUndefined();
-  });
-
-  it("hands back what an aborting plugin said was left behind", async () => {
-    const seen: string[] = [];
-    const keeps = definePlugin({
-      key: "keeps",
-      subtaskType: subtaskType("kept-work"),
-      onAbort: async (ctx) => {
-        seen.push(ctx.reason);
-        return ctx.reason === "failed" ? "Its work is on branch b." : "";
-      }
-    });
-    const rt = createAgentRuntime({
-      config: { model: TEST_MODELS },
-      plugins: [keeps, beta]
-    });
-    const ctx = {
-      taskId: "t1",
-      subtaskId: 1,
-      type: "kept-work",
-      params: {},
-      toolFamilies: []
-    };
-
-    expect(await rt.onAbort({ ...ctx, reason: "failed" })).toBe(
-      "Its work is on branch b."
-    );
-    // An empty answer is no note, so nothing is appended to a failure for it.
-    expect(await rt.onAbort({ ...ctx, reason: "canceled" })).toBeUndefined();
-    expect(seen).toEqual(["failed", "canceled"]);
-    // A plugin with no hook has nothing to say.
-    expect(
-      await rt.onAbort({ ...ctx, type: "beta", reason: "failed" })
-    ).toBeUndefined();
   });
 
   it("contains a throwing settle hook instead of failing the chunk", async () => {

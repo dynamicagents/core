@@ -115,21 +115,6 @@ export interface ResolveRuntimeContext {
   toolFamilies: readonly string[];
 }
 
-/**
- * Why an execution is being cut short.
- *
- * - `canceled`: the Task was. Nothing will read what the execution left.
- * - `failed`: the Workflow gave up on the branch — its step ran out of retries, or
- *   of chunks. That says nothing about the execution itself, which may have been
- *   healthy to the end, so what it did may be worth continuing.
- */
-export type AbortReason = "canceled" | "failed";
-
-/** What the parent knows when an execution is cut short. */
-export interface AbortContext extends ResolveRuntimeContext {
-  reason: AbortReason;
-}
-
 /** What the parent knows when a plugin gets to enrich a terminal result. */
 export interface EnrichResultContext<TRuntime = SubtaskRuntime> {
   request: RecipeExecutionRequest;
@@ -287,15 +272,24 @@ export interface AgentPlugin<TRuntime = SubtaskRuntime> {
     result: RecipeExecutionResult
   ) => Promise<RecipeExecutionResult>;
   /**
-   * Release anything {@link resolveRuntime} acquired, when an execution is cut
-   * short.
-   *
-   * On `failed`, what is returned is appended to the failure the delegating model
-   * reads, which is the only place to say what the execution left behind and how
-   * to pick it up — without it a model re-delegates the work from nothing.
-   * Ignored on `canceled`.
+   * Release anything {@link resolveRuntime} acquired, when an execution is
+   * canceled — and when the Workflow gives up on one, for a plugin that declares
+   * no {@link onFail}.
    */
-  onAbort?: (ctx: AbortContext) => Promise<string | void>;
+  onAbort?: (ctx: ResolveRuntimeContext) => Promise<void>;
+  /**
+   * The Workflow gave up on an execution — its step ran out of retries, or of
+   * chunks. Declared, it runs **instead of** {@link onAbort} on that path.
+   *
+   * A different question from a cancel, which is why it is its own hook: a step
+   * running out of retries says nothing about the execution itself, which may
+   * have been healthy to the end — its transport is what failed. So what it did
+   * may be worth keeping rather than discarding, and what is returned here is
+   * appended to the failure the delegating model reads: the one place to say
+   * what the execution left and how to pick it up. Without it a model
+   * re-delegates the work from nothing.
+   */
+  onFail?: (ctx: ResolveRuntimeContext) => Promise<string | void>;
   /**
    * The execution reached a terminal outcome — release what was held for its
    * lifetime.
