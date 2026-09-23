@@ -781,7 +781,10 @@ export function createA2AWorker<TEnv extends object>(
       }
 
       const card = cardFor(agent.manifest, requestedTenant);
-      const context = buildCallContext(request, identity, requestedTenant);
+      // Built without a tenant: the SDK's transport lifts `params.tenant` onto
+      // it, and throws if it arrives carrying one. See
+      // {@link file://../a2a/context.ts buildCallContext}.
+      const context = buildCallContext(request, identity);
 
       // v1.0 negotiates the protocol version per request via the `A2A-Version`
       // header, and the SDK leaves enforcement to the transport binding (its
@@ -857,17 +860,12 @@ export function createA2AWorker<TEnv extends object>(
         // handing it `signCard`'s already-encoded wire card would encode twice
         // and silently break the signature. See {@link signCardInPlace}.
         //
-        // The tenant is read off the context rather than the request params
-        // because that is all the SDK passes; it is the value this Worker
-        // already authorized and routed on.
-        async (ctx) => {
-          const requested = ctx.tenant ?? "";
-          const target = tenantAgent(env, requested);
-          if (!target) {
-            throw new RequestMalformedError(`unknown tenant '${requested}'`);
-          }
-          return signCardInPlace(cardFor(target.manifest, requested), signing);
-        }
+        // It is the card built above that gets signed, rather than one re-derived
+        // from the context the SDK hands the provider: the tenant on that context
+        // is the same caller-supplied string, but re-deriving invites the
+        // authorization and unknown-tenant checks above to be repeated here — or,
+        // worse, forgotten here.
+        async () => signCardInPlace(card, signing)
       );
       const rpc = new JsonRpcTransportHandler(handler);
       const result = await rpc.handle(body, context);

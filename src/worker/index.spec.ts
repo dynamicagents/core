@@ -536,6 +536,21 @@ describe("tenant routing", () => {
     expect(await res.text()).toMatch(/authorizes tenant 'sibling'/);
   });
 
+  it("refuses a request that addresses a sibling with its own tenant's token", async () => {
+    // The same replay from the other side, and the side that matters most now:
+    // `params.tenant` is what the SDK's transport lifts onto the call context,
+    // so it is what the executor, the task store and the card provider all read.
+    // Nothing downstream of here re-checks it against the token — this is the
+    // only place the two are ever compared.
+    const token = await makeGatekeeperToken();
+    const res = await call(sendMessage({}, "sibling"), token);
+
+    expect(res.status).toBe(401);
+    expect(await res.text()).toMatch(
+      `authorizes tenant '${TEST_TENANT}', but the request addressed 'sibling'`
+    );
+  });
+
   it("refuses a token carrying no tenant claim at all", async () => {
     // A gatekeeper too old to scope its tokens. Treating an absent claim as a
     // wildcard would silently reopen the replay above for every such caller.
