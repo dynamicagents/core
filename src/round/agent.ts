@@ -24,7 +24,7 @@ import {
 } from "../agent/history.js";
 import { newTurnBudget, type TurnBudget } from "../agent/budget.js";
 import { FINGERPRINT_MISMATCH, subagentName } from "../subagent/index.js";
-import { labelSubagentNote } from "../subtasks/progress.js";
+import { transcribeNote } from "../artifacts/transcript.js";
 import type {
   ChunkProgressContext,
   CompositionBranch,
@@ -911,11 +911,24 @@ export abstract class RoundAgentBase<
     // *not* labelled — it is the replay-dedupe id and must stay derived from
     // position alone — and neither is `outcome.progress` itself, which rides back
     // to the Workflow.
+    //
+    // Every note is also filed on the Task's transcript, and what the thread
+    // gets back is the link for the first and silence for the rest — or the
+    // note itself, unchanged, wherever a deployment has wired no store. See
+    // {@link file://../artifacts/transcript.ts transcribeNote}.
     if (push) {
       const channel = this.push(push);
       const source = { type: request.type, ordinal };
+      const origin = this.selfOrigin();
       for (const event of outcome.progress) {
-        await channel.working(labelSubagentNote(event.text, source), event.key);
+        const line = await transcribeNote(this.env, {
+          taskId: request.taskId,
+          origin,
+          source,
+          text: event.text,
+          key: event.key
+        });
+        if (line !== undefined) await channel.working(line, event.key);
       }
     }
 

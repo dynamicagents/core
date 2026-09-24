@@ -22,6 +22,7 @@ import {
   type TurnPushContext
 } from "../a2a/push.js";
 import { SelfOrigin } from "../a2a/self-origin.js";
+import { settleTranscript } from "../artifacts/transcript.js";
 import { buildAgentSession, type SessionLike } from "../agent/session.js";
 import { withFallback } from "../agent/fallback.js";
 import {
@@ -646,6 +647,12 @@ export abstract class DynamicAgent<
   // subclassed by consumers: `private` is compile-time only, so it spends the
   // name in every subclass — and `settled` is a name a subclass wants.
   async #settled(taskId: string, state: TaskState): Promise<void> {
+    // First, and best-effort: this is the one place core learns that a task
+    // will not move again, so it is where a transcript of it ends. Before the
+    // hook rather than after, because the hook releases resources and can take
+    // as long as a container takes to stop, while somebody may be watching the
+    // transcript for the line that says it finished.
+    await settleTranscript(this.env, taskId, state);
     try {
       await this.onTaskSettled(taskId, state);
     } catch (err) {

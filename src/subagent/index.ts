@@ -19,7 +19,7 @@ import type {
   SubtaskId,
   SubtaskRuntime
 } from "../subtasks/types.js";
-import { labelSubagentNote } from "../subtasks/progress.js";
+import { transcribeNote } from "../artifacts/transcript.js";
 import {
   createPushChannel,
   type PushChannel,
@@ -193,6 +193,8 @@ export abstract class RecipeSubagentBase<
   private live?: {
     channel: PushChannel;
     source: { type: string; ordinal: number };
+    /** The Task whose transcript this chunk's notes are filed on. */
+    taskId: string;
   };
 
   async onStart(): Promise<void> {
@@ -422,7 +424,8 @@ export abstract class RecipeSubagentBase<
     this.live = live
       ? {
           channel: this.pushChannel(live.push),
-          source: { type: request.type, ordinal: live.ordinal }
+          source: { type: request.type, ordinal: live.ordinal },
+          taskId: request.taskId
         }
       : undefined;
   }
@@ -469,15 +472,23 @@ export abstract class RecipeSubagentBase<
    *
    * Never throws. `PushChannel.working` swallows its own failures, on the
    * principle that a run which cannot report its progress is still a run that
-   * should deliver its answer.
+   * should deliver its answer — and so does the transcript this also files the
+   * note on, which is what decides whether the thread gets the note, the link
+   * to the transcript, or nothing at all. See
+   * {@link file://../artifacts/transcript.ts transcribeNote}.
    */
   protected async postProgress(event: ProgressEvent): Promise<void> {
     const live = this.live;
     if (!live) return;
-    await live.channel.working(
-      labelSubagentNote(event.text, live.source),
-      event.key
-    );
+    const line = await transcribeNote(this.env, {
+      taskId: live.taskId,
+      origin: this.selfOrigin(),
+      source: live.source,
+      text: event.text,
+      key: event.key
+    });
+    if (line === undefined) return;
+    await live.channel.working(line, event.key);
   }
 
   /**

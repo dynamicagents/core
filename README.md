@@ -267,6 +267,52 @@ The rows are core's third table, they are never written into the Session — his
 stays text-only — and they age out on the same 30-day clock as the rest of a
 Task's state.
 
+### 5. Put a run's progress behind a link, if you want that
+
+A delegating round narrates itself: every time a subagent has something to say, a
+labelled note lands in the thread the person is reading, in the same voice as the
+answer they are waiting for. A long run produces dozens. The notes are worth
+keeping — they are the only account of what the run actually did — and a thread is
+the wrong place to keep them.
+
+`@dynamicagents/core/artifacts` is where they go instead. The **first** note of a
+task is posted as a link and nothing else, every note after it is recorded and not
+posted at all, and the link streams live and then ends with the state the task
+settled in. Main-agent progress is untouched: a round's acknowledgment and its step
+text are the conversation, not an account of one.
+
+**It is dormant until a deployment wires the binding**, and that is three lines:
+
+```jsonc
+// wrangler.jsonc
+"durable_objects": { "bindings": [{ "name": "ARTIFACTS", "class_name": "Artifacts" }] },
+"migrations": [{ "tag": "v2", "new_sqlite_classes": ["Artifacts"] }]
+```
+
+```ts
+import { Artifacts, handleArtifactRoute } from "@dynamicagents/core/artifacts";
+
+export { Artifacts };
+
+export default {
+  async fetch(request: Request, env: Env) {
+    return (await handleArtifactRoute(request, env)) ?? a2a(request, env);
+  }
+};
+```
+
+Bind nothing and every note goes where it went before, unchanged — nothing has to
+opt out, and neither an unreachable store nor a failed ingest can cost a turn: the
+note is posted as it always was.
+
+An artifact is a **kind**, a long random **token**, an append-only list of labelled
+notes, and a settle status. The token is id and authorization in one — derived from
+nothing, so a link is the whole of what a reader needs and anyone holding one can
+read it. `session-transcript` is the first kind and the object holds no code for
+it; ingest is RPC over the binding and never a route, so a write is authenticated
+by being inside the Worker. Artifacts age out on the same 30-day clock as the rest
+of a Task's state, swept lazily on the next write rather than by an alarm apiece.
+
 ---
 
 ## Exports
@@ -284,6 +330,7 @@ not drag in the A2A adapter, and the test harness cannot reach a production bund
 | `@dynamicagents/core/round`        | the delegating round loop: `RoundAgentBase`, `runHandleTask`, `runTurn`      |
 | `@dynamicagents/core/subtasks`     | delegation types, decomposition, the `delegate` tool                         |
 | `@dynamicagents/core/subagent`     | `RecipeSubagentBase`, resumable runs, fingerprinting, workspace              |
+| `@dynamicagents/core/artifacts`    | the `Artifacts` object, its routes and viewer, the transcript emission       |
 | `@dynamicagents/core/db`           | `AgentDB`, the three-table schema, migrations, `PluginStore`                 |
 | `@dynamicagents/core/testing`      | VCR, `FakeSession`, `mockModel`, DO helpers, JWK fixtures — _workerd realm_  |
 | `@dynamicagents/core/testing/node` | the VCR recorder + cassette store — _Node realm, never import from a spec_   |

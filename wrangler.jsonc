@@ -20,7 +20,8 @@
       { "name": "TEST_SUBAGENT", "class_name": "TestSubagent" },
       { "name": "PLAIN_SCHEDULED", "class_name": "PlainScheduled" },
       { "name": "DELEGATING_SCHEDULED", "class_name": "DelegatingScheduled" },
-      { "name": "SETTLE_AGENT", "class_name": "SettleAgent" }
+      { "name": "SETTLE_AGENT", "class_name": "SettleAgent" },
+      { "name": "ARTIFACTS", "class_name": "Artifacts" }
     ]
   },
 
@@ -39,6 +40,10 @@
     {
       "tag": "v3",
       "new_sqlite_classes": ["SettleAgent"]
+    },
+    {
+      "tag": "v4",
+      "new_sqlite_classes": ["Artifacts"]
     }
   ]
 }

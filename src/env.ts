@@ -19,6 +19,12 @@
  * origin, and they share this one signing identity with it. What separates them
  * is the tenant claim on the gatekeeper token, not a key apiece. See
  * {@link file://./worker/index.ts}.
+ *
+ * One slice lives elsewhere on purpose: `ARTIFACTS` is **optional** and is
+ * declared beside the code that reads it, in
+ * {@link file://./artifacts/binding.ts ArtifactsEnv}. A slice here is something
+ * core cannot run without; that one is a capability a deployment either wires or
+ * does not.
  */
 
 /** Workers AI, backing the chat loop (and whatever a plugin runs on it). */
