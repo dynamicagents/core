@@ -283,8 +283,12 @@ the wrong place to keep them.
 named for the branch that opened it — `Subtask Session (Claude Code 0): <link>` — and
 nothing else until one such post **reaches** the thread; every note after that is
 recorded and not posted at all, and the link streams live and then ends with the
-state the task settled in. Main-agent progress is untouched: a round's acknowledgment
-and its step text are the conversation, not an account of one.
+state the task settled in. The page renders each note's markdown — a report's
+headings, bullets, backticked paths and fenced diffs, rather than the soup they are
+as characters — in the browser, on text HTML-escaped before a single markdown rule
+runs, because a note is whatever a subagent wrote. Main-agent progress is untouched:
+a round's acknowledgment and its step text are the conversation, not an account of
+one.
 
 **Every agent binds `ARTIFACTS`**, and the wiring is a binding, a migration, an
 export and the route delegation below. A Durable Object that starts without the

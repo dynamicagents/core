@@ -17,6 +17,12 @@
  * interpolated into markup. That is not only a simplification: it is the reason
  * there is no injection surface here to get wrong.
  *
+ * What *is* interpolated is this repo's own code — the wire's event names, and
+ * the note renderer's source, which the script takes by `toString()` so the
+ * rendering can be a tested pure function rather than a string nothing can run.
+ * See {@link file://./markdown.ts renderNoteMarkdown} for the constraints that
+ * puts on it, and for why a note's own markup can never reach this DOM.
+ *
  * ## Why it is kind-generic
  *
  * The artifact's kind arrives on the stream and is rendered as data — a heading
@@ -29,6 +35,7 @@
  */
 
 import { ARTIFACT_EVENTS } from "./events.js";
+import { renderNoteMarkdown } from "./markdown.js";
 
 const STYLE = `
 :root {
@@ -36,11 +43,14 @@ const STYLE = `
   --bg: #fbfbfa; --fg: #1c1b1a; --muted: #6b6864;
   --line: #e4e2de; --card: #ffffff; --accent: #3a6ea5;
   --ok: #2f7d4f; --bad: #b4442e;
+  /* Code sits on the card, not on the page, so it is offset from --card. */
+  --code: #f3f2ef;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #17181a; --fg: #e8e6e3; --muted: #9a9691;
     --line: #2c2e31; --card: #1e2022; --accent: #7aa7d8;
+    --code: #2a2c30;
     /* The settle colours are per-scheme because the light values reach only
        3.5:1 and 3.2:1 on this background, and the pill that wears them is
        .72rem text, which WCAG holds to 4.5:1. These are 6.5:1 and 6.4:1 — in
@@ -78,12 +88,53 @@ h1 { font-size: 1.05rem; font-weight: 600; margin: 0; letter-spacing: .01em; }
   font-size: .75rem; color: var(--muted); margin-bottom: .35rem;
 }
 .label { font-weight: 600; color: var(--fg); font-family: ui-monospace, monospace; }
-.text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* A note is rendered markdown, so no pre-wrap: the renderer emits the line
+   breaks it decided to keep, and pre-wrap would show them twice. Everything
+   below styles what it can emit, and nothing else can arrive — see
+   renderNoteMarkdown for why a note cannot bring markup of its own. */
+.text { overflow-wrap: anywhere; }
+.text > :first-child { margin-top: 0; }
+.text > :last-child { margin-bottom: 0; }
+.text p { margin: 0 0 .6rem; }
+/* Capped, all four of them: the page's own h1 is 1.05rem, and a heading inside
+   one note of a log must not outrank the name of the page it is on. */
+.text h2, .text h3, .text h4, .text h5 {
+  font-weight: 600; line-height: 1.35; margin: 1rem 0 .4rem;
+}
+.text h2 { font-size: 1rem; }
+.text h3 { font-size: .95rem; }
+.text h4, .text h5 { font-size: .9rem; color: var(--muted); }
+.text ul, .text ol { margin: .4rem 0 .6rem; padding-left: 1.5rem; }
+.text li { margin: .15rem 0; }
+.text a { color: var(--accent); }
+.text code {
+  font-family: ui-monospace, monospace; font-size: .875em;
+  background: var(--code); border: 1px solid var(--line); border-radius: 4px;
+  padding: .05rem .25rem;
+}
+.text pre {
+  margin: .5rem 0 .7rem; padding: .7rem .8rem; background: var(--code);
+  border: 1px solid var(--line); border-radius: 8px; overflow-x: auto;
+}
+/* The block is the frame; the code inside it wears none of its own. */
+.text pre code {
+  background: none; border: 0; padding: 0; font-size: .85em; line-height: 1.5;
+}
+.text blockquote {
+  margin: .5rem 0; padding: .1rem 0 .1rem .8rem; color: var(--muted);
+  border-left: 3px solid var(--line);
+}
+.text hr { border: 0; border-top: 1px solid var(--line); margin: .9rem 0; }
 .note { color: var(--muted); font-size: .9rem; }
 `;
 
 const SCRIPT = `
 (function () {
+  // The note renderer, by its own source — see the module note above. Bound to a
+  // name of this page's choosing rather than called by the one it was declared
+  // with, because a bundler may rename that and nothing here would notice.
+  var renderMarkdown = ${renderNoteMarkdown.toString()};
+
   var statusEl = document.getElementById("status");
   var kindEl = document.getElementById("kind");
   var logEl = document.getElementById("log");
@@ -95,6 +146,9 @@ const SCRIPT = `
     statusEl.textContent = text;
   }
 
+  // The one path every entry takes. A reconnect's replay arrives as the same
+  // "entry" frames the live stream sends — see Artifacts.openStream — so there is
+  // nothing to keep in step here, and nothing else may ever append to the log.
   function render(entry) {
     noteEl.hidden = true;
     var wrap = document.createElement("article");
@@ -108,9 +162,11 @@ const SCRIPT = `
     time.dateTime = new Date(entry.at).toISOString();
     time.textContent = new Date(entry.at).toLocaleTimeString();
     meta.append(label, time);
-    var body = document.createElement("p");
+    // A div, not a p: a note renders as blocks, and a list or a code block
+    // inside a paragraph is markup the browser takes apart again.
+    var body = document.createElement("div");
     body.className = "text";
-    body.textContent = entry.text;
+    body.innerHTML = renderMarkdown(entry.text);
     wrap.append(meta, body);
     logEl.append(wrap);
   }
