@@ -52,12 +52,11 @@ describe("labelSubagentNote", () => {
   });
 
   it("leaves the note itself untouched", () => {
-    // Including text that already names its own domain — the ARC tools emit
-    // "ARC <game>: reached level 2" — which the label prefixes rather than
-    // rewrites.
-    const text = "ARC ls20: reached level 2";
-    const labelled = labelSubagentNote(text, { type: "arc-game", ordinal: 0 });
-    expect(labelled).toBe(`[arc-game 0] ${text}`);
+    // Including text that already names its own domain — "CI <job>: 3 of 5
+    // checks passed" — which the label prefixes rather than rewrites.
+    const text = "CI web: 3 of 5 checks passed";
+    const labelled = labelSubagentNote(text, { type: "ci-check", ordinal: 0 });
+    expect(labelled).toBe(`[ci-check 0] ${text}`);
     expect(labelled.endsWith(text)).toBe(true);
   });
 });

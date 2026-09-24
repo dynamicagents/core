@@ -57,7 +57,7 @@ function relativeSpecPath(file: RunnerTestCase["file"]): string {
  * Cassette filename for a test: `kebab(<project-relative path, minus
  * .spec.ts>)` then each describe level then the test name, all kebab-cased and
  * joined by `--`, plus `.snapshot.json`. Example:
- * `test-arc-agi-recorded--arc-recorded-real-api--plays-a-real-game.snapshot.json`.
+ * `test-scraper-recorded--scraper-recorded-real-api--fetches-a-page.snapshot.json`.
  * Exported for debugging / the cassette-rename step.
  */
 export function cassetteNameFor(task: RunnerTestCase): string {

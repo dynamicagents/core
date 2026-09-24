@@ -1,15 +1,6 @@
-/**
- * `@dynamicagents/core/db` — the tables core owns, and the seam a plugin uses to
- * own its own without touching core's migration journal.
- */
+/** `@dynamicagents/core/db` — the tables core owns. */
 
-export {
-  AgentDB,
-  PLUGIN_MIGRATIONS_TABLE,
-  type AgentDBOptions,
-  type DB,
-  type PluginStore
-} from "./db.js";
+export { AgentDB, type AgentDBOptions, type DB } from "./db.js";
 
 export {
   humanRequests,

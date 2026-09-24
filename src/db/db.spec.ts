@@ -8,11 +8,10 @@ import {
   HITL_REQUEST_TYPE,
   type HitlRequestData
 } from "@dynamicagents/g2a-protocol";
-import { AgentDB, PLUGIN_MIGRATIONS_TABLE } from "./db.js";
+import { AgentDB } from "./db.js";
 import { makeDoHelpers, doStorage } from "../testing/do.js";
 import { buildCompletedTask, buildFailedTask } from "../a2a/notify.js";
 import { buildInputRequiredTask } from "../a2a/hitl.js";
-import type { PluginStore } from "./db.js";
 import type { TaskListQuery } from "./models/tasks.js";
 import type { SubtaskDraft } from "../subtasks/types.js";
 import type { ModelMessage, ToolResultPart } from "ai";
@@ -548,102 +547,6 @@ describe("round observations", () => {
     expect(firstOutput(found[0])).toBe("mine");
   });
 });
-
-describe("plugin stores", () => {
-  const makeStore = (version: number, calls: number[]): PluginStore => ({
-    plugin: "demo",
-    version,
-    ensureTables(sql, from) {
-      calls.push(from);
-      sql.exec(
-        "CREATE TABLE IF NOT EXISTS demo_rows (id INTEGER PRIMARY KEY, note TEXT)"
-      );
-      if (from < 2)
-        sql.exec("CREATE INDEX IF NOT EXISTS demo_note ON demo_rows (note)");
-    }
-  });
-
-  it("runs a store's DDL and records its version outside core's journal", async () => {
-    const calls: number[] = [];
-    const version = await withDbStores(
-      "store-v1",
-      [makeStore(1, calls)],
-      (sql) =>
-        sql
-          .exec<{ version: number }>(
-            `SELECT version FROM ${PLUGIN_MIGRATIONS_TABLE} WHERE plugin = 'demo'`
-          )
-          .toArray()[0]?.version
-    );
-
-    // `from` is 0 on the first ever run, which is what lets an upgrade branch.
-    expect(calls).toEqual([0]);
-    expect(version).toBe(1);
-  });
-
-  it("refuses a downgrade rather than silently running older DDL", async () => {
-    const stub = freshStub("downgrade");
-
-    await expect(
-      runInDurableObject(stub, async (instance) => {
-        const storage = doStorage(instance);
-        const up = new AgentDB(storage, {
-          maxSubtasks: 8,
-          stores: [makeStore(2, [])]
-        });
-        await up.ensureReady();
-
-        const down = new AgentDB(storage, {
-          maxSubtasks: 8,
-          stores: [makeStore(1, [])]
-        });
-        await down.ensureReady();
-      })
-    ).rejects.toThrow(/downgrade is not supported/);
-  });
-
-  it("refuses two plugins claiming one storage namespace", async () => {
-    const stub = freshStub("dup-store");
-
-    await expect(
-      runInDurableObject(stub, async (instance) => {
-        const db = new AgentDB(doStorage(instance), {
-          maxSubtasks: 8,
-          stores: [makeStore(1, []), makeStore(1, [])]
-        });
-        await db.ensureReady();
-      })
-    ).rejects.toThrow(/duplicate PluginStore 'demo'/);
-  });
-
-  it("refuses a non-integer or zero version", async () => {
-    const stub = freshStub("bad-version");
-
-    await expect(
-      runInDurableObject(stub, async (instance) => {
-        const db = new AgentDB(doStorage(instance), {
-          maxSubtasks: 8,
-          stores: [{ plugin: "x", version: 0, ensureTables: () => {} }]
-        });
-        await db.ensureReady();
-      })
-    ).rejects.toThrow(/must be an integer >= 1/);
-  });
-});
-
-/** Run `fn` against the raw SQL handle of a DO whose AgentDB carries `stores`. */
-async function withDbStores<T>(
-  label: string,
-  stores: readonly PluginStore[],
-  fn: (sql: SqlStorage) => T
-): Promise<T> {
-  return runInDurableObject(freshStub(label), async (instance) => {
-    const storage = doStorage(instance);
-    const db = new AgentDB(storage, { maxSubtasks: 8, stores });
-    await db.ensureReady();
-    return fn(storage.sql);
-  });
-}
 
 describe("a task parked on a question", () => {
   const question: HitlRequestData = {

@@ -1,17 +1,11 @@
 import type { ModelMessage, ToolApprovalStatus, ToolSet } from "ai";
 import type { SessionMessage } from "agents/sessions";
 import type { SessionLike } from "../agent/session.js";
-import type { PluginStore } from "../db/db.js";
 import type {
   WorkspaceBacking,
   WorkspaceHandle
 } from "../subagent/workspace.js";
-import type {
-  ProgressEvent,
-  RecipeExecutionRequest,
-  RecipeExecutionResult,
-  SubtaskRuntime
-} from "../subtasks/types.js";
+import type { ProgressEvent, SubtaskRuntime } from "../subtasks/types.js";
 import type { SubtaskParams, SubtaskTypeSpec } from "./recipe.js";
 
 /**
@@ -36,7 +30,7 @@ import type { SubtaskParams, SubtaskTypeSpec } from "./recipe.js";
  * optional fields on {@link AgentPlugin}. Removing or re-typing an existing field
  * requires a major and a bump here.
  */
-export const PLUGIN_CONTRACT_VERSION = 1;
+export const PLUGIN_CONTRACT_VERSION = 2;
 
 /**
  * Emit a user-facing progress note from inside a tool (e.g. a level-up in a
@@ -115,12 +109,6 @@ export interface ResolveRuntimeContext {
   toolFamilies: readonly string[];
 }
 
-/** What the parent knows when a plugin gets to enrich a terminal result. */
-export interface EnrichResultContext<TRuntime = SubtaskRuntime> {
-  request: RecipeExecutionRequest;
-  runtime: TRuntime;
-}
-
 /**
  * What a plugin knows when it builds the *main* agent's tools.
  *
@@ -177,7 +165,7 @@ export type MainAgentToolApprovalRule = (
 
 /** Bindings and secrets a plugin needs the *host* to provide in `wrangler.jsonc`. */
 export interface PluginRequirements {
-  /** Secret names, e.g. `["ARC_API_KEY"]`. */
+  /** Secret names, e.g. `["GITHUB_TOKEN"]`. */
   secrets?: readonly string[];
   /** Binding names, e.g. `["BROWSER"]`. */
   bindings?: readonly string[];
@@ -264,14 +252,6 @@ export interface AgentPlugin<TRuntime = SubtaskRuntime> {
    */
   resolveRuntime?: (ctx: ResolveRuntimeContext) => Promise<TRuntime>;
   /**
-   * Amend a terminal result before it is persisted — e.g. append a score the
-   * subagent had no way to read. Returning the result unchanged is always valid.
-   */
-  enrichResult?: (
-    ctx: EnrichResultContext<TRuntime>,
-    result: RecipeExecutionResult
-  ) => Promise<RecipeExecutionResult>;
-  /**
    * Release anything {@link resolveRuntime} acquired, when an execution is
    * canceled — and when the Workflow gives up on one, for a plugin that declares
    * no {@link onFail}.
@@ -355,8 +335,6 @@ export interface AgentPlugin<TRuntime = SubtaskRuntime> {
 
   // --- storage + requirements ---
 
-  /** Tables this plugin owns, outside core's migration journal. See {@link PluginStore}. */
-  store?: PluginStore;
   /**
    * The durable file store a subagent execution's workspace is built over.
    *
@@ -392,8 +370,8 @@ export interface AgentPlugin<TRuntime = SubtaskRuntime> {
  * a plugin author inference on `TRuntime`.
  *
  * ```ts
- * export function arcAgi(config: { apiKey: string }) {
- *   return definePlugin<ArcRuntime>({ key: "arc-agi", … });
+ * export function scraper(config: { apiKey: string }) {
+ *   return definePlugin<ScraperRuntime>({ key: "scraper", … });
  * }
  * ```
  */

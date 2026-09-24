@@ -117,11 +117,11 @@ export interface ArtifactEntryInput {
  * and `migrate()` applies whatever that one journal holds — so enrolling this
  * object would create core's agent tables inside it.
  *
- * The **query** half was never under a rule either. The rule lives in
- * {@link file://../db/db.ts PluginStore} and is narrow — *never import the
- * migrator* — and raw SQL on both halves is already what the subagent facet and
- * `plugin_migrations` do. A second drizzle schema module and a second handle,
- * for tables nothing outside this file reads, would buy nothing here.
+ * The **query** half was never under a rule either. The rule lives on
+ * {@link file://../db/db.ts AgentDB} and is narrow — *never import the
+ * migrator* — and raw SQL on both halves is already what the subagent facet
+ * does. A second drizzle schema module and a second handle, for tables nothing
+ * outside this file reads, would buy nothing here.
  *
  * What a hand-written schema does owe is its own bookkeeping — see
  * {@link CURRENT_SCHEMA_VERSION}.
@@ -172,9 +172,7 @@ export const CURRENT_SCHEMA_VERSION = 1;
 export type SchemaUpgrade = (sql: SqlStorage, from: number) => void;
 
 /**
- * Every change to the shape above, one `if (from < n)` per version, in order —
- * the branching {@link file://../db/db.ts PluginStore} gives a plugin, for the
- * object core owns itself.
+ * Every change to the shape above, one `if (from < n)` per version, in order.
  *
  * {@link DDL} stays frozen at version 1, so a store that has never been opened
  * arrives here at 0 and runs every step. That is the rule that keeps the branch

@@ -144,9 +144,9 @@ export interface ValidatedRecipe extends ResolvedRecipe {
  *
  * - The delegating model picks from an enum, so an invented type is rejected by
  *   the tool schema itself instead of silently falling back to a general recipe.
- * - A type can *require params*. `arc-game` cannot be attempted without a
- *   scorecard and a game, so a subtask that names neither is refused up front
- *   rather than discovering it has nothing to play several turns later.
+ * - A type can *require params*. A type that works on one named thing cannot be
+ *   attempted without it, so a subtask that names none is refused up front
+ *   rather than discovering it has nothing to work on several turns later.
  *
  * Params are the model's declared inputs — ids it chose, validated for shape and
  * resolved against durable rows at execution start. They are never the place for

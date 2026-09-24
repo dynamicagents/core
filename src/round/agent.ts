@@ -83,9 +83,9 @@ import {
  *
  * ## What this class does not know
  *
- * Nothing here names a domain. `resolveRuntime`, `enrichResult` and `onAbort` are
- * hooks on `AgentPlugin`, so a plugin that leases an external session or scores a
- * result gets that without a branch anywhere in this file. That inversion is what
+ * Nothing here names a domain. `resolveRuntime`, `onAbort` and `onSettled` are
+ * hooks on `AgentPlugin`, so a plugin that leases an external session gets that
+ * without a branch anywhere in this file. That inversion is what
  * lets one class body serve every delegating agent.
  */
 /**
@@ -938,15 +938,7 @@ export abstract class RoundAgentBase<
       return { done: false, status: "running", progress: outcome.progress };
     }
 
-    // Let the owning plugin amend the terminal result before it is persisted —
-    // e.g. append a score the subagent had no way to read. Returning the result
-    // unchanged is always valid, and a plugin that declares no hook gets this for
-    // free.
-    const result = await this.runtime.enrichResult(
-      { request, runtime },
-      outcome.result
-    );
-    const persisted = this.persistResult(id, result);
+    const persisted = this.persistResult(id, outcome.result);
     if (!persisted) {
       const current = this.requireSubtask(id);
       if (current.status === "pending" || current.status === "running") {

@@ -38,14 +38,14 @@ function task(
 describe("cassetteNameFor", () => {
   it("names a spec by its project-relative path", () => {
     expect(
-      cassetteNameFor(task("test/arc-agi/recorded.spec.ts", "plays a game"))
-    ).toBe("test-arc-agi-recorded--plays-a-game.snapshot.json");
+      cassetteNameFor(task("test/scraper/recorded.spec.ts", "fetches a page"))
+    ).toBe("test-scraper-recorded--fetches-a-page.snapshot.json");
   });
 
   it("names a spec beside its code under src/ the same way", () => {
     expect(
-      cassetteNameFor(task("src/arc-agi/recorded.spec.ts", "plays a game"))
-    ).toBe("src-arc-agi-recorded--plays-a-game.snapshot.json");
+      cassetteNameFor(task("src/scraper/recorded.spec.ts", "fetches a page"))
+    ).toBe("src-scraper-recorded--fetches-a-page.snapshot.json");
   });
 
   it("never puts the developer's own directories into the name", () => {
@@ -72,13 +72,13 @@ describe("cassetteNameFor", () => {
   it("includes each describe level, in order, kebab-cased", () => {
     expect(
       cassetteNameFor(
-        task("test/arc-agi/recorded.spec.ts", "Reads The Score!", [
-          "arc (recorded real API)",
-          "scoring"
+        task("test/scraper/recorded.spec.ts", "Reads The Title!", [
+          "scraper (recorded real API)",
+          "parsing"
         ])
       )
     ).toBe(
-      "test-arc-agi-recorded--arc-recorded-real-api--scoring--reads-the-score.snapshot.json"
+      "test-scraper-recorded--scraper-recorded-real-api--parsing--reads-the-title.snapshot.json"
     );
   });
 });

@@ -94,7 +94,7 @@ describe("what must NOT change the fingerprint", () => {
     // property riding along must not re-key the execution.
     const withExtra = {
       ...request(),
-      runtime: { leasedScorecard: "s-1" }
+      runtime: { leasedSession: "s-1" }
     } as RecipeExecutionRequest;
 
     expect(await fingerprintRequest(withExtra)).toBe(

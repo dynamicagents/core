@@ -27,7 +27,6 @@ export {
   type RestrictMainAgentToolsOptions,
   type WithoutToolApprovalOptions,
   type EmitProgress,
-  type EnrichResultContext,
   type MainAgentToolApproval,
   type MainAgentToolApprovalRule,
   type MainAgentToolContext,
@@ -88,8 +87,6 @@ export {
   STEPS_PER_INSTANCE,
   TOOL_CALL_GRACE_MS
 } from "./platform.js";
-
-export type { PluginStore } from "./db/db.js";
 
 export {
   makeWorkspaceHandle,

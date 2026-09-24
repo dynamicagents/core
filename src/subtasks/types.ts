@@ -152,11 +152,11 @@ export interface RecipeExecutionRequest {
   prompt: string;
   references: SubtaskReference[];
   /**
-   * The Subtask's validated params. Part of the execution's identity — two plays
-   * of different games are different work — so this IS fingerprinted, unlike
-   * {@link SubtaskRuntime}, which is deliberately excluded: the leased scorecard
-   * can legitimately differ between two chunks of one run, and must not make a
-   * retry look like a different execution.
+   * The Subtask's validated params. Part of the execution's identity — the same
+   * work against two different repositories is two executions — so this IS
+   * fingerprinted, unlike {@link SubtaskRuntime}, which is deliberately excluded:
+   * a leased session can legitimately differ between two chunks of one run, and
+   * must not make a retry look like a different execution.
    */
   params: SubtaskParams;
 }

@@ -12,12 +12,9 @@ import {
  * (`this.ctx.storage`), so a row is unreachable from any other caller by
  * construction.
  *
- * A plugin's tables are **not** here and never will be: drizzle's durable-sqlite
- * migrator keeps one flat integer journal and one global `__drizzle_migrations`
- * table, which independently-versioned packages cannot share. Plugins own their
- * storage through `PluginStore` — idempotent `CREATE TABLE IF NOT EXISTS` plus
- * their own version bookkeeping, outside this journal entirely. See
- * {@link file://./db.ts}.
+ * Nothing outside core's own agent tables belongs here: the migrator's journal is
+ * one flat integer sequence that independently-versioned packages cannot share.
+ * See `AgentDB` in {@link file://./db.ts}.
  *
  * Indexes are declared in each table's config callback rather than as standalone
  * `index(...)` exports: only the callback form is recorded in the drizzle-kit
