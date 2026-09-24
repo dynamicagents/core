@@ -48,13 +48,28 @@
  */
 
 import { TaskState } from "@a2a-js/sdk";
-import { labelSubagentNote, subagentNoteLabel } from "../subtasks/progress.js";
+import {
+  humanSubagentNoteLabel,
+  labelSubagentNote,
+  subagentNoteLabel
+} from "../subtasks/progress.js";
 import type { ArtifactsEnv } from "../env.js";
 import { assertArtifactsBound, requireArtifactsStub } from "./binding.js";
+import type { ArtifactKind } from "./kind.js";
 import { artifactViewerUrl } from "./path.js";
 
-/** The kind a task's progress notes are recorded under. */
-export const SESSION_TRANSCRIPT_KIND = "session-transcript";
+/**
+ * The kind a task's progress notes are recorded under, and the name its page is
+ * titled with — see {@link file://./kind.ts ArtifactKind} for why the name is
+ * declared here rather than known by the object or the viewer.
+ */
+export const SESSION_TRANSCRIPT: ArtifactKind = {
+  id: "session-transcript",
+  displayName: "Session Transcript"
+};
+
+/** Its id alone, for a caller that has nothing to open. */
+export const SESSION_TRANSCRIPT_KIND = SESSION_TRANSCRIPT.id;
 
 /** One labelled note, as both emission sites hold it. */
 export interface SubagentNote {
@@ -103,7 +118,7 @@ export async function transcribeNote(
   }
 
   const stub = requireArtifactsStub(env);
-  const token = await stub.createArtifact(SESSION_TRANSCRIPT_KIND, note.taskId);
+  const token = await stub.createArtifact(SESSION_TRANSCRIPT, note.taskId);
   const recorded = await stub.addEntry(token, {
     key: note.key,
     label: subagentNoteLabel(note.source),
@@ -117,12 +132,19 @@ export async function transcribeNote(
     return;
   }
   if (recorded.announced) return;
+  // Named, not bare: this lands in a thread beside the answer the person is
+  // waiting for, and a URL on its own says neither what it opens nor which
+  // branch of a fanned-out round opened it. The name is the note's own label as
+  // prose — see {@link file://../subtasks/progress.ts humanSubagentNoteLabel}.
+  const announcement =
+    `Subtask Session (${humanSubagentNoteLabel(note.source)}): ` +
+    artifactViewerUrl(note.origin, token);
   // The link first, the fact that it arrived second — in that order, because the
   // failure that lands between them costs a duplicate link and the other order
   // costs the only one. `announce` is unguarded for the reason the ingest above
   // is: inside a durable step, a store that would not take the write is worth a
   // retry, and the retry finds the note recorded and the link still to announce.
-  if (await post(artifactViewerUrl(note.origin, token))) {
+  if (await post(announcement)) {
     await stub.announce(token);
   }
 }
@@ -153,7 +175,7 @@ export async function settleTranscript(
   assertArtifactsBound(env);
   try {
     const stub = requireArtifactsStub(env);
-    const token = await stub.tokenFor(SESSION_TRANSCRIPT_KIND, taskId);
+    const token = await stub.tokenFor(SESSION_TRANSCRIPT, taskId);
     if (token === null) return;
     await stub.settle(token, settleStatus(state));
   } catch (err) {

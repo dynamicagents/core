@@ -6,6 +6,7 @@ import {
   type ReadyEvent,
   type SettledEvent
 } from "./events.js";
+import type { ArtifactKind } from "./kind.js";
 import { parseArtifactPath } from "./path.js";
 import {
   makeArtifactStore,
@@ -110,13 +111,23 @@ export class Artifacts extends DurableObject {
    * its own — a Workflow step, a fresh isolate, a retry — find the artifact it
    * opened earlier instead of starting a second one. Without a key every call
    * opens a new artifact.
+   *
+   * The kind may be a bare id or the {@link file://./kind.ts ArtifactKind} that
+   * declares one, and the difference is only what the page is titled: this
+   * object does not read either, it records them.
    */
-  async createArtifact(kind: string, sourceKey?: string): Promise<string> {
+  async createArtifact(
+    kind: ArtifactKind | string,
+    sourceKey?: string
+  ): Promise<string> {
     return this.store.open(kind, sourceKey);
   }
 
   /** The token a `kind`/`sourceKey` pair already has, or `null`. Opens nothing. */
-  async tokenFor(kind: string, sourceKey: string): Promise<string | null> {
+  async tokenFor(
+    kind: ArtifactKind | string,
+    sourceKey: string
+  ): Promise<string | null> {
     return this.store.tokenFor(kind, sourceKey);
   }
 
@@ -225,7 +236,11 @@ export class Artifacts extends DurableObject {
     );
     this.seat(token, watcher);
 
-    const ready: ReadyEvent = { kind: artifact.kind, status: artifact.status };
+    const ready: ReadyEvent = {
+      kind: artifact.kind,
+      displayName: artifact.displayName,
+      status: artifact.status
+    };
     const opening = [sseFrame(ARTIFACT_EVENTS.ready, ready)];
     for (const entry of this.store.entries(token, resumeFrom(lastEventId))) {
       opening.push(sseFrame(ARTIFACT_EVENTS.entry, entry, entry.sequence));

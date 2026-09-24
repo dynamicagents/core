@@ -280,7 +280,8 @@ keeping — they are the only account of what the run actually did — and a thr
 the wrong place to keep them.
 
 `@dynamicagents/core/artifacts` is where they go instead. A note is posted as a link
-and nothing else until one such post **reaches** the thread; every note after that is
+named for the branch that opened it — `Subtask Session (Claude Code 0): <link>` — and
+nothing else until one such post **reaches** the thread; every note after that is
 recorded and not posted at all, and the link streams live and then ends with the
 state the task settled in. Main-agent progress is untouched: a round's acknowledgment
 and its step text are the conversation, not an account of one.
@@ -335,7 +336,9 @@ An artifact is a **kind**, a long random **token**, an append-only list of label
 notes, a settle status, and whether its link has been delivered. The token is id and authorization in one — derived from
 nothing, so a link is the whole of what a reader needs and anyone holding one can
 read it. `session-transcript` is the first kind and the object holds no code for
-it; ingest is RPC over the binding and never a route, so a write is authenticated
+it — a kind declares the name its page is titled with and the artifact records it,
+so neither the object nor the viewer has a branch per kind. Ingest is RPC over the
+binding and never a route, so a write is authenticated
 by being inside the Worker. Artifacts age out on the same 30-day clock as the rest
 of a Task's state, swept lazily on the next write rather than by an alarm apiece.
 

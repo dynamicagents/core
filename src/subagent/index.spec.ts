@@ -57,6 +57,13 @@ const requestOn = (taskId = crypto.randomUUID()): RecipeExecutionRequest =>
 /** The deployment's own origin, which a facet learns from the push context. */
 const ORIGIN = new URL(PUSH.jku).origin;
 
+/**
+ * The link as the thread receives it: named for the branch that opened it, and
+ * carrying none of the note's own text. See `transcribeNote`.
+ */
+const announced = (token: string | null, ordinal = 0) =>
+  `Subtask Session (Claude Code ${ordinal}): ${ORIGIN}/a/${token}`;
+
 const artifactsNs = (
   env as unknown as Record<string, DurableObjectNamespace<Artifacts>>
 ).ARTIFACTS!;
@@ -109,20 +116,18 @@ describe("a facet's own progress notes", () => {
       facet.noteProgressContext(requestOn(taskId), { push: PUSH, ordinal: 0 });
       await facet.postProgress({ key: "claude:3", text: "Running the suite." });
 
-      // The note is the link and nothing else, under the key the note would
-      // have been posted under — that key is the gatekeeper's dedupe id and the
-      // artifact's, so it travels unlabelled.
+      // The note is the link and none of its own text, under the key the note
+      // would have been posted under — that key is the gatekeeper's dedupe id
+      // and the artifact's, so it travels unlabelled.
       expect(posted).toHaveLength(1);
       expect(posted[0]!.key).toBe("claude:3");
-      expect(posted[0]!.text).toMatch(
-        new RegExp(`^${ORIGIN}/a/[0-9A-Za-z]{40}$`.replace(/\//g, "\\/"))
-      );
+      expect(posted[0]!.text).toMatch(/^Subtask Session \(Claude Code 0\): /);
 
       // And the label is on the entry, which is where a page has a column for
       // it. It is the whole reason `ordinal` travels with the push context: two
       // branches of one round are different instances sharing a type.
       const token = await artifacts().tokenFor(SESSION_TRANSCRIPT_KIND, taskId);
-      expect(posted[0]!.text).toBe(`${ORIGIN}/a/${token}`);
+      expect(posted[0]!.text).toBe(announced(token));
       // Settled first so the stream closes and the body can be read to its end.
       await artifacts().settle(token!, "completed");
       const body = await (
@@ -146,8 +151,8 @@ describe("a facet's own progress notes", () => {
 
       const token = await artifacts().tokenFor(SESSION_TRANSCRIPT_KIND, taskId);
       expect(posted).toEqual([
-        { text: `${ORIGIN}/a/${token}`, key: "claude:0" },
-        { text: `${ORIGIN}/a/${token}`, key: "claude:1" }
+        { text: announced(token), key: "claude:0" },
+        { text: announced(token), key: "claude:1" }
       ]);
     }, false);
   });
@@ -163,9 +168,7 @@ describe("a facet's own progress notes", () => {
       await facet.postProgress({ key: "claude:3", text: "Running the suite." });
 
       const token = await artifacts().tokenFor(SESSION_TRANSCRIPT_KIND, taskId);
-      expect(posted).toEqual([
-        { text: `${ORIGIN}/a/${token}`, key: "claude:3" }
-      ]);
+      expect(posted).toEqual([{ text: announced(token), key: "claude:3" }]);
     });
   });
 

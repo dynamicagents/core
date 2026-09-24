@@ -10,6 +10,12 @@
  * interleave with it.
  */
 
+import {
+  artifactKindDisplayName,
+  artifactKindId,
+  type ArtifactKind
+} from "./kind.js";
+
 /**
  * How long an artifact is kept. The same clock the rest of a Task's durable
  * state ages out on — see `cleanupOldTasks` in
@@ -67,6 +73,12 @@ export interface ArtifactEntry {
 export interface Artifact {
   token: string;
   kind: string;
+  /**
+   * The name its kind declared for a page, or `null` for an artifact opened
+   * under a bare id — including every one opened before a kind could carry a
+   * name. See {@link file://./kind.ts ArtifactKind}.
+   */
+  displayName: string | null;
   createdAt: number;
   /** The status it settled in, or `null` while it is still running. */
   status: string | null;
@@ -166,7 +178,7 @@ const DDL = [
  * {@link ARTIFACT_RETENTION_MS}, so a deployment changing shape meets months of
  * rows it cannot drop and has to know which shape they are in.
  */
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 
 /** Move a store recorded at `from` up to the shape this build expects. */
 export type SchemaUpgrade = (sql: SqlStorage, from: number) => void;
@@ -181,9 +193,10 @@ export type SchemaUpgrade = (sql: SqlStorage, from: number) => void;
  * honest: a column written into the `CREATE TABLE` *and* into a step is added
  * twice on a fresh store, and the `ALTER TABLE` is what fails.
  */
-const upgrade: SchemaUpgrade = () => {
-  // Version 1 is what the DDL creates, so there is nothing to move yet. The
-  // first added column goes here as `if (from < 2) sql.exec("ALTER TABLE …")`.
+const upgrade: SchemaUpgrade = (sql, from) => {
+  // Null on every row an older build opened, and retention keeps those for a
+  // month — see {@link Artifact.displayName}.
+  if (from < 2) sql.exec("ALTER TABLE artifacts ADD COLUMN display_name TEXT");
 };
 
 /** Test seams for {@link ensureArtifactSchema}. */
@@ -244,6 +257,7 @@ export function ensureArtifactSchema(
 type ArtifactRow = {
   token: string;
   kind: string;
+  display_name: string | null;
   created_at: number;
   status: string | null;
   announced_at: number | null;
@@ -264,10 +278,15 @@ export interface ArtifactStore {
    * note arriving on a task that already has a transcript must find it rather
    * than start a second one, and no caller holds the token between turns.
    * Omitting the key opens a fresh artifact every call.
+   *
+   * A kind passed as a {@link file://./kind.ts ArtifactKind} records the name
+   * its page is titled with; one passed as a bare id records none and is titled
+   * from the id. The name is written here, with the row, so a page never has to
+   * ask anything what a kind is called — see the module comment there.
    */
-  open(kind: string, sourceKey?: string): string;
+  open(kind: ArtifactKind | string, sourceKey?: string): string;
   /** The token `sourceKey` names under `kind`, or `null`. Opens nothing. */
-  tokenFor(kind: string, sourceKey: string): string | null;
+  tokenFor(kind: ArtifactKind | string, sourceKey: string): string | null;
   /** One artifact by token, or `null` when the token names nothing. */
   get(token: string): Artifact | null;
   /**
@@ -322,6 +341,7 @@ export function makeArtifactStore(
   const rowTo = (row: ArtifactRow): Artifact => ({
     token: row.token,
     kind: row.kind,
+    displayName: row.display_name,
     createdAt: row.created_at,
     status: row.status,
     announced: row.announced_at !== null
@@ -334,11 +354,14 @@ export function makeArtifactStore(
     at: row.created_at
   });
 
-  const tokenFor = (kind: string, sourceKey: string): string | null =>
+  const tokenFor = (
+    kind: ArtifactKind | string,
+    sourceKey: string
+  ): string | null =>
     sql
       .exec<{ token: string }>(
         "SELECT token FROM artifacts WHERE kind = ? AND source_key = ?",
-        kind,
+        artifactKindId(kind),
         sourceKey
       )
       .toArray()[0]?.token ?? null;
@@ -346,7 +369,7 @@ export function makeArtifactStore(
   const get = (token: string): Artifact | null => {
     const row = sql
       .exec<ArtifactRow>(
-        `SELECT token, kind, created_at, status, announced_at
+        `SELECT token, kind, display_name, created_at, status, announced_at
            FROM artifacts WHERE token = ?`,
         token
       )
@@ -381,11 +404,12 @@ export function makeArtifactStore(
       }
       const token = mintArtifactToken();
       sql.exec(
-        `INSERT INTO artifacts (token, kind, source_key, created_at)
-         VALUES (?, ?, ?, ?)
+        `INSERT INTO artifacts (token, kind, display_name, source_key, created_at)
+         VALUES (?, ?, ?, ?, ?)
          ON CONFLICT (kind, source_key) DO NOTHING`,
         token,
-        kind,
+        artifactKindId(kind),
+        artifactKindDisplayName(kind),
         sourceKey ?? null,
         now()
       );

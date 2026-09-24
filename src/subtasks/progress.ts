@@ -56,3 +56,27 @@ export function subagentNoteLabel(source: {
 }): string {
   return `${source.type} ${source.ordinal}`;
 }
+
+/**
+ * The same two halves, in the case a sentence addressed to a person wants them:
+ * `claude-code 0` as `Claude Code 0`.
+ *
+ * For the one place a label is read as prose rather than as an attribution
+ * column — the transcript link offered in the thread, see
+ * {@link file://../artifacts/transcript.ts transcribeNote}. A type is a config
+ * key and is spelled like one; the words either side of its hyphens are words,
+ * and the ordinal stays the number the `subtasks` table holds.
+ *
+ * By rule and never by table: a mapping of type to prose would have to be kept
+ * in step with every type any consumer ever names, and would be wrong for the
+ * first one nobody added.
+ */
+export function humanSubagentNoteLabel(source: {
+  type: string;
+  ordinal: number;
+}): string {
+  return subagentNoteLabel(source)
+    .split(/[-\s]+/)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}

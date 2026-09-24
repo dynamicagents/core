@@ -46,6 +46,8 @@ export {
   type ArtifactRoute
 } from "./path.js";
 
+export type { ArtifactKind } from "./kind.js";
+
 export {
   ARTIFACT_RETENTION_MS,
   mintArtifactToken,
@@ -64,6 +66,7 @@ export {
 export { ARTIFACT_VIEWER_HTML, artifactViewerResponse } from "./viewer.js";
 
 export {
+  SESSION_TRANSCRIPT,
   SESSION_TRANSCRIPT_KIND,
   settleTranscript,
   transcribeNote,

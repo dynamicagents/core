@@ -5,6 +5,7 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { MAX_QUEUED_FRAMES, type Artifacts } from "./do.js";
 import { ARTIFACT_EVENTS } from "./events.js";
+import type { ArtifactKind } from "./kind.js";
 import { ARTIFACT_RETENTION_MS } from "./store.js";
 
 /**
@@ -29,6 +30,12 @@ const fresh = (label: string) =>
   ns.get(ns.idFromName(`${label}:${crypto.randomUUID()}`));
 
 const KIND = "session-transcript";
+
+/**
+ * A kind that declared what its page is called — any kind but the transcript,
+ * because nothing here may work only for the one core happens to ship.
+ */
+const NAMED: ArtifactKind = { id: "review-log", displayName: "Review Log" };
 
 const eventsRequest = (token: string, lastEventId?: string) =>
   new Request(`https://agent.example/a/${token}/events`, {
@@ -298,9 +305,11 @@ describe("Artifacts — the event stream", () => {
     await artifacts.addEntry(token, { label: "a 0", text: "before" });
 
     const stream = frames(await artifacts.fetch(eventsRequest(token)));
+    // No name, because this one was opened under a bare id: the page renders
+    // such an artifact from its kind — see `ARTIFACT_VIEWER_HTML`.
     expect(await stream.next()).toEqual({
       event: "ready",
-      data: { kind: KIND, status: null }
+      data: { kind: KIND, displayName: null, status: null }
     });
     expect(await stream.next()).toMatchObject({
       event: "entry",
@@ -322,6 +331,25 @@ describe("Artifacts — the event stream", () => {
     });
     // Ends, rather than idling on a run that will never say anything again.
     expect(await stream.next()).toBeNull();
+  });
+
+  it("carries the name its kind declared, for the page to print", async () => {
+    // Recorded with the artifact and handed back verbatim. The object learns
+    // nothing about the kind by doing it, which is the whole arrangement: a
+    // table of names here would be a branch per kind in the one place that is
+    // supposed to hold none.
+    const artifacts = fresh("declared-name");
+    const token = await artifacts.createArtifact(NAMED, "task-1");
+    await artifacts.settle(token, "completed");
+
+    const body = await (await artifacts.fetch(eventsRequest(token))).text();
+    expect(parseFrame(body.split("\n\n")[0]!).data).toEqual({
+      kind: NAMED.id,
+      displayName: NAMED.displayName,
+      status: "completed"
+    });
+    // And the same kind is found by its id alone, which is what a lookup holds.
+    expect(await artifacts.tokenFor(NAMED.id, "task-1")).toBe(token);
   });
 
   it("serves a settled artifact whole and ends immediately", async () => {

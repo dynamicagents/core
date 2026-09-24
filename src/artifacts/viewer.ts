@@ -22,7 +22,10 @@
  * The artifact's kind arrives on the stream and is rendered as data — a heading
  * and a class. A kind that wants to look different says so in what it records,
  * not by being served a different page, because the moment there are two pages
- * there are two of everything else as well.
+ * there are two of everything else as well. The title is that rule's first
+ * case: a kind carries the name it is printed under
+ * ({@link file://./kind.ts ArtifactKind}), and this page has no idea which kind
+ * it is showing.
  */
 
 import { ARTIFACT_EVENTS } from "./events.js";
@@ -118,7 +121,11 @@ const SCRIPT = `
   stream.addEventListener("${ARTIFACT_EVENTS.ready}", function (event) {
     var data = JSON.parse(event.data);
     ready = true;
-    kindEl.textContent = data.kind.replace(/-/g, " ");
+    // The name its kind declared, and the id made readable for an artifact that
+    // carries none — one opened under a bare id, or before the column existed.
+    kindEl.textContent = data.displayName || data.kind.replace(/-/g, " ");
+    // One value in both places: a tab and a heading that disagree read as two
+    // different pages.
     document.title = kindEl.textContent;
     if (!data.status) setStatus("live", "live");
   });

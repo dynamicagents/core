@@ -67,8 +67,13 @@ const note = (overrides: Partial<SubagentNote> = {}): SubagentNote => ({
   ...overrides
 });
 
-/** A link, as the thread would receive it. */
-const LINK = new RegExp(`^${ORIGIN}/a/[0-9A-Za-z]{40}$`.replace(/\//g, "\\/"));
+/**
+ * A link, as the thread would receive it: named for the branch that opened the
+ * transcript, and carrying none of the note's own text.
+ */
+const LINK = new RegExp(
+  `^Subtask Session \\(Claude Code 0\\): ${ORIGIN}/a/[0-9A-Za-z]{40}$`
+);
 
 /**
  * A push channel, captured rather than posted.
@@ -191,6 +196,43 @@ describe("transcribeNote", () => {
     await transcribeNote(wired, note(), other.post);
     expect(one.posted[0]).toMatch(LINK);
     expect(other.posted[0]).not.toBe(one.posted[0]);
+  });
+
+  /**
+   * A bare URL in a thread says neither what it opens nor which branch of a
+   * fanned-out round opened it, and the thread it lands in is the one the
+   * person is reading the answer in. The name is the note's own label as prose:
+   * same two halves, same order, spelled for a sentence.
+   */
+  it("names the link for the branch that offered it", async () => {
+    const captured = poster();
+    await transcribeNote(
+      wired,
+      note({ source: { type: "claude-code", ordinal: 2 }, text: "hello" }),
+      captured.post
+    );
+    expect(captured.posted[0]).toMatch(
+      new RegExp(
+        `^Subtask Session \\(Claude Code 2\\): ${ORIGIN}/a/[0-9A-Za-z]{40}$`
+      )
+    );
+  });
+
+  it("opens the transcript under the name its page is titled with", async () => {
+    // The page holds no code per kind, so what it prints has to arrive as data
+    // on the stream — see `ARTIFACT_VIEWER_HTML`. The id is what rows are keyed
+    // by and is never what a person reads.
+    const taskId = crypto.randomUUID();
+    await transcribeNote(wired, note({ taskId }), poster().post);
+    // Settled first, so the stream closes and the body can be read to its end.
+    await settleTranscript(wired, taskId, TaskState.TASK_STATE_COMPLETED);
+
+    const token = await artifacts().tokenFor(SESSION_TRANSCRIPT_KIND, taskId);
+    const body = await (
+      await artifacts().fetch(new Request(`${ORIGIN}/a/${token}/events`))
+    ).text();
+    expect(body).toContain('"kind":"session-transcript"');
+    expect(body).toContain('"displayName":"Session Transcript"');
   });
 
   it("records the note under the label the thread would have shown", async () => {

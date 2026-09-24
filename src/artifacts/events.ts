@@ -28,6 +28,12 @@ export const ARTIFACT_EVENTS = {
 /** The first frame on every stream. `status` is non-null for a replay. */
 export interface ReadyEvent {
   kind: string;
+  /**
+   * What the page titles itself, as the kind declared it — `null` for an
+   * artifact opened under a bare id, which the page renders from `kind`
+   * instead. See {@link file://./kind.ts ArtifactKind}.
+   */
+  displayName: string | null;
   status: string | null;
 }
 
