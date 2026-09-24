@@ -279,14 +279,17 @@ answer they are waiting for. A long run produces dozens. The notes are worth
 keeping — they are the only account of what the run actually did — and a thread is
 the wrong place to keep them.
 
-`@dynamicagents/core/artifacts` is where they go instead. The **first** note of a
-task is posted as a link and nothing else, every note after it is recorded and not
-posted at all, and the link streams live and then ends with the state the task
-settled in. Main-agent progress is untouched: a round's acknowledgment and its step
-text are the conversation, not an account of one.
+`@dynamicagents/core/artifacts` is where they go instead. A note is posted as a link
+and nothing else until one such post **reaches** the thread; every note after that is
+recorded and not posted at all, and the link streams live and then ends with the
+state the task settled in. Main-agent progress is untouched: a round's acknowledgment
+and its step text are the conversation, not an account of one.
 
-**Every agent binds `ARTIFACTS`**, and it is three lines in two files. A Durable
-Object that starts without it throws `ArtifactsNotBoundError` naming exactly these.
+**Every agent binds `ARTIFACTS`**, and the wiring is a binding, a migration, an
+export and the route delegation below. A Durable Object that starts without the
+binding throws `ArtifactsNotBoundError` naming all of them — the delegation included,
+because without it the object starts and every `/a/<token>` link falls through to
+your own routes.
 
 ```jsonc
 // wrangler.jsonc — the tag is the next one in your own migration sequence
@@ -317,12 +320,19 @@ it again at DO start for the `wrangler.jsonc` a type cannot see.
 Two things still put the note in the thread instead of a link, and both are facts
 about that note rather than about the wiring: this deployment has not learned its
 own origin yet (it arrives with the first turn), or retention has already swept the
-artifact. An ingest that **fails** is neither — it throws, the durable step retries,
-and the artifact's dedupe on the notification key lands the replay on the sequence
-it would have had, so the link still goes out.
+artifact. An ingest that **fails** is neither, and does not fall back to posting the
+note: it throws, the durable step retries, and the artifact's dedupe on the
+notification key records the note once however many times the step runs.
+
+Posting is best-effort — `PushChannel.working` swallows a network failure and a
+non-2xx, because a turn that cannot report its progress is still a turn that should
+deliver its answer. So what ends the posting is a post that **landed**, and the
+artifact records that: a link whose only POST was dropped is offered again on the
+next note, rather than suppressed by a rule that knew nothing but which note came
+first.
 
 An artifact is a **kind**, a long random **token**, an append-only list of labelled
-notes, and a settle status. The token is id and authorization in one — derived from
+notes, a settle status, and whether its link has been delivered. The token is id and authorization in one — derived from
 nothing, so a link is the whole of what a reader needs and anyone holding one can
 read it. `session-transcript` is the first kind and the object holds no code for
 it; ingest is RPC over the binding and never a route, so a write is authenticated

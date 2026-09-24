@@ -23,6 +23,11 @@ import {
  * are facts about *this note*: an origin this instance has not learned yet, and
  * an artifact retention swept. Neither is fixable by the caller and neither
  * should cost the person the note.
+ *
+ * Silence is the answer only once a post has **landed**, which is the property
+ * most of these turn on: the posting is best-effort by contract, so a link
+ * decided by anything other than delivery is a link one dropped POST loses for
+ * the rest of the task.
  */
 
 const ns = (env as unknown as Record<string, DurableObjectNamespace<Artifacts>>)
@@ -62,6 +67,27 @@ const note = (overrides: Partial<SubagentNote> = {}): SubagentNote => ({
   ...overrides
 });
 
+/** A link, as the thread would receive it. */
+const LINK = new RegExp(`^${ORIGIN}/a/[0-9A-Za-z]{40}$`.replace(/\//g, "\\/"));
+
+/**
+ * A push channel, captured rather than posted.
+ *
+ * `landed` is the whole point of the seam: `false` is `PushChannel.working`
+ * swallowing a network failure or a non-2xx, which is the case the announcement
+ * exists for.
+ */
+function poster(landed = true) {
+  const posted: string[] = [];
+  return {
+    posted,
+    post: async (text: string): Promise<boolean> => {
+      posted.push(text);
+      return landed;
+    }
+  };
+}
+
 /**
  * Warm the object before the clock starts on a test.
  *
@@ -77,55 +103,94 @@ beforeAll(async () => {
 }, 30_000);
 
 describe("transcribeNote", () => {
-  it("answers the first note with a link and the rest with silence", async () => {
+  it("posts the link once it has landed, and nothing after that", async () => {
     const taskId = crypto.randomUUID();
-    const link = await transcribeNote(
+    const first = poster();
+    await transcribeNote(
       wired,
-      note({ taskId, text: "first", key: "claude:0" })
+      note({ taskId, text: "first", key: "claude:0" }),
+      first.post
     );
-    expect(link).toMatch(
-      new RegExp(`^${ORIGIN}/a/[0-9A-Za-z]{40}$`.replace(/\//g, "\\/"))
-    );
+    expect(first.posted).toHaveLength(1);
+    expect(first.posted[0]).toMatch(LINK);
 
     // Everything after it is on the transcript and nowhere else — which is the
     // whole point: a long run used to put dozens of these in the thread.
-    expect(
-      await transcribeNote(
-        wired,
-        note({ taskId, text: "second", key: "claude:1" })
-      )
-    ).toBeUndefined();
-    expect(
-      await transcribeNote(
-        wired,
-        note({ taskId, text: "third", key: "claude:2" })
-      )
-    ).toBeUndefined();
+    const rest = poster();
+    await transcribeNote(
+      wired,
+      note({ taskId, text: "second", key: "claude:1" }),
+      rest.post
+    );
+    await transcribeNote(
+      wired,
+      note({ taskId, text: "third", key: "claude:2" }),
+      rest.post
+    );
+    expect(rest.posted).toEqual([]);
   });
 
   /**
-   * The case that decides whether a link is ever posted at all. Both emission
-   * sites sit inside durable steps, and a retry that had been told "you did not
-   * create it" would suppress the one post carrying the URL — leaving a
-   * transcript nobody can open.
+   * The failure the announcement exists for.
+   *
+   * `PushChannel.working` swallows a network failure and a non-2xx by contract,
+   * so nothing throws and no step retries. Deciding the link by "this note
+   * opened the artifact" would therefore lose it for good: the artifact is no
+   * longer new, and every later note would stay silent on a transcript nobody
+   * has the URL for.
    */
-  it("answers a replayed note with the same link", async () => {
+  it("carries the link again until a post reaches the thread", async () => {
     const taskId = crypto.randomUUID();
-    const first = await transcribeNote(
+    const dropped = poster(false);
+    await transcribeNote(
       wired,
-      note({ taskId, key: "claude:0" })
+      note({ taskId, text: "first", key: "claude:0" }),
+      dropped.post
     );
-    const replay = await transcribeNote(
+    expect(dropped.posted[0]).toMatch(LINK);
+
+    // The next note carries the same link, because nothing ever arrived.
+    const retried = poster();
+    await transcribeNote(
       wired,
-      note({ taskId, key: "claude:0" })
+      note({ taskId, text: "second", key: "claude:1" }),
+      retried.post
     );
-    expect(replay).toBe(first);
+    expect(retried.posted).toEqual([dropped.posted[0]]);
+
+    // And now that one landed, the rest are silent.
+    const after = poster();
+    await transcribeNote(
+      wired,
+      note({ taskId, text: "third", key: "claude:2" }),
+      after.post
+    );
+    expect(after.posted).toEqual([]);
+  });
+
+  /**
+   * A replay of the note that already delivered the link says nothing, and the
+   * transcript is not written twice. Both emission sites sit inside durable
+   * steps, so the same note arrives again whenever a step is retried past its
+   * post.
+   */
+  it("says nothing on a replay of the note that delivered it", async () => {
+    const taskId = crypto.randomUUID();
+    const first = poster();
+    await transcribeNote(wired, note({ taskId, key: "claude:0" }), first.post);
+    const replay = poster();
+    await transcribeNote(wired, note({ taskId, key: "claude:0" }), replay.post);
+    expect(first.posted[0]).toMatch(LINK);
+    expect(replay.posted).toEqual([]);
   });
 
   it("keeps two tasks' transcripts apart", async () => {
-    const one = await transcribeNote(wired, note());
-    const other = await transcribeNote(wired, note());
-    expect(one).not.toBe(other);
+    const one = poster();
+    const other = poster();
+    await transcribeNote(wired, note(), one.post);
+    await transcribeNote(wired, note(), other.post);
+    expect(one.posted[0]).toMatch(LINK);
+    expect(other.posted[0]).not.toBe(one.posted[0]);
   });
 
   it("records the note under the label the thread would have shown", async () => {
@@ -136,7 +201,8 @@ describe("transcribeNote", () => {
         taskId,
         source: { type: "claude-code", ordinal: 2 },
         text: "hello"
-      })
+      }),
+      poster().post
     );
     await settleTranscript(wired, taskId, TaskState.TASK_STATE_COMPLETED);
 
@@ -155,22 +221,24 @@ describe("transcribeNote", () => {
     // Not a deployment that chose differently — a deployment that is broken,
     // and the error says which lines it is missing. Posting the note instead
     // would hide that behind a thread that looks exactly like a working one.
+    const captured = poster();
     await expect(
-      transcribeNote(unbound, note({ text: "unchanged" }))
+      transcribeNote(unbound, note({ text: "unchanged" }), captured.post)
     ).rejects.toThrow(ArtifactsNotBoundError);
+    expect(captured.posted).toEqual([]);
   });
 
   it("posts the note unchanged before this instance knows its own origin", async () => {
     // A link needs an origin, and the origin arrives with a turn. Filing the
-    // note anyway would spend the first sequence — and with it the one post
-    // that could have carried the link.
+    // note against a URL nobody could be given would only bury it.
     const taskId = crypto.randomUUID();
-    expect(
-      await transcribeNote(
-        wired,
-        note({ taskId, origin: undefined, text: "early" })
-      )
-    ).toBe("[claude-code 0] early");
+    const captured = poster();
+    await transcribeNote(
+      wired,
+      note({ taskId, origin: undefined, text: "early" }),
+      captured.post
+    );
+    expect(captured.posted).toEqual(["[claude-code 0] early"]);
     expect(
       await artifacts().tokenFor(SESSION_TRANSCRIPT_KIND, taskId)
     ).toBeNull();
@@ -178,7 +246,7 @@ describe("transcribeNote", () => {
 
   it("lets an unreachable store throw, so the step can retry", async () => {
     await expect(
-      transcribeNote(broken, note({ text: "still said" }))
+      transcribeNote(broken, note({ text: "still said" }), poster().post)
     ).rejects.toThrow("no such namespace");
   });
 
@@ -189,10 +257,9 @@ describe("transcribeNote", () => {
    * heard whether it did". The ingest commits in the object and the answer is
    * lost on the way back, so the step retries against a store that already has
    * the note. Swallowing the failure would spend that first attempt: the note
-   * would go to the thread verbatim, the retry would find sequence 1 already
-   * taken by its own earlier write, and the link would never be posted by
-   * anybody. Dedupe on the key is what makes the retry land on sequence 1
-   * again, and the link go out.
+   * would go to the thread verbatim, and then be posted a second time by the
+   * retry or not at all. Dedupe on the key is what lets the retry record the
+   * note once and still find a link nobody has announced.
    */
   it("delivers the link on the retry after an ack is lost", async () => {
     const taskId = crypto.randomUUID();
@@ -221,15 +288,16 @@ describe("transcribeNote", () => {
       } as unknown as DurableObjectNamespace<Artifacts>
     };
 
-    await expect(transcribeNote(lossy, committed)).rejects.toThrow(
+    const lost = poster();
+    await expect(transcribeNote(lossy, committed, lost.post)).rejects.toThrow(
       "connection lost"
     );
+    expect(lost.posted).toEqual([]);
 
     // What the Workflow step does next, against the store that took the write.
-    const link = await transcribeNote(wired, committed);
-    expect(link).toMatch(
-      new RegExp(`^${ORIGIN}/a/[0-9A-Za-z]{40}$`.replace(/\//g, "\\/"))
-    );
+    const retried = poster();
+    await transcribeNote(wired, committed, retried.post);
+    expect(retried.posted[0]).toMatch(LINK);
 
     // And recorded exactly once, not twice: the key caught the replay, so the
     // retry read back the sequence the lost attempt wrote rather than appending
@@ -246,7 +314,7 @@ describe("transcribeNote", () => {
 describe("settleTranscript", () => {
   it("ends the transcript in the state the task settled in", async () => {
     const taskId = crypto.randomUUID();
-    await transcribeNote(wired, note({ taskId }));
+    await transcribeNote(wired, note({ taskId }), poster().post);
     await settleTranscript(wired, taskId, TaskState.TASK_STATE_COMPLETED);
 
     const token = await artifacts().tokenFor(SESSION_TRANSCRIPT_KIND, taskId);
@@ -264,7 +332,7 @@ describe("settleTranscript", () => {
     [TaskState.TASK_STATE_REJECTED, "rejected"]
   ])("renders %s as its own word", async (state, word) => {
     const taskId = crypto.randomUUID();
-    await transcribeNote(wired, note({ taskId }));
+    await transcribeNote(wired, note({ taskId }), poster().post);
     await settleTranscript(wired, taskId, state);
 
     const token = await artifacts().tokenFor(SESSION_TRANSCRIPT_KIND, taskId);

@@ -81,15 +81,17 @@ describe("the artifacts binding at DO start", () => {
     expect(await bootWithout(binding, name)).toMatchObject({ named: true });
   });
 
-  it("names the binding, the migration and the export in the message", async () => {
+  it("names every line the wiring needs, the route delegation included", async () => {
     // What a person has in front of them is a Durable Object that would not
     // start. The only useful thing to say then is which lines are missing and
-    // which files they go in.
+    // which files they go in — all of them, because a message that stops at the
+    // binding and the export buys an object that starts and links that 404.
     const { message } = await bootWithout("SETTLE_AGENT", "message");
     expect(message).toMatch(/ARTIFACTS is not bound/);
     expect(message).toMatch(/durable_objects\.bindings/);
     expect(message).toMatch(/new_sqlite_classes/);
     expect(message).toMatch(/export \{ Artifacts \}/);
+    expect(message).toMatch(/handleArtifactRoute\(request, env\)/);
   });
 
   it.each([

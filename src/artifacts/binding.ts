@@ -48,12 +48,16 @@ export class ArtifactsNotBoundError extends Error {
   constructor() {
     super(
       `${ARTIFACTS_BINDING} is not bound. @dynamicagents/core records every subagent ` +
-        "note on the Task's transcript and posts a link, so the binding is required — " +
-        "it is three lines in two files. In wrangler.jsonc, add " +
+        "note on the Task's transcript and posts a link, so the binding is required. " +
+        "In wrangler.jsonc, add " +
         `{ "name": "${ARTIFACTS_BINDING}", "class_name": "Artifacts" } to ` +
         'durable_objects.bindings and { "new_sqlite_classes": ["Artifacts"] } as the ' +
         "next migration tag. In the Worker entry, add " +
-        '`export { Artifacts } from "@dynamicagents/core/artifacts";`.'
+        '`export { Artifacts } from "@dynamicagents/core/artifacts";`, and serve ' +
+        "the links from your fetch handler: `return (await " +
+        "handleArtifactRoute(request, env)) ?? yourRouter(request, env);` — " +
+        "without that delegation the object starts and every /a/<token> link " +
+        "falls through to routes that know nothing about it."
     );
     this.name = "ArtifactsNotBoundError";
   }

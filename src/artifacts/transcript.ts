@@ -10,11 +10,25 @@
  * dozens. The notes are worth keeping — they are the only account of what the
  * run actually did — but a thread is the wrong place to keep them.
  *
- * So they go somewhere with a link, and the thread gets the link. The **first**
- * labelled note of a task is posted as that link and nothing else; every note
- * after it is recorded and not posted at all. Main-agent progress — a round's
+ * So they go somewhere with a link, and the thread gets the link. A labelled
+ * note is posted as that link until one such post **lands**; every note after
+ * that is recorded and not posted at all. Main-agent progress — a round's
  * acknowledgement, its step text — is untouched: it is the conversation, not an
  * account of one.
+ *
+ * ## Why delivery, and not the sequence, is what ends the posting
+ *
+ * The obvious rule is "the note that opened the artifact carries the link", and
+ * it loses the link outright. Posting is `PushChannel.working`, which swallows a
+ * network failure and a non-2xx by contract, so under that rule a link whose one
+ * post did not arrive is never offered again — and every later note, seeing an
+ * artifact that is no longer new, stays silent on a transcript nobody can open.
+ *
+ * So the link is offered until a post reports that it landed, and that fact is
+ * durable in the artifact rather than in the isolate that sent it: see
+ * {@link file://./do.ts Artifacts.announce}. Two notes in flight at once can
+ * both find it un-announced and both carry the link, which is the failure mode
+ * chosen here — a thread with the link twice, rather than a thread without it.
  *
  * ## When the thread gets the note instead
  *
@@ -24,12 +38,13 @@
  * is no longer one to link to. Neither can be fixed by the caller and neither
  * should cost the person the note, so both post it verbatim.
  *
- * An ingest that *fails* is not one of them. Both emission sites run inside
- * durable steps, so the useful answer to a store that did not take the write is
- * to let the step retry — the artifact dedupes on {@link SubagentNote.key}, so
- * the replay lands on the sequence it would have had and the link still goes
- * out. Swallowing the failure here is what would lose it, by consuming the one
- * post that carries the URL on an attempt that filed nothing.
+ * An ingest that *fails* is not one of them, and does not fall back to posting
+ * the note either. Both emission sites run inside durable steps, so the useful
+ * answer to a store that did not take the write is to let the step retry — the
+ * artifact dedupes on {@link SubagentNote.key}, so the replay records the note
+ * once and finds the link still unannounced. Swallowing the failure here is what
+ * would lose the note: it would be filed by an attempt that then failed, or
+ * posted verbatim beside a transcript that already had it.
  */
 
 import { TaskState } from "@a2a-js/sdk";
@@ -63,32 +78,33 @@ export interface SubagentNote {
 }
 
 /**
- * Record one labelled note on its task's transcript, and answer what the push
- * channel should carry now: the note itself, the link, or nothing.
+ * Record one labelled note on its task's transcript, and post what the thread
+ * should get for it: the link, the note itself, or nothing at all.
  *
- * `undefined` means the transcript has it and the thread needs nothing more.
- *
- * **Why the link is decided by the sequence** rather than by "did this call
- * create the artifact": both emission sites run inside durable steps that can
- * be retried, and a retry that re-created nothing would suppress the one post
- * that carries the link — leaving a transcript nobody has the URL for. The
- * artifact dedupes on {@link SubagentNote.key}, so a replayed note lands on the
- * sequence it had the first time, and "sequence 1" stays true however many
- * times the step runs.
+ * `post` is handed the text and answers whether it **reached** the thread —
+ * `PushChannel.working` is the one both emission sites pass. The posting is
+ * inverted into this function, rather than left to the caller with a decision
+ * returned, because the answer to "did it land" is what decides whether the link
+ * is offered again, and a caller that forgot to say costs the person the link
+ * for the rest of the task. Nothing here reads the result of a post that carried
+ * the note verbatim: there is nothing further to do about one.
  */
 export async function transcribeNote(
   env: ArtifactsEnv,
-  note: SubagentNote
-): Promise<string | undefined> {
-  // Before the store is touched: filing the note anyway would spend the first
-  // sequence — and with it the one post that could have carried the link — on a
-  // turn that has no origin to build a link out of.
-  if (note.origin === undefined)
-    return labelSubagentNote(note.text, note.source);
+  note: SubagentNote,
+  post: (text: string) => Promise<boolean>
+): Promise<void> {
+  // Before the store is touched: there is no link to announce on a turn with no
+  // origin to build one out of, and filing the note would only bury it on a
+  // transcript nothing has pointed at yet.
+  if (note.origin === undefined) {
+    await post(labelSubagentNote(note.text, note.source));
+    return;
+  }
 
   const stub = requireArtifactsStub(env);
   const token = await stub.createArtifact(SESSION_TRANSCRIPT_KIND, note.taskId);
-  const sequence = await stub.addEntry(token, {
+  const recorded = await stub.addEntry(token, {
     key: note.key,
     label: subagentNoteLabel(note.source),
     text: note.text
@@ -96,8 +112,19 @@ export async function transcribeNote(
   // `null` is retention having swept the artifact between the two calls. Rare,
   // and not worth a retry: the note is a month old by construction, so the
   // thread gets it and the run goes on.
-  if (sequence === null) return labelSubagentNote(note.text, note.source);
-  return sequence === 1 ? artifactViewerUrl(note.origin, token) : undefined;
+  if (recorded === null) {
+    await post(labelSubagentNote(note.text, note.source));
+    return;
+  }
+  if (recorded.announced) return;
+  // The link first, the fact that it arrived second — in that order, because the
+  // failure that lands between them costs a duplicate link and the other order
+  // costs the only one. `announce` is unguarded for the reason the ingest above
+  // is: inside a durable step, a store that would not take the write is worth a
+  // retry, and the retry finds the note recorded and the link still to announce.
+  if (await post(artifactViewerUrl(note.origin, token))) {
+    await stub.announce(token);
+  }
 }
 
 /**

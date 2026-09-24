@@ -70,16 +70,22 @@ export interface Artifact {
   createdAt: number;
   /** The status it settled in, or `null` while it is still running. */
   status: string | null;
+  /** Whether its link has been delivered — see {@link ArtifactStore.announce}. */
+  announced: boolean;
 }
 
 /**
  * What an append did. `appended` is false for a replay an `entry.key` caught,
  * and the entry is then the one recorded the first time — which is what lets a
  * caller replay a post loop without telling every live reader twice.
+ *
+ * `announced` rides along because the writer branches on it for every note and
+ * the row was read here anyway; see {@link ArtifactStore.announce}.
  */
 export interface AppendResult {
   entry: ArtifactEntry;
   appended: boolean;
+  announced: boolean;
 }
 
 /** What {@link ArtifactStore.append} is given. */
@@ -91,10 +97,10 @@ export interface ArtifactEntryInput {
    *
    * Both emission sites already hold one — the notification key, which the
    * gatekeeper dedupes replayed progress on and which is therefore derived from
-   * position rather than from content or a clock. Reusing it here is what lets
-   * a Workflow step retry its post loop and land on the same sequence numbers,
-   * which is in turn what makes "this note opened the artifact" a durable fact
-   * instead of a race. See {@link file://../a2a/push.ts PushChannel.working}.
+   * position rather than from content or a clock. Reusing it here is what lets a
+   * Workflow step retry its post loop and leave the log as it found it: a note
+   * recorded once, on the sequence it already had, rather than a second copy
+   * beside it. See {@link file://../a2a/push.ts PushChannel.working}.
    */
   key?: string;
 }
@@ -106,7 +112,8 @@ const DDL = [
      source_key TEXT,
      created_at INTEGER NOT NULL,
      settled_at INTEGER,
-     status TEXT
+     status TEXT,
+     announced_at INTEGER
    )`,
   // NULLs compare distinct in a SQLite unique index, so an artifact opened
   // without a key never collides with another one.
@@ -134,6 +141,7 @@ type ArtifactRow = {
   kind: string;
   created_at: number;
   status: string | null;
+  announced_at: number | null;
 };
 
 type EntryRow = {
@@ -169,6 +177,20 @@ export interface ArtifactStore {
    */
   append(token: string, entry: ArtifactEntryInput): AppendResult | null;
   /**
+   * Record that this artifact's link has been delivered. Returns whether it
+   * applied — `false` for an unknown token and for one already announced, the
+   * distinction {@link settle} draws for the same reason.
+   *
+   * The store does not know what a link is or who received it. What it keeps is
+   * the one bit the writer cannot keep for itself: the isolate that posted the
+   * link does not outlive the turn, and a writer that cannot tell "the thread
+   * has the link" from "nobody ever managed to send it" either posts it again
+   * forever or never posts it at all. See
+   * {@link file://./transcript.ts transcribeNote} for the caller this exists
+   * for.
+   */
+  announce(token: string): boolean;
+  /**
    * Record the status this artifact finished in. Returns whether it applied —
    * `false` for an unknown token and for one already settled, so a caller can
    * tell the transition from a repeat of it.
@@ -196,7 +218,8 @@ export function makeArtifactStore(
     token: row.token,
     kind: row.kind,
     createdAt: row.created_at,
-    status: row.status
+    status: row.status,
+    announced: row.announced_at !== null
   });
 
   const rowToEntry = (row: EntryRow): ArtifactEntry => ({
@@ -218,7 +241,8 @@ export function makeArtifactStore(
   const get = (token: string): Artifact | null => {
     const row = sql
       .exec<ArtifactRow>(
-        "SELECT token, kind, created_at, status FROM artifacts WHERE token = ?",
+        `SELECT token, kind, created_at, status, announced_at
+           FROM artifacts WHERE token = ?`,
         token
       )
       .toArray()[0];
@@ -269,7 +293,9 @@ export function makeArtifactStore(
 
     append(token, entry) {
       sweep();
-      if (get(token) === null) return null;
+      const artifact = get(token);
+      if (artifact === null) return null;
+      const announced = artifact.announced;
       if (entry.key !== undefined) {
         const prior = sql
           .exec<EntryRow>(
@@ -279,7 +305,8 @@ export function makeArtifactStore(
             entry.key
           )
           .toArray()[0];
-        if (prior) return { entry: rowToEntry(prior), appended: false };
+        if (prior)
+          return { entry: rowToEntry(prior), appended: false, announced };
       }
       const sequence =
         sql
@@ -302,8 +329,20 @@ export function makeArtifactStore(
       );
       return {
         entry: { sequence, label: entry.label, text: entry.text, at },
-        appended: true
+        appended: true,
+        announced
       };
+    },
+
+    announce(token) {
+      const artifact = get(token);
+      if (artifact === null || artifact.announced) return false;
+      sql.exec(
+        "UPDATE artifacts SET announced_at = ? WHERE token = ?",
+        now(),
+        token
+      );
+      return true;
     },
 
     settle(token, status) {

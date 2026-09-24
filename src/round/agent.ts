@@ -911,24 +911,26 @@ export abstract class RoundAgentBase<
     // position alone — and neither is `outcome.progress` itself, which rides back
     // to the Workflow.
     //
-    // Every note is also filed on the Task's transcript, and what the thread
-    // gets back is the link for the first and silence for the rest — or the
-    // note itself where this turn has no link to give, which is an origin not
-    // learned yet or an artifact retention has swept. See
+    // Every note is also filed on the Task's transcript, which is what decides
+    // whether the thread gets the link, silence, or the note itself — so the
+    // post goes through it rather than around it. See
     // {@link file://../artifacts/transcript.ts transcribeNote}.
     if (push) {
       const channel = this.push(push);
       const source = { type: request.type, ordinal };
       const origin = this.selfOrigin();
       for (const event of outcome.progress) {
-        const line = await transcribeNote(this.env, {
-          taskId: request.taskId,
-          origin,
-          source,
-          text: event.text,
-          key: event.key
-        });
-        if (line !== undefined) await channel.working(line, event.key);
+        await transcribeNote(
+          this.env,
+          {
+            taskId: request.taskId,
+            origin,
+            source,
+            text: event.text,
+            key: event.key
+          },
+          (text) => channel.working(text, event.key)
+        );
       }
     }
 

@@ -3,7 +3,8 @@ import { describe, it, expect } from "vitest";
 // deprecated, and the repo's type-aware `no-deprecated` rule fails the build on it.
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
-import type { Artifacts } from "./do.js";
+import { MAX_QUEUED_FRAMES, type Artifacts } from "./do.js";
+import { ARTIFACT_EVENTS } from "./events.js";
 import { ARTIFACT_RETENTION_MS } from "./store.js";
 
 /**
@@ -122,15 +123,15 @@ describe("Artifacts — appending", () => {
   it("numbers notes from one, in the order they arrive", async () => {
     const artifacts = fresh("order");
     const token = await artifacts.createArtifact(KIND);
-    expect(await artifacts.addEntry(token, { label: "a 0", text: "one" })).toBe(
-      1
-    );
-    expect(await artifacts.addEntry(token, { label: "a 0", text: "two" })).toBe(
-      2
-    );
+    expect(
+      await artifacts.addEntry(token, { label: "a 0", text: "one" })
+    ).toMatchObject({ sequence: 1 });
+    expect(
+      await artifacts.addEntry(token, { label: "a 0", text: "two" })
+    ).toMatchObject({ sequence: 2 });
     expect(
       await artifacts.addEntry(token, { label: "b 1", text: "three" })
-    ).toBe(3);
+    ).toMatchObject({ sequence: 3 });
 
     const stream = frames(await artifacts.fetch(eventsRequest(token)));
     await stream.next(); // `ready`
@@ -146,10 +147,10 @@ describe("Artifacts — appending", () => {
   });
 
   /**
-   * The property the link rests on. Both emission sites run inside durable
-   * steps that can be retried, so "this note was the first" has to survive the
-   * step running twice — and it does only because the key makes the append
-   * land on the sequence it had the first time.
+   * What a retry costs the log: nothing. Both emission sites run inside durable
+   * steps that can be retried, so the same note arrives twice — and the key is
+   * what makes the second one read back the first's sequence instead of
+   * appending a duplicate beside it.
    */
   it("gives a replayed key the sequence it got the first time", async () => {
     const artifacts = fresh("replay");
@@ -160,14 +161,14 @@ describe("Artifacts — appending", () => {
         label: "a 0",
         text: "first"
       })
-    ).toBe(1);
+    ).toMatchObject({ sequence: 1 });
     expect(
       await artifacts.addEntry(token, {
         key: "claude:0",
         label: "a 0",
         text: "first"
       })
-    ).toBe(1);
+    ).toMatchObject({ sequence: 1 });
     await artifacts.addEntry(token, {
       key: "claude:1",
       label: "a 0",
@@ -186,6 +187,41 @@ describe("Artifacts — appending", () => {
     expect(
       await artifacts.addEntry("Z".repeat(40), { label: "a 0", text: "lost" })
     ).toBeNull();
+  });
+});
+
+describe("Artifacts — announcing the link", () => {
+  /**
+   * The bit a writer cannot keep for itself. "This note opened the artifact" is
+   * not "somebody received the link": the post can fail, and the isolate that
+   * sent it is gone by the next note — so what a later writer reads back is this.
+   */
+  it("says nothing was announced until something says it was", async () => {
+    const artifacts = fresh("announce");
+    const token = await artifacts.createArtifact(KIND);
+    expect(
+      await artifacts.addEntry(token, { key: "a:0", label: "a 0", text: "one" })
+    ).toEqual({ sequence: 1, announced: false });
+    // A note before the announcement is a note whose link still needs sending.
+    expect(
+      await artifacts.addEntry(token, { key: "a:1", label: "a 0", text: "two" })
+    ).toEqual({ sequence: 2, announced: false });
+
+    expect(await artifacts.announce(token)).toBe(true);
+    // A repeat is not a second announcement, the distinction `settle` draws.
+    expect(await artifacts.announce(token)).toBe(false);
+    expect(
+      await artifacts.addEntry(token, {
+        key: "a:2",
+        label: "a 0",
+        text: "three"
+      })
+    ).toEqual({ sequence: 3, announced: true });
+  });
+
+  it("refuses a token that names nothing", async () => {
+    const artifacts = fresh("announce-unknown");
+    expect(await artifacts.announce("Y".repeat(40))).toBe(false);
   });
 });
 
@@ -339,6 +375,65 @@ describe("Artifacts — the event stream", () => {
     const artifacts = fresh("stream-unknown");
     const response = await artifacts.fetch(eventsRequest("K".repeat(40)));
     expect(response.status).toBe(404);
+  });
+
+  /**
+   * The bound on one reader's unsent stream.
+   *
+   * Written against a real stream inside the object, because the whole mechanism
+   * is `TransformStream` backpressure: a frame is handed over only once the
+   * reader took the last one, so the frames a reader is not taking accumulate
+   * here. Past the bound that reader is dropped — and dropping one may not cost
+   * the readers keeping up anything, since they share the object with it.
+   */
+  it("drops a reader that stops consuming, and keeps the ones that do", async () => {
+    await runInDurableObject(fresh("backpressure"), async (instance) => {
+      const token = await instance.createArtifact(KIND);
+
+      // Opened and never read: every frame after the first stays queued. The
+      // lock is taken and nothing is read, which is the shape of the problem —
+      // and it also means the error the drop leaves on the body is claimed,
+      // rather than reported against whatever was running at the time.
+      const stalled = (await instance.fetch(eventsRequest(token))).body!;
+      const unread = stalled.getReader();
+
+      const reading = frames(await instance.fetch(eventsRequest(token)));
+      expect(await reading.next()).toMatchObject({
+        event: ARTIFACT_EVENTS.ready
+      });
+
+      const notes = MAX_QUEUED_FRAMES * 2;
+      for (let i = 0; i < notes; i += 1) {
+        await instance.addEntry(token, {
+          key: `note:${i}`,
+          label: "a 0",
+          text: `note ${i}`
+        });
+        // In lockstep, which is what keeping up means: this reader is never
+        // holding more than the frame it is about to take, so the bound that
+        // drops the other one never comes near it.
+        expect(await reading.next()).toMatchObject({
+          data: { text: `note ${i}` }
+        });
+      }
+
+      // The one that read nothing was dropped rather than served, which is what
+      // leaves its queue bounded. Its `EventSource` reconnects into a replay
+      // from `Last-Event-ID`, so the frames discarded here are not lost — and
+      // the log is whole for a reader that arrives after the drop.
+      await expect(unread.read()).rejects.toThrow(/fell behind/);
+
+      // Dropping a watcher discards frames, never entries: the log is whole for
+      // the reader that arrives next, which is the same reader reconnecting.
+      await instance.settle(token, "completed");
+      expect(await reading.next()).toMatchObject({
+        event: ARTIFACT_EVENTS.settled
+      });
+      const replayed = await (
+        await instance.fetch(eventsRequest(token))
+      ).text();
+      expect(replayed.match(/"label":"a 0"/g)).toHaveLength(notes);
+    });
   });
 
   it("serves nothing but the events route", async () => {

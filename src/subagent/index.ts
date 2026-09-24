@@ -483,22 +483,24 @@ export abstract class RecipeSubagentBase<
    * its progress is still a run that should deliver its answer. The transcript
    * this files the note on first — which is what decides whether the thread gets
    * the note, the link, or nothing at all — deliberately does not: a chunk runs
-   * inside a durable step, so letting the ingest throw buys a retry that lands on
-   * the same sequence and still delivers the link. See
+   * inside a durable step, so letting the ingest throw buys a retry that records
+   * the note once and still delivers the link. See
    * {@link file://../artifacts/transcript.ts transcribeNote}.
    */
   protected async postProgress(event: ProgressEvent): Promise<void> {
     const live = this.live;
     if (!live) return;
-    const line = await transcribeNote(this.env, {
-      taskId: live.taskId,
-      origin: this.selfOrigin(),
-      source: live.source,
-      text: event.text,
-      key: event.key
-    });
-    if (line === undefined) return;
-    await live.channel.working(line, event.key);
+    await transcribeNote(
+      this.env,
+      {
+        taskId: live.taskId,
+        origin: this.selfOrigin(),
+        source: live.source,
+        text: event.text,
+        key: event.key
+      },
+      (text) => live.channel.working(text, event.key)
+    );
   }
 
   /**
