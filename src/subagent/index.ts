@@ -213,6 +213,15 @@ export abstract class RecipeSubagentBase<
    * Idempotent schema bootstrap. Also called lazily from the RPCs so
    * `runInDurableObject`-style tests reach ready tables without RPC dispatch
    * (mirroring how `AgentDB` migrates on construction).
+   *
+   * **No version row, deliberately.** Both tables hold one slot of state for the
+   * single execution this child exists for, keyed by the request fingerprint,
+   * and the parent wipes the whole storage when it deletes the child. So a
+   * change of shape here is `DROP TABLE` and this DDL again rather than a
+   * migration: what a dropped row costs is a chunk replayed or a terminal
+   * result recomputed, never something that cannot be made again. A store whose
+   * rows outlive the run that wrote them owes the other thing — see
+   * {@link file://../artifacts/store.ts CURRENT_SCHEMA_VERSION}.
    */
   private ensureTables(): void {
     this.sql`

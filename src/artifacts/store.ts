@@ -105,7 +105,32 @@ export interface ArtifactEntryInput {
   key?: string;
 }
 
+/**
+ * ## Why this schema is hand-written, and outside core's migration journal
+ *
+ * {@link file://./do.ts Artifacts} is core's first table owner that is not an
+ * `Agent` subclass, and it is addressed by a well-known name — one instance per
+ * deployment — so its SQLite is a different *database* from every agent DO's,
+ * holding none of core's tables and read by none of its models. That is what
+ * keeps it out of the drizzle journal, for a mechanical reason rather than a
+ * stylistic one: `drizzle.config.ts` names one schema and one output directory,
+ * and `migrate()` applies whatever that one journal holds — so enrolling this
+ * object would create core's agent tables inside it.
+ *
+ * The **query** half was never under a rule either. The rule lives in
+ * {@link file://../db/db.ts PluginStore} and is narrow — *never import the
+ * migrator* — and raw SQL on both halves is already what the subagent facet and
+ * `plugin_migrations` do. A second drizzle schema module and a second handle,
+ * for tables nothing outside this file reads, would buy nothing here.
+ *
+ * What a hand-written schema does owe is its own bookkeeping — see
+ * {@link CURRENT_SCHEMA_VERSION}.
+ */
 const DDL = [
+  `CREATE TABLE IF NOT EXISTS schema_meta (
+     id INTEGER PRIMARY KEY CHECK (id = 1),
+     version INTEGER NOT NULL
+   )`,
   `CREATE TABLE IF NOT EXISTS artifacts (
      token TEXT PRIMARY KEY NOT NULL,
      kind TEXT NOT NULL,
@@ -132,6 +157,86 @@ const DDL = [
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_artifact_entries_key
      ON artifact_entries (token, entry_key)`
 ];
+
+/**
+ * The schema version this build writes, recorded in the `schema_meta` row.
+ *
+ * Bump it and add the matching step to {@link upgrade} in the same commit. What
+ * the version buys is the branch: an artifact is kept for
+ * {@link ARTIFACT_RETENTION_MS}, so a deployment changing shape meets months of
+ * rows it cannot drop and has to know which shape they are in.
+ */
+export const CURRENT_SCHEMA_VERSION = 1;
+
+/** Move a store recorded at `from` up to the shape this build expects. */
+export type SchemaUpgrade = (sql: SqlStorage, from: number) => void;
+
+/**
+ * Every change to the shape above, one `if (from < n)` per version, in order —
+ * the branching {@link file://../db/db.ts PluginStore} gives a plugin, for the
+ * object core owns itself.
+ *
+ * {@link DDL} stays frozen at version 1, so a store that has never been opened
+ * arrives here at 0 and runs every step. That is the rule that keeps the branch
+ * honest: a column written into the `CREATE TABLE` *and* into a step is added
+ * twice on a fresh store, and the `ALTER TABLE` is what fails.
+ */
+const upgrade: SchemaUpgrade = () => {
+  // Version 1 is what the DDL creates, so there is nothing to move yet. The
+  // first added column goes here as `if (from < 2) sql.exec("ALTER TABLE …")`.
+};
+
+/** Test seams for {@link ensureArtifactSchema}. */
+export interface ArtifactSchemaOptions {
+  /** The steps to run. Defaults to {@link upgrade}. */
+  steps?: SchemaUpgrade;
+  /** The version to end at. Defaults to {@link CURRENT_SCHEMA_VERSION}. */
+  target?: number;
+}
+
+/**
+ * Create the tables and bring a store below `target` up to it. Returns the
+ * version found on disk — 0 for a store that has never been opened — so a
+ * caller can tell an upgrade from a no-op.
+ *
+ * Runs on every construction of the store, and so on every wake-up: a store
+ * already at `target` runs no step at all, which is what makes re-running this
+ * free rather than merely safe.
+ *
+ * `steps` and `target` are parameters for the reason `now` is one in
+ * {@link makeArtifactStore}: with a single version declared there is no upgrade
+ * to exercise, and the branch the first added column will land on has to be
+ * covered before somebody writes it.
+ */
+export function ensureArtifactSchema(
+  sql: SqlStorage,
+  {
+    steps = upgrade,
+    target = CURRENT_SCHEMA_VERSION
+  }: ArtifactSchemaOptions = {}
+): number {
+  for (const statement of DDL) sql.exec(statement);
+  const from =
+    sql
+      .exec<{ version: number }>("SELECT version FROM schema_meta WHERE id = 1")
+      .toArray()[0]?.version ?? 0;
+  if (from === target) return from;
+  // The same refusal `AgentDB` makes for a plugin store: an older build writing
+  // its own number over a newer one would then re-run the steps between them,
+  // against tables that already have what they add.
+  if (from > target)
+    throw new Error(
+      `artifacts store is at schema version ${from} on disk but this build ` +
+        `writes ${target} — downgrade is not supported`
+    );
+  steps(sql, from);
+  sql.exec(
+    `INSERT INTO schema_meta (id, version) VALUES (1, ?)
+     ON CONFLICT (id) DO UPDATE SET version = excluded.version`,
+    target
+  );
+  return from;
+}
 
 // Type aliases, not interfaces: `SqlStorage.exec` constrains its row type to
 // `Record<string, SqlStorageValue>`, and only an alias of an object literal
@@ -212,7 +317,7 @@ export function makeArtifactStore(
   sql: SqlStorage,
   now: () => number
 ): ArtifactStore {
-  for (const statement of DDL) sql.exec(statement);
+  ensureArtifactSchema(sql);
 
   const rowTo = (row: ArtifactRow): Artifact => ({
     token: row.token,
