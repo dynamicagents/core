@@ -120,13 +120,10 @@ optional fields on `AgentPlugin`. Removing or re-typing an existing field needs 
 core major and a version bump. Remember that a contract change is a three-repo
 publish train (core → plugins → starter), so one repo is always briefly behind.
 
-> **v1 was amended in 0.1.2, before its first consumer.** `shouldHandleTurn` and
-> `workspaceBacking` were added and `mainAgentTools` was re-typed from
-> `() => ToolSet` to `(ctx) => ToolSet | Promise<ToolSet>`. The re-type would
-> normally require the bump above; it was skipped deliberately, because that rule
-> exists to stop a _published_ plugin failing with a structural-type error several
-> frames from its cause, and at 0.1.2 no plugin had been published against v1.
-> This is the one such amendment. Treat v1 as frozen from here.
+> **A contract version no plugin has been published against can still change
+> without a bump.** The bump exists to stop a _published_ plugin failing with a
+> structural-type error several frames from its cause; until one exists, there is
+> nothing for it to protect. Check the registry, not `main`, before deciding.
 
 `FINGERPRINT_VERSION` in `src/subagent/fingerprint.ts` works the same way and is
 even sharper: bumping it invalidates every cached subagent result and every
@@ -214,8 +211,7 @@ cannot. A sentence the model reads always can.
 Two consequences for exports:
 
 - `/round` must **never** be re-exported from the root barrel, or a non-delegating
-  agent pays for a delegating loop it never runs. `verify:isolation` in the starter
-  asserts the proactive agent's graph is free of `core/dist/round/`.
+  agent pays for a delegating loop it never runs.
 - `/host` is separate from `/agent` for the same reason: `/agent` is loop
   primitives, and a loop module should not drag a Durable Object base class and
   drizzle into its graph.

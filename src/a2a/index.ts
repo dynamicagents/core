@@ -79,7 +79,6 @@ export {
   buildWorkingTask,
   buildCompletedTask,
   buildFailedTask,
-  buildNoReplyCompletedTask,
   signCallbackJwt,
   postNotification
 } from "./notify.js";

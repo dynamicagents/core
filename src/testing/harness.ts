@@ -68,7 +68,7 @@ export interface CapturedCallback {
   taskId: string;
   /** The task state, e.g. `TASK_STATE_WORKING`. */
   state: string;
-  /** The message text, joined across parts. `""` for a no-reply completion. */
+  /** The message text, joined across parts. `""` for a callback carrying no message. */
   text: string;
   /** The per-task validation token echoed in the callback header. */
   token: string | null;
@@ -139,7 +139,7 @@ export interface AgentHarness {
  * `content` until `harness.spec.ts` drove a real callback through it, which
  * made `text` the empty string on every capture: silently, since a harness
  * reporting `""` for what an agent said looks exactly like an agent that said
- * nothing, and the no-reply completion is a legitimate outcome.
+ * nothing.
  */
 function projectCallback(
   body: unknown,

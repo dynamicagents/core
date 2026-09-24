@@ -87,25 +87,6 @@ export function buildSubmittedTask(
 }
 
 /**
- * The terminal `completed` Task for a turn the agent deliberately did not
- * answer — a turn an `AgentPlugin.shouldHandleTurn` gate declined, or whatever
- * else a host treats as "nothing to say". Same shape as
- * {@link buildSubmittedTask}: **no `status.message` at all**.
- *
- * The callback is still POSTed. The gatekeeper's pending row has to resolve — we
- * simply hand it nothing to post to Slack. There is no `messageId` because there
- * is no message, so unlike {@link buildCompletedTask} nothing needs a stable id
- * for the gatekeeper to dedupe on: a `notify`-step retry re-delivers no content and
- * is idempotent by construction.
- */
-export function buildNoReplyCompletedTask(
-  taskId: string,
-  contextId: string
-): PlainTask {
-  return buildBareTask(taskId, contextId, TaskState.TASK_STATE_COMPLETED);
-}
-
-/**
  * A Task snapshot POSTed to the gatekeeper callback in a given `state`, carrying one
  * `agent` message. The gatekeeper reads the reply from `status.message.parts`, so
  * the text lives there.
