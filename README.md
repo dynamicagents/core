@@ -357,7 +357,7 @@ not drag in the A2A adapter, and the test harness cannot reach a production bund
 | `@dynamicagents/core/subtasks`     | delegation types, decomposition, the `delegate` tool                         |
 | `@dynamicagents/core/subagent`     | `RecipeSubagentBase`, resumable runs, fingerprinting, workspace              |
 | `@dynamicagents/core/artifacts`    | the `Artifacts` object, its routes and viewer, the transcript emission       |
-| `@dynamicagents/core/db`           | `AgentDB`, the three-table schema, migrations, `PluginStore`                 |
+| `@dynamicagents/core/db`           | `AgentDB`, core's schema and migrations                                      |
 | `@dynamicagents/core/testing`      | VCR, `FakeSession`, `mockModel`, DO helpers, JWK fixtures — _workerd realm_  |
 | `@dynamicagents/core/testing/node` | the VCR recorder + cassette store — _Node realm, never import from a spec_   |
 | `@dynamicagents/core/eslint`       | the `no-deprecated-object-properties` rule                                   |
@@ -448,8 +448,7 @@ export const scraper = (config: { apiKey: string }) =>
     },
     toolFamilies: { web: (ctx) => ({ tools: { fetchPage: /* … */ } }) },
     capability: "You can scrape a page and summarize it.",
-    requires: { secrets: ["SCRAPER_API_KEY"] },
-    store: { plugin: "scraper", version: 1, ensureTables: (sql, from) => { /* … */ } }
+    requires: { secrets: ["SCRAPER_API_KEY"] }
   });
 ```
 
@@ -462,34 +461,6 @@ its cause.
 
 The contract is **additive-only within a major**: new capabilities arrive as optional
 fields on `AgentPlugin`.
-
-### Plugin-owned tables
-
-A plugin owns its tables outright, through `store: PluginStore` — but it must stay out of
-core's migration journal. `drizzle-orm/durable-sqlite/migrator` keeps one flat integer
-journal and one global `__drizzle_migrations` table, and two independently-versioned
-packages cannot share that index space.
-
-That is a prohibition on exactly **one import**, not on drizzle. The query builder holds
-no journal and no connection state, so a plugin declares its tables with `sqliteTable`,
-writes idempotent DDL in `ensureTables`, and queries through its own handle:
-
-```ts
-export const scrapes = sqliteTable("scraper_scrapes", { url: text("url").primaryKey() });
-
-store: {
-  plugin: "scraper",
-  version: 1,
-  // Re-run on every hibernation wake-up, so it must be idempotent.
-  ensureTables: (sql) => sql.exec(`CREATE TABLE IF NOT EXISTS scraper_scrapes (…)`)
-}
-
-// …and anywhere the plugin queries:
-const db = drizzle(storage, { schema: { scrapes } });
-```
-
-Core records each store's version in a `plugin_migrations` row, so `ensureTables` receives
-the version last seen on disk and an upgrade path can branch on it.
 
 ### Session hooks
 

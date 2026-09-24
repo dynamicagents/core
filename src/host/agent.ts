@@ -169,11 +169,7 @@ export abstract class DynamicAgent<
   /** The agent's database (drizzle + migrations), built once per DO instance. */
   protected get db(): AgentDB {
     return (this._db ??= new AgentDB(this.ctx.storage, {
-      maxSubtasks: this.config.maxSubtasks,
-      // Plugin-owned tables, applied after core's own migrations. A store that
-      // throws fails DO start rather than being skipped — a plugin whose tables
-      // are missing would otherwise fail at its first tool call.
-      stores: this.runtime.stores
+      maxSubtasks: this.config.maxSubtasks
     }));
   }
 

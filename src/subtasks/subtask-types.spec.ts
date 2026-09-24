@@ -31,7 +31,7 @@ const withParams: SubtaskTypeSpec = {
   description: "play one game",
   params: z.object({
     gameId: z.string().describe("id of the game to play"),
-    cardId: z.string().describe("scorecard to record against")
+    boardId: z.string().describe("leaderboard to record against")
   }),
   paramsHelp: "call `list_games` first",
   capability: "You can play games.",
@@ -84,8 +84,8 @@ describe("validateParams", () => {
 
   it("accepts params satisfying the type's contract", () => {
     expect(
-      types.validateParams("play-game", { gameId: "g1", cardId: "c1" })
-    ).toEqual({ gameId: "g1", cardId: "c1" });
+      types.validateParams("play-game", { gameId: "g1", boardId: "c1" })
+    ).toEqual({ gameId: "g1", boardId: "c1" });
   });
 
   it("refuses a subtask missing a param its type requires", () => {
@@ -95,7 +95,7 @@ describe("validateParams", () => {
       SubtaskParamsError
     );
     expect(() => types.validateParams("play-game", { gameId: "g1" })).toThrow(
-      /cardId/
+      /boardId/
     );
   });
 
@@ -105,10 +105,10 @@ describe("validateParams", () => {
     expect(
       types.validateParams("play-game", {
         gameId: "g1",
-        cardId: "c1",
+        boardId: "c1",
         invented: "x"
       })
-    ).toEqual({ gameId: "g1", cardId: "c1" });
+    ).toEqual({ gameId: "g1", boardId: "c1" });
   });
 
   it("refuses stray params on a type that declares none", () => {
@@ -137,7 +137,7 @@ describe("paramProperties — what the delegate tool advertises", () => {
     // One tool schema serves every type, so the alternative to naming the union
     // is naming none — and an unnamed key is one the model cannot send.
     expect(Object.keys(types.paramProperties()).sort()).toEqual([
-      "cardId",
+      "boardId",
       "gameId"
     ]);
   });

@@ -150,7 +150,7 @@ describe("Cassette.match", () => {
     // Bodies are stored decoded and handed back whole. Replaying
     // `transfer-encoding: chunked` mis-frames the response and
     // `content-encoding: gzip` makes the consumer try to inflate plaintext —
-    // the committed ARC cassette carries both kinds of header.
+    // and a real API's recorded responses commonly carry both.
     write([
       {
         request: {

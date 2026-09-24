@@ -8,14 +8,12 @@ import {
 import {
   PLUGIN_CONTRACT_VERSION,
   type AgentPlugin,
-  type EnrichResultContext,
   type MainAgentToolApproval,
   type MainAgentToolContext,
   type ResolveRuntimeContext,
   type ToolFamilyBuilder,
   type TurnGateContext
 } from "../contract/plugin.js";
-import type { PluginStore } from "../db/db.js";
 import {
   memoryWorkspaceBacking,
   type WorkspaceBacking
@@ -25,10 +23,7 @@ import {
   makeSubtaskTypes,
   type SubtaskTypeRegistry
 } from "../subtasks/subtask-types.js";
-import type {
-  RecipeExecutionResult,
-  SubtaskRuntime
-} from "../subtasks/types.js";
+import type { SubtaskRuntime } from "../subtasks/types.js";
 import { boundToolCalls } from "./bound-tools.js";
 import { collectToolFamilies } from "./tool-families.js";
 
@@ -66,8 +61,6 @@ export interface AgentRuntime {
   toolFamilies: ReadonlyMap<string, ToolFamilyBuilder>;
   /** The capability boundary `validateRecipe` enforces. */
   policy: RecipePolicy;
-  /** Plugin-owned stores, to hand to `new AgentDB(storage, { stores })`. */
-  stores: readonly PluginStore[];
   /** Every binding and secret the installed plugins require of the host. */
   requirements: { secrets: string[]; bindings: string[] };
   /**
@@ -137,11 +130,6 @@ export interface AgentRuntime {
    * `resolveRuntime` — most of them.
    */
   resolveRuntime(ctx: ResolveRuntimeContext): Promise<SubtaskRuntime>;
-  /** Let the owning plugin amend a terminal result before it is persisted. */
-  enrichResult(
-    ctx: EnrichResultContext,
-    result: RecipeExecutionResult
-  ): Promise<RecipeExecutionResult>;
   /** Let the owning plugin release whatever `resolveRuntime` acquired. */
   onAbort(ctx: ResolveRuntimeContext): Promise<void>;
   /**
@@ -222,8 +210,6 @@ export function createAgentRuntime(
     if (plugin.subtaskType) typeOwner.set(plugin.subtaskType.key, plugin);
   }
 
-  const stores = plugins.flatMap((p) => (p.store ? [p.store] : []));
-
   const displacementListeners = plugins.flatMap((p) =>
     p.onMessagesDisplaced
       ? [{ key: p.key, notify: p.onMessagesDisplaced.bind(p) }]
@@ -292,7 +278,6 @@ export function createAgentRuntime(
     types,
     toolFamilies,
     policy,
-    stores,
     requirements: { secrets, bindings },
     workspaceBacking,
 
@@ -408,15 +393,6 @@ export function createAgentRuntime(
       const plugin = pluginForType(ctx.type);
       if (!plugin?.resolveRuntime) return {};
       return (await plugin.resolveRuntime(ctx)) as SubtaskRuntime;
-    },
-
-    async enrichResult(
-      ctx: EnrichResultContext,
-      result: RecipeExecutionResult
-    ): Promise<RecipeExecutionResult> {
-      const plugin = pluginForType(ctx.request.type);
-      if (!plugin?.enrichResult) return result;
-      return plugin.enrichResult(ctx, result);
     },
 
     async onAbort(ctx: ResolveRuntimeContext): Promise<void> {

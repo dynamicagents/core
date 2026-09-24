@@ -181,7 +181,7 @@ describe("the round contract", () => {
     expect(instructions.open).toContain('"general"');
     // The enum is what the model may emit; a type nobody installed must not
     // appear in the prose either, or the model is invited to name it.
-    expect(instructions.open).not.toContain('"arc-game"');
+    expect(instructions.open).not.toContain('"claude-code"');
   });
 
   it("tells a budget-spent round it has no way out but answering", () => {

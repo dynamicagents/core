@@ -138,8 +138,9 @@ cannot strand in-flight runs.
 
 `src/db/schema.ts` holds core's tables and **only** core's — the journal is
 a flat integer sequence over one shared `__drizzle_migrations` table, and two
-independently-versioned packages writing to it will collide. A plugin owns its
-tables through `PluginStore`.
+independently-versioned packages writing to it will collide. Anything else that
+keeps tables in a Durable Object's SQLite writes idempotent DDL by hand and never
+imports the migrator — `AgentDB` in `src/db/db.ts` has the reasoning.
 
 Changing the schema means `npm run db:generate`, which runs `drizzle-kit generate`
 and then rebuilds `src/db/migrations/index.ts` from the `.sql` files. That index is

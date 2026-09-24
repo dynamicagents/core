@@ -50,7 +50,7 @@ export interface RecordedResponse {
  * One cassette entry: a request and every response recorded for it, in order.
  *
  * The array is what makes a replayed sequence work — two identical requests
- * that returned different things (an ARC frame after a move, say) are one entry
+ * that returned different things (a job's status polled twice, say) are one entry
  * with two responses, walked in order. See {@link Cassette.match}.
  */
 export interface CassetteEntry {

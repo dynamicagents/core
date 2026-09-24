@@ -166,8 +166,7 @@ describe("createAgentRuntime — what it composes", () => {
     capability: "Alpha capability block.",
     mainAgentTools: () => ({
       alphaLookup: tool({ description: "lookup", inputSchema: z.object({}) })
-    }),
-    store: { plugin: "alpha", version: 1, ensureTables: () => {} }
+    })
   });
 
   const beta = definePlugin({
@@ -176,7 +175,7 @@ describe("createAgentRuntime — what it composes", () => {
     capability: "Beta capability block."
   });
 
-  it("builds the type registry, family map and stores from the plugin list", () => {
+  it("builds the type registry and family map from the plugin list", () => {
     const rt = createAgentRuntime({
       config: { model: TEST_MODELS },
       plugins: [alpha, beta]
@@ -184,7 +183,6 @@ describe("createAgentRuntime — what it composes", () => {
 
     expect(rt.types.keys).toEqual(["alpha", "beta"]);
     expect([...rt.toolFamilies.keys()]).toEqual(["alphaTools"]);
-    expect(rt.stores.map((s) => s.plugin)).toEqual(["alpha"]);
     expect(rt.plugins).toHaveLength(2);
   });
 
@@ -206,8 +204,7 @@ describe("createAgentRuntime — what it composes", () => {
     const withHooks = definePlugin<{ leased?: string }>({
       key: "leases",
       subtaskType: subtaskType("leased-work"),
-      resolveRuntime: async () => ({ leased: "resource-1" }),
-      enrichResult: async (_ctx, result) => ({ ...result, enriched: true })
+      resolveRuntime: async () => ({ leased: "resource-1" })
     });
 
     const rt = createAgentRuntime({

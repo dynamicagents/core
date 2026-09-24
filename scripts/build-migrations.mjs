@@ -73,8 +73,8 @@ const out = `/**
  *
  * This journal is CORE's alone. A plugin must never add an entry: the journal is
  * a flat integer sequence over one shared \`__drizzle_migrations\` table, and two
- * independently-versioned packages writing to it will collide. Plugins own their
- * tables through \`PluginStore\` instead — see \`src/db/db.ts\`.
+ * independently-versioned packages writing to it will collide. See \`AgentDB\` in
+ * \`src/db/db.ts\`.
  */
 import type { migrate } from "drizzle-orm/durable-sqlite/migrator";
 

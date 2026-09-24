@@ -3,10 +3,10 @@
  * instance.
  *
  * This is **contract, not application code**, which is why it lives in core. A
- * published plugin's config is written against this shape — `arcAgi` takes
- * `storage`, `recall` takes `callerKey` — so a plugin that could not name the
- * type was writing its signature against a structural guess at an interface
- * declared in an app it has never seen.
+ * published plugin's config is written against this shape — `recall` takes
+ * `callerKey` — so a plugin that could not name the type was writing its
+ * signature against a structural guess at an interface declared in an app it
+ * has never seen.
  *
  * Not just `env`, and each field is load-bearing:
  *
