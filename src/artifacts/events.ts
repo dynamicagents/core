@@ -49,12 +49,25 @@ export function sseFrame(
 }
 
 /**
+ * What a whole `Last-Event-ID` may say, and nothing else.
+ *
+ * Anchored both ends because the alternative — `parseInt` — reads a numeric
+ * *prefix*: `2garbage` and `2.5` both come back as 2, so a mangled header would
+ * be honoured as a resume point and silently cost the reader every entry before
+ * it. The ids this stream writes are decimal sequences, so anything else is not
+ * a value to salvage.
+ */
+const SEQUENCE = /^\d+$/;
+
+/**
  * The sequence a reconnecting reader already has, from its `Last-Event-ID`.
  *
  * Anything unreadable means "from the start": a header a proxy mangled must
  * cost a reader duplicates, never a gap.
  */
 export function resumeFrom(lastEventId: string | null): number {
-  const parsed = Number.parseInt(lastEventId ?? "", 10);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 0;
+  if (lastEventId === null || !SEQUENCE.test(lastEventId)) return 0;
+  const parsed = Number(lastEventId);
+  // Enough digits to leave the safe range is not a sequence this stream wrote.
+  return Number.isSafeInteger(parsed) ? parsed : 0;
 }

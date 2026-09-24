@@ -6,8 +6,9 @@
  * A Worker that serves one page does not need an asset pipeline, and an
  * artifact link is the kind of URL that gets pasted into a thread and opened
  * months later — so the fewer moving parts between the token and the text, the
- * better. Everything it needs is inline: no stylesheet, no script, no font, no
- * request beyond the stream it opens.
+ * better. Everything it needs is inline: no stylesheet, no script, no font, and
+ * no request beyond the stream it opens and the probe that tells a token naming
+ * no artifact from a connection that dropped.
  *
  * ## Why the token is not in it
  *
@@ -31,11 +32,17 @@ const STYLE = `
   color-scheme: light dark;
   --bg: #fbfbfa; --fg: #1c1b1a; --muted: #6b6864;
   --line: #e4e2de; --card: #ffffff; --accent: #3a6ea5;
+  --ok: #2f7d4f; --bad: #b4442e;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #17181a; --fg: #e8e6e3; --muted: #9a9691;
     --line: #2c2e31; --card: #1e2022; --accent: #7aa7d8;
+    /* The settle colours are per-scheme because the light values reach only
+       3.5:1 and 3.2:1 on this background, and the pill that wears them is
+       .72rem text, which WCAG holds to 4.5:1. These are 6.5:1 and 6.4:1 — in
+       step with --accent at 7.1:1 rather than brighter than the page. */
+    --ok: #4caf70; --bad: #ef7a5f;
   }
 }
 * { box-sizing: border-box; }
@@ -55,9 +62,9 @@ h1 { font-size: 1.05rem; font-weight: 600; margin: 0; letter-spacing: .01em; }
   color: var(--muted);
 }
 .status[data-state="live"] { color: var(--accent); border-color: var(--accent); }
-.status[data-state="completed"] { color: #2f7d4f; border-color: #2f7d4f; }
+.status[data-state="completed"] { color: var(--ok); border-color: var(--ok); }
 .status[data-state="failed"], .status[data-state="rejected"] {
-  color: #b4442e; border-color: #b4442e;
+  color: var(--bad); border-color: var(--bad);
 }
 .entry {
   background: var(--card); border: 1px solid var(--line); border-radius: 10px;
@@ -105,7 +112,8 @@ const SCRIPT = `
     logEl.append(wrap);
   }
 
-  var stream = new EventSource(location.pathname.replace(/\\/$/, "") + "/events");
+  var eventsUrl = location.pathname.replace(/\\/$/, "") + "/events";
+  var stream = new EventSource(eventsUrl);
 
   stream.addEventListener("${ARTIFACT_EVENTS.ready}", function (event) {
     var data = JSON.parse(event.data);
@@ -126,17 +134,47 @@ const SCRIPT = `
     stream.close();
   });
 
-  stream.onerror = function () {
-    // Before the first event the only thing an EventSource can tell us apart
-    // from a dropped connection is that nothing ever arrived — which is what a
-    // token that names no artifact looks like. Retrying that forever is the one
-    // failure mode worth stopping by hand; after "ready" the browser's own
-    // reconnect, carrying Last-Event-ID, is the right answer.
-    if (ready) return setStatus("live", "reconnecting");
+  function gone() {
     setStatus("gone", "not found");
     noteEl.textContent =
       "This link names no artifact. It may have expired, or been mistyped.";
     stream.close();
+  }
+
+  // An EventSource error event carries no status, so a token that names no
+  // artifact and a connection that dropped arrive here as the same event. Only
+  // the server can tell them apart, and the events route answers 404 for the
+  // first — so ask it, and treat every other outcome as transient: a fetch that
+  // never landed, any status but 404, an offline laptop. Closing on a transient
+  // failure is what costs: it throws away the native reconnect and the
+  // Last-Event-ID replay behind it, which is most of what makes a live link
+  // survive a closed lid, and it does so under the words "not found".
+  var probing = false;
+
+  function probeGone() {
+    if (probing) return;
+    probing = true;
+    fetch(eventsUrl, { cache: "no-store" }).then(
+      function (response) {
+        probing = false;
+        // A probe that found the stream must not hold a seat in the object.
+        if (response.body) response.body.cancel();
+        if (response.status === 404) gone();
+      },
+      function () {
+        probing = false;
+      }
+    );
+  }
+
+  stream.onerror = function () {
+    // Past "ready" the artifact is known to exist, so there is nothing to ask.
+    if (ready) return setStatus("live", "reconnecting");
+    setStatus("pending", "reconnecting");
+    // Offline is transient by definition: nothing answered because nothing was
+    // asked, so the probe would only report the network back to itself.
+    if (navigator.onLine === false) return;
+    probeGone();
   };
 })();
 `;
@@ -162,9 +200,9 @@ export const ARTIFACT_VIEWER_HTML = `<!doctype html>
 <main>
 <header>
   <h1 id="kind">Artifact</h1>
-  <span class="status" id="status" data-state="pending">connecting</span>
+  <span class="status" id="status" role="status" data-state="pending">connecting</span>
 </header>
-<div id="log"></div>
+<div id="log" role="log" aria-live="polite" aria-relevant="additions"></div>
 <p class="note" id="note">Nothing recorded yet.</p>
 </main>
 <script>${SCRIPT}</script>
