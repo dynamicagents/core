@@ -432,12 +432,16 @@ export abstract class RecipeSubagentBase<
    * this chunk's notes to the previous turn's gatekeeper callback.
    *
    * Protected rather than private because an override that does not call
-   * `super.executeChunk` has to be able to arm this itself.
+   * `super.executeChunk` has to be able to arm this itself — and that is also
+   * why it pins the origin from the push context's `jku`. This call is all such
+   * an override makes, and without an origin every note it posts goes to the
+   * thread verbatim instead of as the transcript's link.
    */
   protected noteProgressContext(
     request: RecipeExecutionRequest,
     live?: ChunkProgressContext
   ): void {
+    this.selfOriginMemo.note(live?.push.jku);
     this.live = live
       ? {
           channel: this.pushChannel(live.push),

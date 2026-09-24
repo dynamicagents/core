@@ -12,7 +12,6 @@ import type {
 import type { Artifacts } from "../artifacts/do.js";
 import { ARTIFACTS_OBJECT_NAME } from "../artifacts/binding.js";
 import { SESSION_TRANSCRIPT_KIND } from "../artifacts/transcript.js";
-import type { SelfOrigin } from "../a2a/self-origin.js";
 import type { TestSubagent } from "../../test/worker.js";
 
 /**
@@ -47,18 +46,16 @@ const PUSH: TurnPushContext = {
   jku: "https://agent.example/.well-known/jwks.json"
 };
 
-const REQUEST = {
-  taskId: "task-1",
-  subtaskId: 7,
-  type: "claude-code"
-} as unknown as RecipeExecutionRequest;
+/**
+ * A request on a task of its own. A task's link is posted until it lands and
+ * then never again, so specs sharing one would read an earlier spec's silence
+ * as their own refusal.
+ */
+const requestOn = (taskId = crypto.randomUUID()): RecipeExecutionRequest =>
+  ({ taskId, subtaskId: 7, type: "claude-code" }) as RecipeExecutionRequest;
 
-/** A request on a task of its own, so one spec's transcript is only its own. */
-const requestOn = (taskId: string): RecipeExecutionRequest =>
-  ({ ...REQUEST, taskId }) as RecipeExecutionRequest;
-
-/** The deployment's own origin, as a chunk's `selfOrigin` argument carries it. */
-const ORIGIN = "https://agent.example";
+/** The deployment's own origin, which a facet learns from the push context. */
+const ORIGIN = new URL(PUSH.jku).origin;
 
 const artifactsNs = (
   env as unknown as Record<string, DurableObjectNamespace<Artifacts>>
@@ -78,15 +75,6 @@ interface Facet {
   abortRun(): Promise<boolean>;
   yieldRun(): Promise<void>;
   inflight?: AbortController;
-  /**
-   * The origin memo `executeChunk` pins from its `selfOrigin` argument, reached
-   * directly so a spec can drive `postProgress` without running a chunk.
-   *
-   * It decides which of two things the push channel is handed — the link or the
-   * note — so leaving it at its default is a spec asserting the *absence* of an
-   * origin while claiming to be about something else.
-   */
-  selfOriginMemo: SelfOrigin;
 }
 
 /**
@@ -117,12 +105,7 @@ async function withFacet(
 describe("a facet's own progress notes", () => {
   it("labels a note with the subtask type and ordinal, and keys it verbatim", async () => {
     await withFacet(async (facet, posted) => {
-      // The origin, pinned as a chunk pins it. Without one there is no link to
-      // build, and the note is posted verbatim — so a spec that leaves it unset
-      // is reading the label off the fallback rather than off the transcript,
-      // and would go on passing with the transcript removed entirely.
       const taskId = crypto.randomUUID();
-      facet.selfOriginMemo.note(ORIGIN);
       facet.noteProgressContext(requestOn(taskId), { push: PUSH, ordinal: 0 });
       await facet.postProgress({ key: "claude:3", text: "Running the suite." });
 
@@ -157,7 +140,6 @@ describe("a facet's own progress notes", () => {
       // ever gets. The rule the transcript holds to is delivery, not position —
       // see `transcribeNote`.
       const taskId = crypto.randomUUID();
-      facet.selfOriginMemo.note(ORIGIN);
       facet.noteProgressContext(requestOn(taskId), { push: PUSH, ordinal: 0 });
       await facet.postProgress({ key: "claude:0", text: "first" });
       await facet.postProgress({ key: "claude:1", text: "second" });
@@ -170,24 +152,26 @@ describe("a facet's own progress notes", () => {
     }, false);
   });
 
-  it("posts the note itself before this instance knows its own origin", async () => {
+  it("posts the link from a facet whose chunk never reached the base", async () => {
     await withFacet(async (facet, posted) => {
-      // The chunk that arrives first on a cold isolate. A link needs an origin,
-      // and the origin arrives with a turn — so the note goes to the thread as
-      // it always did, labelled, rather than being filed against a URL nobody
-      // could be given.
-      facet.noteProgressContext(REQUEST, { push: PUSH, ordinal: 0 });
+      // What an override of `executeChunk` does, and all it does: arm the
+      // channel, then post. The `selfOrigin` argument never reaches the memo on
+      // that path, so the origin has to come from the push context — or every
+      // note goes to the thread verbatim.
+      const taskId = crypto.randomUUID();
+      facet.noteProgressContext(requestOn(taskId), { push: PUSH, ordinal: 0 });
       await facet.postProgress({ key: "claude:3", text: "Running the suite." });
 
+      const token = await artifacts().tokenFor(SESSION_TRANSCRIPT_KIND, taskId);
       expect(posted).toEqual([
-        { text: "[claude-code 0] Running the suite.", key: "claude:3" }
+        { text: `${ORIGIN}/a/${token}`, key: "claude:3" }
       ]);
     });
   });
 
   it("says nothing when the parent passed no context", async () => {
     await withFacet(async (facet, posted) => {
-      facet.noteProgressContext(REQUEST, undefined);
+      facet.noteProgressContext(requestOn(), undefined);
       await facet.postProgress({ key: "claude:0", text: "still working" });
       expect(posted).toEqual([]);
     });
@@ -195,7 +179,7 @@ describe("a facet's own progress notes", () => {
 
   it("stops posting once the run is aborted", async () => {
     await withFacet(async (facet, posted) => {
-      facet.noteProgressContext(REQUEST, { push: PUSH, ordinal: 2 });
+      facet.noteProgressContext(requestOn(), { push: PUSH, ordinal: 2 });
       await facet.postProgress({ key: "claude:0", text: "before" });
 
       // What a cancellation actually does to a facet. The parent's own
@@ -211,7 +195,7 @@ describe("a facet's own progress notes", () => {
 
   it("keeps posting when a chunk is only asked to yield", async () => {
     await withFacet(async (facet, posted) => {
-      facet.noteProgressContext(REQUEST, { push: PUSH, ordinal: 1 });
+      facet.noteProgressContext(requestOn(), { push: PUSH, ordinal: 1 });
       const inflight = new AbortController();
       facet.inflight = inflight;
 
@@ -237,7 +221,7 @@ describe("a facet's own progress notes", () => {
        * unwind, which for a container command is a minute of talking about work
        * nobody asked for any more.
        */
-      facet.noteProgressContext(REQUEST, { push: PUSH, ordinal: 0 });
+      facet.noteProgressContext(requestOn(), { push: PUSH, ordinal: 0 });
       expect(facet.inflight).toBeUndefined();
 
       expect(await facet.abortRun()).toBe(false);
@@ -249,11 +233,11 @@ describe("a facet's own progress notes", () => {
 
   it("drops a previous turn's channel when a later chunk brings none", async () => {
     await withFacet(async (facet, posted) => {
-      facet.noteProgressContext(REQUEST, { push: PUSH, ordinal: 0 });
+      facet.noteProgressContext(requestOn(), { push: PUSH, ordinal: 0 });
       // An isolate that already ran a chunk for one turn, reused by a chunk that
       // has no gatekeeper behind it. Left armed, it would post this chunk's notes
       // to the previous turn's callback.
-      facet.noteProgressContext(REQUEST, undefined);
+      facet.noteProgressContext(requestOn(), undefined);
       await facet.postProgress({ key: "claude:0", text: "leaked" });
       expect(posted).toEqual([]);
     });
