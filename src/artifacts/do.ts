@@ -220,7 +220,7 @@ export class Artifacts extends DurableObject {
       Uint8Array,
       Uint8Array
     >();
-    const watcher = makeWatcher(token, writable.getWriter(), () =>
+    const watcher = makeWatcher(writable.getWriter(), () =>
       this.drop(token, watcher)
     );
     this.seat(token, watcher);
@@ -331,7 +331,6 @@ export const MAX_QUEUED_BYTES = 256 * 1024;
  * see {@link MAX_QUEUED_FRAMES}.
  */
 function makeWatcher(
-  token: string,
   writer: WritableStreamDefaultWriter<Uint8Array>,
   unseat: () => void
 ): Watcher {
@@ -355,8 +354,9 @@ function makeWatcher(
   // the body the reader holds, which is the event its `EventSource` reconnects
   // on — so the reason is written for whoever reads it in a log.
   const overflow = (): void => {
+    // The queue's size and nothing identifying the reader: a token is the
+    // artifact's bearer credential, and a log sink is not a place to keep one.
     console.warn("[artifacts] watcher dropped, unread frames past the bound", {
-      token,
       queuedFrames,
       queuedBytes
     });
