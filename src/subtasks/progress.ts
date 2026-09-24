@@ -39,5 +39,20 @@ export function labelSubagentNote(
   text: string,
   source: { type: string; ordinal: number }
 ): string {
-  return `[${source.type} ${source.ordinal}] ${text}`;
+  return `[${subagentNoteLabel(source)}] ${text}`;
+}
+
+/**
+ * The author half of the label, without the brackets a thread needs around it.
+ *
+ * For a renderer with a slot to put a source in — a transcript artifact has a
+ * column for it, see {@link file://../artifacts/transcript.ts transcribeNote} —
+ * where the brackets above are punctuation borrowed from a medium that has
+ * nowhere else to put the name. Same two halves, same order, one home.
+ */
+export function subagentNoteLabel(source: {
+  type: string;
+  ordinal: number;
+}): string {
+  return `${source.type} ${source.ordinal}`;
 }

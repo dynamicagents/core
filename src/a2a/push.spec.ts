@@ -51,4 +51,36 @@ describe("createPushChannel", () => {
     const exp = decodeJwt(tokens[2]!).exp! * 1000;
     expect(exp).toBeGreaterThan(Date.now());
   });
+
+  /**
+   * Swallowed and reported are not the same thing. A progress post may never
+   * fail a turn, and a caller that has something else to do about one that did
+   * not arrive still has to be able to tell — the transcript link is offered
+   * again until a post lands, so a failure read as a success loses it.
+   */
+  it.each([
+    [200, true],
+    [500, false]
+  ])(
+    "answers HTTP %i with %s, and throws on neither",
+    async (status, landed) => {
+      vi.stubGlobal("fetch", async () => new Response(null, { status }));
+      const channel = createPushChannel(
+        JSON.stringify(TEST_AGENT_PRIVATE_JWK),
+        PUSH
+      );
+      expect(await channel.working("progress", "r1:step:0")).toBe(landed);
+    }
+  );
+
+  it("answers false when the post never lands at all", async () => {
+    vi.stubGlobal("fetch", async () => {
+      throw new Error("network unreachable");
+    });
+    const channel = createPushChannel(
+      JSON.stringify(TEST_AGENT_PRIVATE_JWK),
+      PUSH
+    );
+    expect(await channel.working("progress", "r1:step:0")).toBe(false);
+  });
 });

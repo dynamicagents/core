@@ -2,12 +2,13 @@ import { Agent, type AgentContext } from "agents";
 import { Sessions } from "agents/sessions";
 import { DurableObject } from "cloudflare:workers";
 import { installScheduler } from "../src/alarm/index.js";
+import { handleArtifactRoute } from "../src/artifacts/route.js";
 import { AgentDB, type AgentDBOptions } from "../src/db/db.js";
 import {
   RecipeSubagentBase,
   type SubagentRuntime
 } from "../src/subagent/index.js";
-import type { A2ASecretsEnv } from "../src/env.js";
+import type { A2ASecretsEnv, ArtifactsEnv } from "../src/env.js";
 import { DynamicAgent } from "../src/host/agent.js";
 import type { CoreConfigOverrides } from "../src/config.js";
 import type { AgentPlugin } from "../src/contract/plugin.js";
@@ -59,7 +60,7 @@ export function setSubagentRuntime(runtime: SubagentRuntime): void {
 }
 
 export class TestSubagent extends RecipeSubagentBase<
-  Cloudflare.Env & A2ASecretsEnv
+  Cloudflare.Env & A2ASecretsEnv & ArtifactsEnv
 > {
   protected subagentRuntime(): SubagentRuntime {
     if (!testRuntime) {
@@ -71,11 +72,30 @@ export class TestSubagent extends RecipeSubagentBase<
   }
 }
 
+/**
+ * The artifacts object, exported unchanged.
+ *
+ * Core ships it whole — there is no seam to fill — so a consumer's host is
+ * exactly this line, and the specs drive the same class a deployment would.
+ */
+export { Artifacts } from "../src/artifacts/do.js";
+
 export default {
-  async fetch(): Promise<Response> {
-    return new Response("da-core test worker");
+  /**
+   * The artifact routes in front, which is the delegation
+   * {@link handleArtifactRoute} documents — one line, and everything else falls
+   * through to what the Worker did before.
+   */
+  async fetch(
+    request: Request,
+    env: Cloudflare.Env & ArtifactsEnv
+  ): Promise<Response> {
+    return (
+      (await handleArtifactRoute(request, env)) ??
+      new Response("da-core test worker")
+    );
   }
-} satisfies ExportedHandler<Cloudflare.Env>;
+} satisfies ExportedHandler<Cloudflare.Env & ArtifactsEnv>;
 
 /**
  * Two plain Durable Objects for the `/alarm` specs, and the pair is the test.

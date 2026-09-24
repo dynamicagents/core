@@ -9,6 +9,10 @@ import type {
   ProgressEvent,
   RecipeExecutionRequest
 } from "../subtasks/types.js";
+import type { Artifacts } from "../artifacts/do.js";
+import { ARTIFACTS_OBJECT_NAME } from "../artifacts/binding.js";
+import { SESSION_TRANSCRIPT_KIND } from "../artifacts/transcript.js";
+import type { SelfOrigin } from "../a2a/self-origin.js";
 import type { TestSubagent } from "../../test/worker.js";
 
 /**
@@ -49,6 +53,20 @@ const REQUEST = {
   type: "claude-code"
 } as unknown as RecipeExecutionRequest;
 
+/** A request on a task of its own, so one spec's transcript is only its own. */
+const requestOn = (taskId: string): RecipeExecutionRequest =>
+  ({ ...REQUEST, taskId }) as RecipeExecutionRequest;
+
+/** The deployment's own origin, as a chunk's `selfOrigin` argument carries it. */
+const ORIGIN = "https://agent.example";
+
+const artifactsNs = (
+  env as unknown as Record<string, DurableObjectNamespace<Artifacts>>
+).ARTIFACTS!;
+
+const artifacts = () =>
+  artifactsNs.get(artifactsNs.idFromName(ARTIFACTS_OBJECT_NAME));
+
 /** The protected surface these specs drive, and the one they stub. */
 interface Facet {
   pushChannel(context: TurnPushContext): PushChannel;
@@ -60,11 +78,27 @@ interface Facet {
   abortRun(): Promise<boolean>;
   yieldRun(): Promise<void>;
   inflight?: AbortController;
+  /**
+   * The origin memo `executeChunk` pins from its `selfOrigin` argument, reached
+   * directly so a spec can drive `postProgress` without running a chunk.
+   *
+   * It decides which of two things the push channel is handed — the link or the
+   * note — so leaving it at its default is a spec asserting the *absence* of an
+   * origin while claiming to be about something else.
+   */
+  selfOriginMemo: SelfOrigin;
 }
 
-/** Drive one facet with its callback channel captured instead of posted. */
+/**
+ * Drive one facet with its callback channel captured instead of posted.
+ *
+ * `landed` is what `PushChannel.working` answers — whether the gatekeeper took
+ * the post — and `false` is the swallowed failure a facet never hears about, so
+ * it is the only way to reach the case where the link must be offered again.
+ */
 async function withFacet(
-  fn: (facet: Facet, posted: { text: string; key: string }[]) => Promise<void>
+  fn: (facet: Facet, posted: { text: string; key: string }[]) => Promise<void>,
+  landed = true
 ): Promise<void> {
   await runInDurableObject(fresh(), async (instance) => {
     const posted: { text: string; key: string }[] = [];
@@ -73,6 +107,7 @@ async function withFacet(
       ({
         working: async (text: string, key: string) => {
           posted.push({ text, key });
+          return landed;
         }
       }) as unknown as PushChannel;
     await fn(facet, posted);
@@ -82,11 +117,68 @@ async function withFacet(
 describe("a facet's own progress notes", () => {
   it("labels a note with the subtask type and ordinal, and keys it verbatim", async () => {
     await withFacet(async (facet, posted) => {
+      // The origin, pinned as a chunk pins it. Without one there is no link to
+      // build, and the note is posted verbatim — so a spec that leaves it unset
+      // is reading the label off the fallback rather than off the transcript,
+      // and would go on passing with the transcript removed entirely.
+      const taskId = crypto.randomUUID();
+      facet.selfOriginMemo.note(ORIGIN);
+      facet.noteProgressContext(requestOn(taskId), { push: PUSH, ordinal: 0 });
+      await facet.postProgress({ key: "claude:3", text: "Running the suite." });
+
+      // The note is the link and nothing else, under the key the note would
+      // have been posted under — that key is the gatekeeper's dedupe id and the
+      // artifact's, so it travels unlabelled.
+      expect(posted).toHaveLength(1);
+      expect(posted[0]!.key).toBe("claude:3");
+      expect(posted[0]!.text).toMatch(
+        new RegExp(`^${ORIGIN}/a/[0-9A-Za-z]{40}$`.replace(/\//g, "\\/"))
+      );
+
+      // And the label is on the entry, which is where a page has a column for
+      // it. It is the whole reason `ordinal` travels with the push context: two
+      // branches of one round are different instances sharing a type.
+      const token = await artifacts().tokenFor(SESSION_TRANSCRIPT_KIND, taskId);
+      expect(posted[0]!.text).toBe(`${ORIGIN}/a/${token}`);
+      // Settled first so the stream closes and the body can be read to its end.
+      await artifacts().settle(token!, "completed");
+      const body = await (
+        await artifacts().fetch(new Request(`${ORIGIN}/a/${token}/events`))
+      ).text();
+      expect(body).toContain('"label":"claude-code 0"');
+      expect(body).toContain('"text":"Running the suite."');
+    });
+  });
+
+  it("offers the link again when the post does not reach the thread", async () => {
+    await withFacet(async (facet, posted) => {
+      // A facet posts live, outside anything that retries: `working` swallows a
+      // dropped POST, so a link suppressed after one attempt is a link nobody
+      // ever gets. The rule the transcript holds to is delivery, not position —
+      // see `transcribeNote`.
+      const taskId = crypto.randomUUID();
+      facet.selfOriginMemo.note(ORIGIN);
+      facet.noteProgressContext(requestOn(taskId), { push: PUSH, ordinal: 0 });
+      await facet.postProgress({ key: "claude:0", text: "first" });
+      await facet.postProgress({ key: "claude:1", text: "second" });
+
+      const token = await artifacts().tokenFor(SESSION_TRANSCRIPT_KIND, taskId);
+      expect(posted).toEqual([
+        { text: `${ORIGIN}/a/${token}`, key: "claude:0" },
+        { text: `${ORIGIN}/a/${token}`, key: "claude:1" }
+      ]);
+    }, false);
+  });
+
+  it("posts the note itself before this instance knows its own origin", async () => {
+    await withFacet(async (facet, posted) => {
+      // The chunk that arrives first on a cold isolate. A link needs an origin,
+      // and the origin arrives with a turn — so the note goes to the thread as
+      // it always did, labelled, rather than being filed against a URL nobody
+      // could be given.
       facet.noteProgressContext(REQUEST, { push: PUSH, ordinal: 0 });
       await facet.postProgress({ key: "claude:3", text: "Running the suite." });
 
-      // The label is the whole reason `ordinal` travels with the push context:
-      // two branches of one round are different instances sharing a type.
       expect(posted).toEqual([
         { text: "[claude-code 0] Running the suite.", key: "claude:3" }
       ]);

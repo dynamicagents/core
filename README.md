@@ -181,6 +181,10 @@ package exists to prevent: it freezes the registry before `env` exists (which on
 Workers is always), defeats tree-shaking, and makes runtime plugin selection
 impossible.
 
+`Env` here is your generated one, and `DynamicAgent` constrains it to `CoreEnv` —
+`AI`, the two A2A secrets, and the `ARTIFACTS` namespace from step 5. Wire that
+binding before this typechecks.
+
 `createAgentRuntime` and `AgentDB` are still exported and still work on a bare
 `Agent<Env>` — but everything the base class does is lifecycle with an ordering
 that is load-bearing and invisible (migrations awaited before the first RPC, the
@@ -267,6 +271,74 @@ The rows are core's third table, they are never written into the Session — his
 stays text-only — and they age out on the same 30-day clock as the rest of a
 Task's state.
 
+### 5. Wire the artifacts binding — it is required
+
+A delegating round narrates itself: every time a subagent has something to say, a
+labelled note lands in the thread the person is reading, in the same voice as the
+answer they are waiting for. A long run produces dozens. The notes are worth
+keeping — they are the only account of what the run actually did — and a thread is
+the wrong place to keep them.
+
+`@dynamicagents/core/artifacts` is where they go instead. A note is posted as a link
+and nothing else until one such post **reaches** the thread; every note after that is
+recorded and not posted at all, and the link streams live and then ends with the
+state the task settled in. Main-agent progress is untouched: a round's acknowledgment
+and its step text are the conversation, not an account of one.
+
+**Every agent binds `ARTIFACTS`**, and the wiring is a binding, a migration, an
+export and the route delegation below. A Durable Object that starts without the
+binding throws `ArtifactsNotBoundError` naming all of them — the delegation included,
+because without it the object starts and every `/a/<token>` link falls through to
+your own routes.
+
+```jsonc
+// wrangler.jsonc — the tag is the next one in your own migration sequence
+"durable_objects": { "bindings": [{ "name": "ARTIFACTS", "class_name": "Artifacts" }] },
+"migrations": [{ "tag": "v4", "new_sqlite_classes": ["Artifacts"] }]
+```
+
+```ts
+import { Artifacts, handleArtifactRoute } from "@dynamicagents/core/artifacts";
+
+export { Artifacts };
+
+export default {
+  async fetch(request: Request, env: Env) {
+    return (await handleArtifactRoute(request, env)) ?? a2a(request, env);
+  }
+};
+```
+
+There is no unwired mode. The notes of a delegating round go on a transcript on
+every path core owns, so "no binding" is not a second behaviour an agent can want —
+it is a thread full of the notes the link exists to replace, arrived at by
+forgetting a line. Requiring it makes the store a structural assumption core can
+write against, instead of an `if` at every site that writes. The binding is on
+`CoreEnv`, so a consumer `Env` missing it fails to typecheck, and `onStart` checks
+it again at DO start for the `wrangler.jsonc` a type cannot see.
+
+Two things still put the note in the thread instead of a link, and both are facts
+about that note rather than about the wiring: this deployment has not learned its
+own origin yet (it arrives with the first turn), or retention has already swept the
+artifact. An ingest that **fails** is neither, and does not fall back to posting the
+note: it throws, the durable step retries, and the artifact's dedupe on the
+notification key records the note once however many times the step runs.
+
+Posting is best-effort — `PushChannel.working` swallows a network failure and a
+non-2xx, because a turn that cannot report its progress is still a turn that should
+deliver its answer. So what ends the posting is a post that **landed**, and the
+artifact records that: a link whose only POST was dropped is offered again on the
+next note, rather than suppressed by a rule that knew nothing but which note came
+first.
+
+An artifact is a **kind**, a long random **token**, an append-only list of labelled
+notes, a settle status, and whether its link has been delivered. The token is id and authorization in one — derived from
+nothing, so a link is the whole of what a reader needs and anyone holding one can
+read it. `session-transcript` is the first kind and the object holds no code for
+it; ingest is RPC over the binding and never a route, so a write is authenticated
+by being inside the Worker. Artifacts age out on the same 30-day clock as the rest
+of a Task's state, swept lazily on the next write rather than by an alarm apiece.
+
 ---
 
 ## Exports
@@ -284,6 +356,7 @@ not drag in the A2A adapter, and the test harness cannot reach a production bund
 | `@dynamicagents/core/round`        | the delegating round loop: `RoundAgentBase`, `runHandleTask`, `runTurn`      |
 | `@dynamicagents/core/subtasks`     | delegation types, decomposition, the `delegate` tool                         |
 | `@dynamicagents/core/subagent`     | `RecipeSubagentBase`, resumable runs, fingerprinting, workspace              |
+| `@dynamicagents/core/artifacts`    | the `Artifacts` object, its routes and viewer, the transcript emission       |
 | `@dynamicagents/core/db`           | `AgentDB`, the three-table schema, migrations, `PluginStore`                 |
 | `@dynamicagents/core/testing`      | VCR, `FakeSession`, `mockModel`, DO helpers, JWK fixtures — _workerd realm_  |
 | `@dynamicagents/core/testing/node` | the VCR recorder + cassette store — _Node realm, never import from a spec_   |

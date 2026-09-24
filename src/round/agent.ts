@@ -7,7 +7,7 @@ import {
 } from "@dynamicagents/g2a-protocol";
 import { validateRecipe } from "../contract/validation.js";
 import type { ResolvedRecipe } from "../contract/recipe.js";
-import type { AiEnv, A2ASecretsEnv } from "../env.js";
+import type { AiEnv, A2ASecretsEnv, ArtifactsEnv } from "../env.js";
 import { stateOf, type HumanRequest } from "../db/index.js";
 import type { GatekeeperIdentity } from "../a2a/verify.js";
 import type { TurnPushContext } from "../a2a/push.js";
@@ -24,7 +24,7 @@ import {
 } from "../agent/history.js";
 import { newTurnBudget, type TurnBudget } from "../agent/budget.js";
 import { FINGERPRINT_MISMATCH, subagentName } from "../subagent/index.js";
-import { labelSubagentNote } from "../subtasks/progress.js";
+import { transcribeNote } from "../artifacts/transcript.js";
 import type {
   ChunkProgressContext,
   CompositionBranch,
@@ -173,9 +173,8 @@ function approvalFor(
 }
 
 export abstract class RoundAgentBase<
-  TEnv extends Cloudflare.Env & AiEnv & A2ASecretsEnv = Cloudflare.Env &
-    AiEnv &
-    A2ASecretsEnv
+  TEnv extends Cloudflare.Env & AiEnv & A2ASecretsEnv & ArtifactsEnv =
+    Cloudflare.Env & AiEnv & A2ASecretsEnv & ArtifactsEnv
 > extends DynamicAgent<TEnv> {
   private _instructions?: TurnInstructions;
 
@@ -911,11 +910,27 @@ export abstract class RoundAgentBase<
     // *not* labelled — it is the replay-dedupe id and must stay derived from
     // position alone — and neither is `outcome.progress` itself, which rides back
     // to the Workflow.
+    //
+    // Every note is also filed on the Task's transcript, which is what decides
+    // whether the thread gets the link, silence, or the note itself — so the
+    // post goes through it rather than around it. See
+    // {@link file://../artifacts/transcript.ts transcribeNote}.
     if (push) {
       const channel = this.push(push);
       const source = { type: request.type, ordinal };
+      const origin = this.selfOrigin();
       for (const event of outcome.progress) {
-        await channel.working(labelSubagentNote(event.text, source), event.key);
+        await transcribeNote(
+          this.env,
+          {
+            taskId: request.taskId,
+            origin,
+            source,
+            text: event.text,
+            key: event.key
+          },
+          (text) => channel.working(text, event.key)
+        );
       }
     }
 

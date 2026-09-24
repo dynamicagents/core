@@ -9,7 +9,8 @@ import {
   type CoreConfigOverrides,
   type ModelConfig
 } from "../config.js";
-import type { A2ASecretsEnv, AiEnv } from "../env.js";
+import type { A2ASecretsEnv, AiEnv, ArtifactsEnv } from "../env.js";
+import { assertArtifactsBound } from "../artifacts/binding.js";
 import { AgentDB, isTerminal, stateOf } from "../db/index.js";
 import type { GatekeeperIdentity } from "../a2a/verify.js";
 import { callerContext } from "../a2a/caller.js";
@@ -22,6 +23,7 @@ import {
   type TurnPushContext
 } from "../a2a/push.js";
 import { SelfOrigin } from "../a2a/self-origin.js";
+import { settleTranscript } from "../artifacts/transcript.js";
 import { buildAgentSession, type SessionLike } from "../agent/session.js";
 import { withFallback } from "../agent/fallback.js";
 import {
@@ -72,9 +74,8 @@ import type { PluginHost } from "./plugin-host.js";
  * turns, in any channel or thread, accumulate into that one conversation.
  */
 export abstract class DynamicAgent<
-  TEnv extends Cloudflare.Env & AiEnv & A2ASecretsEnv = Cloudflare.Env &
-    AiEnv &
-    A2ASecretsEnv
+  TEnv extends Cloudflare.Env & AiEnv & A2ASecretsEnv & ArtifactsEnv =
+    Cloudflare.Env & AiEnv & A2ASecretsEnv & ArtifactsEnv
 > extends Agent<TEnv> {
   /**
    * The message store behind {@link getSession}. A lifecycle capability, so it is
@@ -235,6 +236,11 @@ export abstract class DynamicAgent<
   }
 
   async onStart(): Promise<void> {
+    // Before anything else, and for the reason the migration await below is
+    // first among the rest: a binding core writes to on every delegating round
+    // is not a thing to discover part-way through one. A missing one is a
+    // wiring fault with a fix, and this is the cheap place to say so.
+    assertArtifactsBound(this.env);
     // Await migrations before the SDK dispatches any RPC — eliminates the race
     // between schema creation and first query on cold start / hibernation wake-up.
     await this.db.ensureReady();
@@ -646,6 +652,12 @@ export abstract class DynamicAgent<
   // subclassed by consumers: `private` is compile-time only, so it spends the
   // name in every subclass — and `settled` is a name a subclass wants.
   async #settled(taskId: string, state: TaskState): Promise<void> {
+    // First, and best-effort: this is the one place core learns that a task
+    // will not move again, so it is where a transcript of it ends. Before the
+    // hook rather than after, because the hook releases resources and can take
+    // as long as a container takes to stop, while somebody may be watching the
+    // transcript for the line that says it finished.
+    await settleTranscript(this.env, taskId, state);
     try {
       await this.onTaskSettled(taskId, state);
     } catch (err) {
