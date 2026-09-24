@@ -1,16 +1,21 @@
 /**
- * How core reaches the artifacts store — if a deployment wired one.
+ * How core reaches the artifacts store.
  *
- * **The binding is optional and the whole feature is dormant without it.** A
- * consumer that declares no `ARTIFACTS` namespace gets the behaviour it had
- * before this module existed: every helper here resolves to nothing, and every
- * caller falls back to what it did anyway. That is the property to preserve
- * when editing anything below — a deployment should never have to opt *out*.
+ * **The binding is required**, and that is the property to preserve when
+ * editing anything below. A deployment that has not declared `ARTIFACTS` is
+ * misconfigured, not configured differently: every delegating round files its
+ * notes here, so the alternative to "the binding is there" is not a second
+ * behaviour worth having — it is a thread full of the notes the link exists to
+ * replace, chosen by nobody, reached by forgetting a line of `wrangler.jsonc`.
+ *
+ * So the absence is a fault with a name and a fix, raised once at DO start by
+ * {@link assertArtifactsBound}, rather than a branch every writer carries.
  */
 
+import type { ArtifactsEnv } from "../env.js";
 import type { Artifacts } from "./do.js";
 
-/** The name the binding is read from, when a deployment declares one. */
+/** The name the binding is read from. */
 export const ARTIFACTS_BINDING = "ARTIFACTS";
 
 /**
@@ -31,34 +36,56 @@ export const ARTIFACTS_BINDING = "ARTIFACTS";
  */
 export const ARTIFACTS_OBJECT_NAME = "artifacts";
 
-/** The `env` slice this feature reads. Optional, deliberately — see above. */
-export interface ArtifactsEnv {
-  ARTIFACTS?: DurableObjectNamespace<Artifacts>;
-}
-
 /**
- * The binding, if the deployment declared one.
+ * Thrown when `ARTIFACTS` is not bound — the wiring fault, named.
  *
- * Takes `object` rather than {@link ArtifactsEnv} because a type whose every
- * property is optional is a *weak type*, and TypeScript refuses an argument
- * that shares no property with it — which describes exactly the `Env` of every
- * agent that has not wired the binding, i.e. the case this has to serve. So the
- * read is one cast, made here, rather than a constraint pushed onto every
- * agent's `Env`.
+ * Carries the fix rather than the symptom, on the same principle as
+ * {@link file://../runtime/index.ts RuntimeSetupError}: what reaches a person
+ * is a Durable Object that would not start, and the only useful thing to say
+ * at that moment is which lines are missing and which files they go in.
  */
-export function artifactsBinding(
-  env: object
-): DurableObjectNamespace<Artifacts> | undefined {
-  return (env as ArtifactsEnv).ARTIFACTS;
+export class ArtifactsNotBoundError extends Error {
+  constructor() {
+    super(
+      `${ARTIFACTS_BINDING} is not bound. @dynamicagents/core records every subagent ` +
+        "note on the Task's transcript and posts a link, so the binding is required — " +
+        "it is three lines in two files. In wrangler.jsonc, add " +
+        `{ "name": "${ARTIFACTS_BINDING}", "class_name": "Artifacts" } to ` +
+        'durable_objects.bindings and { "new_sqlite_classes": ["Artifacts"] } as the ' +
+        "next migration tag. In the Worker entry, add " +
+        '`export { Artifacts } from "@dynamicagents/core/artifacts";`.'
+    );
+    this.name = "ArtifactsNotBoundError";
+  }
 }
 
 /**
- * The stub for this deployment's artifacts object, or `undefined` when nothing
- * is bound. See {@link ARTIFACTS_OBJECT_NAME} for why there is only one.
+ * The binding, or {@link ArtifactsNotBoundError}.
+ *
+ * Called at DO start — see `DynamicAgent.onStart` and
+ * `RecipeSubagentBase.onStart` — so a deployment that forgot the binding fails
+ * where `db.ensureReady()` fails, before any request reaches a writer. The
+ * runtime check survives the required type because `ArtifactsEnv` describes
+ * what a consumer *declared*, and a `wrangler.jsonc` that never grew the
+ * binding still typechecks against an `Env` that claims it.
  */
-export function artifactsStub(
-  env: object
-): DurableObjectStub<Artifacts> | undefined {
-  const namespace = artifactsBinding(env);
-  return namespace?.get(namespace.idFromName(ARTIFACTS_OBJECT_NAME));
+export function assertArtifactsBound(
+  env: ArtifactsEnv
+): DurableObjectNamespace<Artifacts> {
+  const namespace = env.ARTIFACTS as
+    DurableObjectNamespace<Artifacts> | undefined;
+  if (!namespace) throw new ArtifactsNotBoundError();
+  return namespace;
+}
+
+/**
+ * The stub for this deployment's artifacts object. See
+ * {@link ARTIFACTS_OBJECT_NAME} for why there is only one, and
+ * {@link assertArtifactsBound} for what an unbound namespace does here.
+ */
+export function requireArtifactsStub(
+  env: ArtifactsEnv
+): DurableObjectStub<Artifacts> {
+  const namespace = assertArtifactsBound(env);
+  return namespace.get(namespace.idFromName(ARTIFACTS_OBJECT_NAME));
 }

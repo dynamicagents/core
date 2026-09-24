@@ -19,6 +19,7 @@ import type {
   SubtaskId,
   SubtaskRuntime
 } from "../subtasks/types.js";
+import { assertArtifactsBound } from "../artifacts/binding.js";
 import { transcribeNote } from "../artifacts/transcript.js";
 import {
   createPushChannel,
@@ -31,13 +32,14 @@ import {
 } from "../subtasks/subtask-types.js";
 import { SelfOrigin } from "../a2a/self-origin.js";
 /**
- * The signing secret is in the bound because {@link RecipeSubagentBase.postProgress}
- * posts to the gatekeeper with the deployment's own key. It costs a consumer
- * nothing they did not already have: a facet only exists beneath a
- * {@link file://../host/agent.ts DynamicAgent}, whose bound already demands it,
- * and the two share one Worker and one `Env`.
+ * Both slices are in the bound because {@link RecipeSubagentBase.postProgress}
+ * needs both: it files the note on the Task's transcript over `ARTIFACTS`, then
+ * posts to the gatekeeper with the deployment's own signing key. It costs a
+ * consumer nothing they did not already have — a facet only exists beneath a
+ * {@link file://../host/agent.ts DynamicAgent}, whose bound demands the same
+ * two, and the two objects share one Worker and one `Env`.
  */
-import type { A2ASecretsEnv } from "../env.js";
+import type { A2ASecretsEnv, ArtifactsEnv } from "../env.js";
 import { renderSubagentPrompt } from "./prompt.js";
 import { makeWorkspaceHandle, type WorkspaceBacking } from "./workspace.js";
 import { fingerprintRequest } from "./fingerprint.js";
@@ -137,7 +139,9 @@ const cachedResultSchema = z.discriminatedUnion("status", [
  * with the child.
  */
 export abstract class RecipeSubagentBase<
-  TEnv extends Cloudflare.Env & A2ASecretsEnv = Cloudflare.Env & A2ASecretsEnv
+  TEnv extends Cloudflare.Env & A2ASecretsEnv & ArtifactsEnv = Cloudflare.Env &
+    A2ASecretsEnv &
+    ArtifactsEnv
 > extends Agent<TEnv> {
   /**
    * Supply the host runtime. Called per RPC, not memoized here — an
@@ -198,6 +202,10 @@ export abstract class RecipeSubagentBase<
   };
 
   async onStart(): Promise<void> {
+    // The same check `DynamicAgent.onStart` makes, and not a duplicate of it: a
+    // facet is its own Durable Object and posts its own notes, so it reaches
+    // the transcript on a path that never goes through its parent.
+    assertArtifactsBound(this.env);
     this.ensureTables();
   }
 
@@ -470,11 +478,13 @@ export abstract class RecipeSubagentBase<
    * is a weaker guarantee, deliberately: it is local, so it costs no read, and
    * what it can miss is a note already in flight when the cancel landed.
    *
-   * Never throws. `PushChannel.working` swallows its own failures, on the
-   * principle that a run which cannot report its progress is still a run that
-   * should deliver its answer — and so does the transcript this also files the
-   * note on, which is what decides whether the thread gets the note, the link
-   * to the transcript, or nothing at all. See
+   * **The post cannot fail the chunk; filing the note can.** `PushChannel.working`
+   * swallows its own failures, on the principle that a run which cannot report
+   * its progress is still a run that should deliver its answer. The transcript
+   * this files the note on first — which is what decides whether the thread gets
+   * the note, the link, or nothing at all — deliberately does not: a chunk runs
+   * inside a durable step, so letting the ingest throw buys a retry that lands on
+   * the same sequence and still delivers the link. See
    * {@link file://../artifacts/transcript.ts transcribeNote}.
    */
   protected async postProgress(event: ProgressEvent): Promise<void> {

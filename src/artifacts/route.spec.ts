@@ -2,8 +2,9 @@ import { beforeAll, describe, it, expect } from "vitest";
 // From `cloudflare:workers`, not `cloudflare:test` — the latter's `env` is
 // deprecated, and the repo's type-aware `no-deprecated` rule fails the build on it.
 import { env } from "cloudflare:workers";
+import type { ArtifactsEnv } from "../env.js";
 import type { Artifacts } from "./do.js";
-import { ARTIFACTS_OBJECT_NAME } from "./binding.js";
+import { ARTIFACTS_OBJECT_NAME, ArtifactsNotBoundError } from "./binding.js";
 import { handleArtifactRoute } from "./route.js";
 
 /**
@@ -26,7 +27,7 @@ const ns = (env as unknown as Record<string, DurableObjectNamespace<Artifacts>>)
 const artifacts = () => ns.get(ns.idFromName(ARTIFACTS_OBJECT_NAME));
 
 const serve = (url: string, init?: RequestInit) =>
-  handleArtifactRoute(new Request(url, init), env);
+  handleArtifactRoute(new Request(url, init), env as ArtifactsEnv);
 
 /**
  * Warm the object before the clock starts on a test.
@@ -100,14 +101,29 @@ describe("handleArtifactRoute", () => {
     expect(await serve(url, { method: "POST" })).toBeNull();
   });
 
-  it("is a 404 for every stream when nothing is bound", async () => {
-    // The dormant deployment, which is every one that has not opted in. The
-    // page still renders — it is a string — and the stream behind it says there
-    // is nothing here, which there is not.
-    const request = new Request(
-      `https://agent.example/a/${"e".repeat(40)}/events`
-    );
-    const response = await handleArtifactRoute(request, {});
-    expect(response?.status).toBe(404);
+  it.each([
+    ["the page", `https://agent.example/a/${"e".repeat(40)}`],
+    ["the stream", `https://agent.example/a/${"e".repeat(40)}/events`]
+  ])("throws for %s when nothing is bound", async (_label, url) => {
+    /**
+     * The same answer for both, which is why the check runs before the routes
+     * are told apart. The page is a string and would happily render, so the
+     * other order gives a link that opens, waits on a stream that can only
+     * 404, and reads as an artifact that expired — for a deployment whose
+     * `wrangler.jsonc` is a line short.
+     */
+    const unbound = {} as unknown as ArtifactsEnv;
+    await expect(
+      handleArtifactRoute(new Request(url), unbound)
+    ).rejects.toThrow(ArtifactsNotBoundError);
+  });
+
+  it("still declines a path it does not claim when nothing is bound", async () => {
+    // The `null` contract outranks the check: a helper sitting in front of a
+    // router must not start answering for paths that were never its business,
+    // however badly the deployment is wired.
+    const unbound = {} as unknown as ArtifactsEnv;
+    const request = new Request("https://agent.example/.well-known/jwks.json");
+    expect(await handleArtifactRoute(request, unbound)).toBeNull();
   });
 });

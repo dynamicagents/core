@@ -181,6 +181,10 @@ package exists to prevent: it freezes the registry before `env` exists (which on
 Workers is always), defeats tree-shaking, and makes runtime plugin selection
 impossible.
 
+`Env` here is your generated one, and `DynamicAgent` constrains it to `CoreEnv` —
+`AI`, the two A2A secrets, and the `ARTIFACTS` namespace from step 5. Wire that
+binding before this typechecks.
+
 `createAgentRuntime` and `AgentDB` are still exported and still work on a bare
 `Agent<Env>` — but everything the base class does is lifecycle with an ordering
 that is load-bearing and invisible (migrations awaited before the first RPC, the
@@ -267,7 +271,7 @@ The rows are core's third table, they are never written into the Session — his
 stays text-only — and they age out on the same 30-day clock as the rest of a
 Task's state.
 
-### 5. Put a run's progress behind a link, if you want that
+### 5. Wire the artifacts binding — it is required
 
 A delegating round narrates itself: every time a subagent has something to say, a
 labelled note lands in the thread the person is reading, in the same voice as the
@@ -281,12 +285,13 @@ posted at all, and the link streams live and then ends with the state the task
 settled in. Main-agent progress is untouched: a round's acknowledgment and its step
 text are the conversation, not an account of one.
 
-**It is dormant until a deployment wires the binding**, and that is three lines:
+**Every agent binds `ARTIFACTS`**, and it is three lines in two files. A Durable
+Object that starts without it throws `ArtifactsNotBoundError` naming exactly these.
 
 ```jsonc
-// wrangler.jsonc
+// wrangler.jsonc — the tag is the next one in your own migration sequence
 "durable_objects": { "bindings": [{ "name": "ARTIFACTS", "class_name": "Artifacts" }] },
-"migrations": [{ "tag": "v2", "new_sqlite_classes": ["Artifacts"] }]
+"migrations": [{ "tag": "v4", "new_sqlite_classes": ["Artifacts"] }]
 ```
 
 ```ts
@@ -301,9 +306,20 @@ export default {
 };
 ```
 
-Bind nothing and every note goes where it went before, unchanged — nothing has to
-opt out, and neither an unreachable store nor a failed ingest can cost a turn: the
-note is posted as it always was.
+There is no unwired mode. The notes of a delegating round go on a transcript on
+every path core owns, so "no binding" is not a second behaviour an agent can want —
+it is a thread full of the notes the link exists to replace, arrived at by
+forgetting a line. Requiring it makes the store a structural assumption core can
+write against, instead of an `if` at every site that writes. The binding is on
+`CoreEnv`, so a consumer `Env` missing it fails to typecheck, and `onStart` checks
+it again at DO start for the `wrangler.jsonc` a type cannot see.
+
+Two things still put the note in the thread instead of a link, and both are facts
+about that note rather than about the wiring: this deployment has not learned its
+own origin yet (it arrives with the first turn), or retention has already swept the
+artifact. An ingest that **fails** is neither — it throws, the durable step retries,
+and the artifact's dedupe on the notification key lands the replay on the sequence
+it would have had, so the link still goes out.
 
 An artifact is a **kind**, a long random **token**, an append-only list of labelled
 notes, and a settle status. The token is id and authorization in one — derived from

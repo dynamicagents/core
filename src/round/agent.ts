@@ -7,7 +7,7 @@ import {
 } from "@dynamicagents/g2a-protocol";
 import { validateRecipe } from "../contract/validation.js";
 import type { ResolvedRecipe } from "../contract/recipe.js";
-import type { AiEnv, A2ASecretsEnv } from "../env.js";
+import type { AiEnv, A2ASecretsEnv, ArtifactsEnv } from "../env.js";
 import { stateOf, type HumanRequest } from "../db/index.js";
 import type { GatekeeperIdentity } from "../a2a/verify.js";
 import type { TurnPushContext } from "../a2a/push.js";
@@ -173,9 +173,8 @@ function approvalFor(
 }
 
 export abstract class RoundAgentBase<
-  TEnv extends Cloudflare.Env & AiEnv & A2ASecretsEnv = Cloudflare.Env &
-    AiEnv &
-    A2ASecretsEnv
+  TEnv extends Cloudflare.Env & AiEnv & A2ASecretsEnv & ArtifactsEnv =
+    Cloudflare.Env & AiEnv & A2ASecretsEnv & ArtifactsEnv
 > extends DynamicAgent<TEnv> {
   private _instructions?: TurnInstructions;
 
@@ -914,7 +913,8 @@ export abstract class RoundAgentBase<
     //
     // Every note is also filed on the Task's transcript, and what the thread
     // gets back is the link for the first and silence for the rest — or the
-    // note itself, unchanged, wherever a deployment has wired no store. See
+    // note itself where this turn has no link to give, which is an origin not
+    // learned yet or an artifact retention has swept. See
     // {@link file://../artifacts/transcript.ts transcribeNote}.
     if (push) {
       const channel = this.push(push);

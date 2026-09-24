@@ -42,8 +42,8 @@ import {
  * ## One object, addressed by a well-known name
  *
  * Every artifact of a deployment lives in one instance — see
- * {@link file://./binding.ts artifactsStub} for why a token cannot select an
- * object of its own, and what that costs.
+ * {@link file://./binding.ts ARTIFACTS_OBJECT_NAME} for why a token cannot
+ * select an object of its own, and what that costs.
  *
  * ## No alarms
  *

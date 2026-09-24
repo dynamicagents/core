@@ -20,12 +20,14 @@
  * is the tenant claim on the gatekeeper token, not a key apiece. See
  * {@link file://./worker/index.ts}.
  *
- * One slice lives elsewhere on purpose: `ARTIFACTS` is **optional** and is
- * declared beside the code that reads it, in
- * {@link file://./artifacts/binding.ts ArtifactsEnv}. A slice here is something
- * core cannot run without; that one is a capability a deployment either wires or
- * does not.
+ * A slice here is something core cannot run without, and every one of them is
+ * required. There is no optional slice: a binding core reads on a path a
+ * deployment cannot disable is part of what an agent *is*, and modelling it as
+ * `T | undefined` buys an if-branch at every call site to describe a deployment
+ * that is simply misconfigured.
  */
+
+import type { Artifacts } from "./artifacts/do.js";
 
 /** Workers AI, backing the chat loop (and whatever a plugin runs on it). */
 export interface AiEnv {
@@ -52,8 +54,27 @@ export interface A2ASecretsEnv {
   GATEKEEPER_ORIGINS: string;
 }
 
+/**
+ * The artifacts object, holding what a run had to say.
+ *
+ * **Required**, because every delegating round writes to it: a labelled note
+ * goes on the Task's transcript and the thread gets a link, and there is no
+ * per-deployment switch that turns that back into a thread full of notes. The
+ * binding is therefore a structural assumption of core, checked once where a
+ * missing one is cheap to say something useful about — see
+ * {@link file://./artifacts/binding.ts assertArtifactsBound} — rather than an
+ * `if` at each of the sites that writes.
+ *
+ * The class behind it is core's own and ships whole:
+ * {@link file://./artifacts/do.ts Artifacts}, exported from the consumer's
+ * Worker unchanged.
+ */
+export interface ArtifactsEnv {
+  ARTIFACTS: DurableObjectNamespace<Artifacts>;
+}
+
 /** The minimum an agent Worker must bind for core to function. */
-export type CoreEnv = AiEnv & A2ASecretsEnv;
+export type CoreEnv = AiEnv & A2ASecretsEnv & ArtifactsEnv;
 
 /**
  * Parse `GATEKEEPER_ORIGINS`. Accepts a JSON array (the documented form) or a

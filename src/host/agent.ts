@@ -9,7 +9,8 @@ import {
   type CoreConfigOverrides,
   type ModelConfig
 } from "../config.js";
-import type { A2ASecretsEnv, AiEnv } from "../env.js";
+import type { A2ASecretsEnv, AiEnv, ArtifactsEnv } from "../env.js";
+import { assertArtifactsBound } from "../artifacts/binding.js";
 import { AgentDB, isTerminal, stateOf } from "../db/index.js";
 import type { GatekeeperIdentity } from "../a2a/verify.js";
 import { callerContext } from "../a2a/caller.js";
@@ -73,9 +74,8 @@ import type { PluginHost } from "./plugin-host.js";
  * turns, in any channel or thread, accumulate into that one conversation.
  */
 export abstract class DynamicAgent<
-  TEnv extends Cloudflare.Env & AiEnv & A2ASecretsEnv = Cloudflare.Env &
-    AiEnv &
-    A2ASecretsEnv
+  TEnv extends Cloudflare.Env & AiEnv & A2ASecretsEnv & ArtifactsEnv =
+    Cloudflare.Env & AiEnv & A2ASecretsEnv & ArtifactsEnv
 > extends Agent<TEnv> {
   /**
    * The message store behind {@link getSession}. A lifecycle capability, so it is
@@ -236,6 +236,11 @@ export abstract class DynamicAgent<
   }
 
   async onStart(): Promise<void> {
+    // Before anything else, and for the reason the migration await below is
+    // first among the rest: a binding core writes to on every delegating round
+    // is not a thing to discover part-way through one. A missing one is a
+    // wiring fault with a fix, and this is the cheap place to say so.
+    assertArtifactsBound(this.env);
     // Await migrations before the SDK dispatches any RPC — eliminates the race
     // between schema creation and first query on cold start / hibernation wake-up.
     await this.db.ensureReady();

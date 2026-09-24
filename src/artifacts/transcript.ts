@@ -16,18 +16,26 @@
  * acknowledgement, its step text — is untouched: it is the conversation, not an
  * account of one.
  *
- * ## Dormant without a binding
+ * ## When the thread gets the note instead
  *
- * Every function here resolves to "post what you would have posted" when no
- * `ARTIFACTS` namespace is bound, when this deployment does not yet know its
- * own origin, and when the ingest fails for any reason at all. A transcript is
- * a place to put notes, not a dependency of the turn that writes them — so the
- * note reaching the person always wins over the note being filed.
+ * Twice, and both are facts about *this note* rather than about the wiring:
+ * this deployment has not learned its own origin yet, so there is no link to
+ * post; or retention has swept the artifact out from under the write, so there
+ * is no longer one to link to. Neither can be fixed by the caller and neither
+ * should cost the person the note, so both post it verbatim.
+ *
+ * An ingest that *fails* is not one of them. Both emission sites run inside
+ * durable steps, so the useful answer to a store that did not take the write is
+ * to let the step retry — the artifact dedupes on {@link SubagentNote.key}, so
+ * the replay lands on the sequence it would have had and the link still goes
+ * out. Swallowing the failure here is what would lose it, by consuming the one
+ * post that carries the URL on an attempt that filed nothing.
  */
 
 import { TaskState } from "@a2a-js/sdk";
 import { labelSubagentNote, subagentNoteLabel } from "../subtasks/progress.js";
-import { artifactsStub } from "./binding.js";
+import type { ArtifactsEnv } from "../env.js";
+import { assertArtifactsBound, requireArtifactsStub } from "./binding.js";
 import { artifactViewerUrl } from "./path.js";
 
 /** The kind a task's progress notes are recorded under. */
@@ -69,56 +77,55 @@ export interface SubagentNote {
  * times the step runs.
  */
 export async function transcribeNote(
-  env: object,
+  env: ArtifactsEnv,
   note: SubagentNote
 ): Promise<string | undefined> {
-  const asPosted = (): string => labelSubagentNote(note.text, note.source);
-  try {
-    // Inside the `try`, not before it: reading the binding and addressing the
-    // object are as much a part of "the transcript is unreachable" as the RPC
-    // is, and a malformed binding must not be the one that gets through.
-    const stub = artifactsStub(env);
-    if (!stub || note.origin === undefined) return asPosted();
-    const token = await stub.createArtifact(
-      SESSION_TRANSCRIPT_KIND,
-      note.taskId
-    );
-    const sequence = await stub.addEntry(token, {
-      key: note.key,
-      label: subagentNoteLabel(note.source),
-      text: note.text
-    });
-    // `null` is retention having swept the artifact between the two calls.
-    if (sequence === null) return asPosted();
-    return sequence === 1 ? artifactViewerUrl(note.origin, token) : undefined;
-  } catch (err) {
-    // Swallowed on the same principle the push channel swallows its own
-    // failures: a run that cannot file its notes is still a run that should
-    // report them. Falling back to the note means an outage costs a thread its
-    // brevity, never its content.
-    console.warn("[artifacts] note not transcribed", {
-      taskId: note.taskId,
-      key: note.key,
-      err: String(err)
-    });
-    return asPosted();
-  }
+  // Before the store is touched: filing the note anyway would spend the first
+  // sequence — and with it the one post that could have carried the link — on a
+  // turn that has no origin to build a link out of.
+  if (note.origin === undefined)
+    return labelSubagentNote(note.text, note.source);
+
+  const stub = requireArtifactsStub(env);
+  const token = await stub.createArtifact(SESSION_TRANSCRIPT_KIND, note.taskId);
+  const sequence = await stub.addEntry(token, {
+    key: note.key,
+    label: subagentNoteLabel(note.source),
+    text: note.text
+  });
+  // `null` is retention having swept the artifact between the two calls. Rare,
+  // and not worth a retry: the note is a month old by construction, so the
+  // thread gets it and the run goes on.
+  if (sequence === null) return labelSubagentNote(note.text, note.source);
+  return sequence === 1 ? artifactViewerUrl(note.origin, token) : undefined;
 }
 
 /**
  * End the task's transcript in the state the task settled in.
  *
- * Best-effort and silent about a task that never opened one, which is most of
- * them: a task whose subagents said nothing has no transcript to end.
+ * Silent about a task that never opened one, which is most of them: a task
+ * whose subagents said nothing has no transcript to end.
+ *
+ * The RPC is best-effort where {@link transcribeNote}'s is not, and the
+ * difference is what the caller can still do about it. This runs from
+ * `DynamicAgent`'s settle path, *after* the terminal row is durable and with no
+ * step left to retry — so a store that will not take the settle must not turn a
+ * task that finished into a call that failed. The binding itself is checked
+ * outside that, because an unbound namespace is a wiring fault rather than an
+ * outage and has a fix worth raising.
  */
 export async function settleTranscript(
-  env: object,
+  env: ArtifactsEnv,
   taskId: string,
   state: TaskState
 ): Promise<void> {
+  // Outside the `try`, and the only thing that is: this raises
+  // `ArtifactsNotBoundError`, which names a line a deployment is missing and
+  // cannot be mistaken for a store having a bad minute. Everything else —
+  // addressing the object included — is the store having a bad minute.
+  assertArtifactsBound(env);
   try {
-    const stub = artifactsStub(env);
-    if (!stub) return;
+    const stub = requireArtifactsStub(env);
     const token = await stub.tokenFor(SESSION_TRANSCRIPT_KIND, taskId);
     if (token === null) return;
     await stub.settle(token, settleStatus(state));

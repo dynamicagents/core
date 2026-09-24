@@ -16,7 +16,8 @@
  * in front as one line keeps that separation visible.
  */
 
-import { artifactsStub } from "./binding.js";
+import type { ArtifactsEnv } from "../env.js";
+import { requireArtifactsStub } from "./binding.js";
 import { parseArtifactPath } from "./path.js";
 import { artifactViewerResponse } from "./viewer.js";
 
@@ -28,16 +29,22 @@ import { artifactViewerResponse } from "./viewer.js";
  * would have done with it, and answering for it would make mounting this an
  * act with consequences elsewhere.
  *
- * Without the binding every artifact URL is a 404, which is the honest answer:
- * the deployment stores none.
+ * Throws {@link file://./binding.ts ArtifactsNotBoundError} without the
+ * binding, and **before deciding which of the two routes this is**, so a
+ * deployment that mounted the helper and wired nothing answers 500 for both.
+ * The other order is worse than it looks: the page renders from a string, so it
+ * would answer 200 over a stream that can only ever 404 — a link that opens,
+ * says nothing, and blames the artifact for a missing line of `wrangler.jsonc`.
  */
 export async function handleArtifactRoute(
   request: Request,
-  env: object
+  env: ArtifactsEnv
 ): Promise<Response | null> {
   if (request.method !== "GET") return null;
   const matched = parseArtifactPath(new URL(request.url).pathname);
   if (matched === null) return null;
+
+  const stub = requireArtifactsStub(env);
 
   // The page is the same bytes for every artifact and knows its own token from
   // the URL, so it is served without consulting the object at all — a link
@@ -45,7 +52,5 @@ export async function handleArtifactRoute(
   // costing a round trip to decide between two responses.
   if (matched.route === "page") return artifactViewerResponse();
 
-  const stub = artifactsStub(env);
-  if (!stub) return new Response("not found", { status: 404 });
   return stub.fetch(request);
 }

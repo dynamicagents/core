@@ -16,11 +16,13 @@
  * - **The emission** — {@link transcribeNote} and {@link settleTranscript},
  *   which core's round and subagent machinery already call.
  *
- * **Nothing happens until a deployment binds the namespace.** Every helper
- * resolves to what the caller did before, so an agent that wires nothing keeps
- * posting every note to its thread, unchanged. A consumer opts in by exporting
- * {@link Artifacts} from its Worker, declaring the binding, and adding the one
- * line {@link handleArtifactRoute} documents.
+ * **The binding is required**, and a deployment that omits it fails at DO
+ * start with the lines it is missing — see
+ * {@link file://./binding.ts ArtifactsNotBoundError}. Wiring it is exporting
+ * {@link Artifacts} from the Worker, declaring the namespace and its migration
+ * in `wrangler.jsonc`, and adding the one line {@link handleArtifactRoute}
+ * documents. Nothing here degrades to posting every note to the thread,
+ * because that is the behaviour the link exists to replace.
  */
 
 export { Artifacts } from "./do.js";
@@ -28,10 +30,12 @@ export { Artifacts } from "./do.js";
 export {
   ARTIFACTS_BINDING,
   ARTIFACTS_OBJECT_NAME,
-  artifactsBinding,
-  artifactsStub,
-  type ArtifactsEnv
+  ArtifactsNotBoundError,
+  assertArtifactsBound,
+  requireArtifactsStub
 } from "./binding.js";
+
+export type { ArtifactsEnv } from "../env.js";
 
 export { handleArtifactRoute } from "./route.js";
 

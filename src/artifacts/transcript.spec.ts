@@ -3,8 +3,9 @@ import { beforeAll, describe, it, expect } from "vitest";
 // deprecated, and the repo's type-aware `no-deprecated` rule fails the build on it.
 import { env } from "cloudflare:workers";
 import { TaskState } from "@a2a-js/sdk";
+import type { ArtifactsEnv } from "../env.js";
 import type { Artifacts } from "./do.js";
-import { ARTIFACTS_OBJECT_NAME, type ArtifactsEnv } from "./binding.js";
+import { ARTIFACTS_OBJECT_NAME, ArtifactsNotBoundError } from "./binding.js";
 import {
   SESSION_TRANSCRIPT_KIND,
   settleTranscript,
@@ -16,17 +17,37 @@ import {
  * What the thread gets, note by note.
  *
  * Three answers and no fourth: the link, silence, or the note exactly as it
- * would have been posted before any of this existed. The last one is the
- * default — it is what a deployment with no binding sees, what an origin this
- * instance has not learned yet produces, and what any failure at all falls back
- * to. A transcript is a place to put notes, not a dependency of the turn.
+ * would have been posted before any of this existed. The last one is not a
+ * fallback for a deployment that wired nothing — the binding is required, and
+ * its absence throws here as it does at DO start. It is for the two cases that
+ * are facts about *this note*: an origin this instance has not learned yet, and
+ * an artifact retention swept. Neither is fixable by the caller and neither
+ * should cost the person the note.
  */
 
 const ns = (env as unknown as Record<string, DurableObjectNamespace<Artifacts>>)
   .ARTIFACTS!;
 
 const wired: ArtifactsEnv = { ARTIFACTS: ns };
-const dormant = {};
+
+/**
+ * The deployment that forgot the binding.
+ *
+ * Cast, because `ArtifactsEnv` now requires `ARTIFACTS` — which is the point:
+ * this is a `wrangler.jsonc` that never grew the namespace while the generated
+ * `Env` said it had. Only a runtime check catches that, so only a cast can
+ * drive it.
+ */
+const unbound = {} as unknown as ArtifactsEnv;
+
+/** A binding that is there and does not work — an outage, not a wiring fault. */
+const broken = {
+  ARTIFACTS: {
+    idFromName() {
+      throw new Error("no such namespace");
+    }
+  }
+} as unknown as ArtifactsEnv;
 
 const artifacts = () => ns.get(ns.idFromName(ARTIFACTS_OBJECT_NAME));
 
@@ -130,12 +151,13 @@ describe("transcribeNote", () => {
     expect(body).not.toContain("[claude-code 2]");
   });
 
-  it("posts the note unchanged when no binding is wired", async () => {
-    // The dormant deployment: every note goes where it went before, and nothing
-    // anywhere had to opt out.
-    expect(await transcribeNote(dormant, note({ text: "unchanged" }))).toBe(
-      "[claude-code 0] unchanged"
-    );
+  it("throws when no binding is wired", async () => {
+    // Not a deployment that chose differently — a deployment that is broken,
+    // and the error says which lines it is missing. Posting the note instead
+    // would hide that behind a thread that looks exactly like a working one.
+    await expect(
+      transcribeNote(unbound, note({ text: "unchanged" }))
+    ).rejects.toThrow(ArtifactsNotBoundError);
   });
 
   it("posts the note unchanged before this instance knows its own origin", async () => {
@@ -154,19 +176,70 @@ describe("transcribeNote", () => {
     ).toBeNull();
   });
 
-  it("posts the note unchanged when the store cannot be reached", async () => {
-    const broken = {
+  it("lets an unreachable store throw, so the step can retry", async () => {
+    await expect(
+      transcribeNote(broken, note({ text: "still said" }))
+    ).rejects.toThrow("no such namespace");
+  });
+
+  /**
+   * The lost ack, which is the case the throw is *for*.
+   *
+   * A durable step's failure is not "the write did not happen" — it is "nobody
+   * heard whether it did". The ingest commits in the object and the answer is
+   * lost on the way back, so the step retries against a store that already has
+   * the note. Swallowing the failure would spend that first attempt: the note
+   * would go to the thread verbatim, the retry would find sequence 1 already
+   * taken by its own earlier write, and the link would never be posted by
+   * anybody. Dedupe on the key is what makes the retry land on sequence 1
+   * again, and the link go out.
+   */
+  it("delivers the link on the retry after an ack is lost", async () => {
+    const taskId = crypto.randomUUID();
+    const committed = note({ taskId, text: "first", key: "claude:0" });
+
+    // The attempt whose ack never arrives: the RPC runs, and the reply is
+    // dropped on the way back to the caller.
+    const lossy: ArtifactsEnv = {
       ARTIFACTS: {
-        idFromName() {
-          throw new Error("no such namespace");
+        idFromName: (name: string) => ns.idFromName(name),
+        get(id: DurableObjectId) {
+          const real = ns.get(id);
+          return {
+            createArtifact: (kind: string, sourceKey?: string) =>
+              real.createArtifact(kind, sourceKey),
+            async addEntry(token: string, entry: { key?: string }) {
+              await real.addEntry(token, {
+                key: entry.key,
+                label: "claude-code 0",
+                text: "first"
+              });
+              throw new Error("network error: connection lost");
+            }
+          };
         }
-      }
-    } as unknown as ArtifactsEnv;
-    // Never throws, and never swallows the note with the failure: an outage
-    // costs a thread its brevity, not its content.
-    expect(await transcribeNote(broken, note({ text: "still said" }))).toBe(
-      "[claude-code 0] still said"
+      } as unknown as DurableObjectNamespace<Artifacts>
+    };
+
+    await expect(transcribeNote(lossy, committed)).rejects.toThrow(
+      "connection lost"
     );
+
+    // What the Workflow step does next, against the store that took the write.
+    const link = await transcribeNote(wired, committed);
+    expect(link).toMatch(
+      new RegExp(`^${ORIGIN}/a/[0-9A-Za-z]{40}$`.replace(/\//g, "\\/"))
+    );
+
+    // And recorded exactly once, not twice: the key caught the replay, so the
+    // retry read back the sequence the lost attempt wrote rather than appending
+    // beside it.
+    await settleTranscript(wired, taskId, TaskState.TASK_STATE_COMPLETED);
+    const token = await artifacts().tokenFor(SESSION_TRANSCRIPT_KIND, taskId);
+    const body = await (
+      await artifacts().fetch(new Request(`${ORIGIN}/a/${token}/events`))
+    ).text();
+    expect(body.match(/"text":"first"/g)).toHaveLength(1);
   });
 });
 
@@ -211,17 +284,17 @@ describe("settleTranscript", () => {
     ).toBeNull();
   });
 
-  it("is a no-op without a binding, and never throws on a broken one", async () => {
-    const broken = {
-      ARTIFACTS: {
-        idFromName() {
-          throw new Error("no such namespace");
-        }
-      }
-    } as unknown as ArtifactsEnv;
+  it("throws without a binding", async () => {
     await expect(
-      settleTranscript(dormant, "task-1", TaskState.TASK_STATE_COMPLETED)
-    ).resolves.toBeUndefined();
+      settleTranscript(unbound, "task-1", TaskState.TASK_STATE_COMPLETED)
+    ).rejects.toThrow(ArtifactsNotBoundError);
+  });
+
+  it("never throws on a binding that is there and failing", async () => {
+    // The one place the two are told apart. This runs after the terminal row is
+    // durable and with no step left to retry, so a store having a bad minute
+    // must not turn a task that finished into a call that failed — while a
+    // missing binding, which is a line somebody can go and add, still says so.
     await expect(
       settleTranscript(broken, "task-1", TaskState.TASK_STATE_COMPLETED)
     ).resolves.toBeUndefined();

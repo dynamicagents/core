@@ -8,7 +8,7 @@ import {
   RecipeSubagentBase,
   type SubagentRuntime
 } from "../src/subagent/index.js";
-import type { A2ASecretsEnv } from "../src/env.js";
+import type { A2ASecretsEnv, ArtifactsEnv } from "../src/env.js";
 import { DynamicAgent } from "../src/host/agent.js";
 import type { CoreConfigOverrides } from "../src/config.js";
 import type { AgentPlugin } from "../src/contract/plugin.js";
@@ -60,7 +60,7 @@ export function setSubagentRuntime(runtime: SubagentRuntime): void {
 }
 
 export class TestSubagent extends RecipeSubagentBase<
-  Cloudflare.Env & A2ASecretsEnv
+  Cloudflare.Env & A2ASecretsEnv & ArtifactsEnv
 > {
   protected subagentRuntime(): SubagentRuntime {
     if (!testRuntime) {
@@ -86,13 +86,16 @@ export default {
    * {@link handleArtifactRoute} documents — one line, and everything else falls
    * through to what the Worker did before.
    */
-  async fetch(request: Request, env: Cloudflare.Env): Promise<Response> {
+  async fetch(
+    request: Request,
+    env: Cloudflare.Env & ArtifactsEnv
+  ): Promise<Response> {
     return (
       (await handleArtifactRoute(request, env)) ??
       new Response("da-core test worker")
     );
   }
-} satisfies ExportedHandler<Cloudflare.Env>;
+} satisfies ExportedHandler<Cloudflare.Env & ArtifactsEnv>;
 
 /**
  * Two plain Durable Objects for the `/alarm` specs, and the pair is the test.

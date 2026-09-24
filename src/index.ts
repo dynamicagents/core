@@ -73,6 +73,7 @@ export {
   parseGatekeeperOrigins,
   type A2ASecretsEnv,
   type AiEnv,
+  type ArtifactsEnv,
   type CoreEnv
 } from "./env.js";
 
