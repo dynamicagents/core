@@ -11,8 +11,7 @@ import {
   type MainAgentToolApproval,
   type MainAgentToolContext,
   type ResolveRuntimeContext,
-  type ToolFamilyBuilder,
-  type TurnGateContext
+  type ToolFamilyBuilder
 } from "../contract/plugin.js";
 import {
   memoryWorkspaceBacking,
@@ -103,16 +102,6 @@ export interface AgentRuntime {
    * none does, so a call site can append unconditionally.
    */
   renderCapabilities(): string;
-  /**
-   * Ask every plugin declaring {@link AgentPlugin.shouldHandleTurn} whether this
-   * turn should run. `true` when none declares one, and `false` if any single
-   * gate declines.
-   *
-   * Never rejects: a gate that fails is logged against its plugin key and
-   * counted as `true`, because the failure mode of a broken gate must be a noisy
-   * agent, never a silent one.
-   */
-  shouldHandleTurn(ctx: TurnGateContext): Promise<boolean>;
   /**
    * Announce the messages a compaction is folding into a summary to every plugin
    * declaring {@link AgentPlugin.onMessagesDisplaced}. Pass it straight to
@@ -214,10 +203,6 @@ export function createAgentRuntime(
     p.onMessagesDisplaced
       ? [{ key: p.key, notify: p.onMessagesDisplaced.bind(p) }]
       : []
-  );
-
-  const turnGates = plugins.flatMap((p) =>
-    p.shouldHandleTurn ? [{ key: p.key, gate: p.shouldHandleTurn.bind(p) }] : []
   );
 
   // At most one backend: two would mean two answers to "where did that file go".
@@ -331,33 +316,6 @@ export function createAgentRuntime(
           blocks.push(plugin.subtaskType.capability);
       }
       return blocks.join("\n\n");
-    },
-
-    async shouldHandleTurn(ctx: TurnGateContext): Promise<boolean> {
-      if (turnGates.length === 0) return true;
-      // Same `allSettled` + `async`-wrapped-callback discipline as
-      // `onMessagesDisplaced` below, and for the same two reasons: every gate is
-      // consulted even when one throws, and a gate that throws *synchronously*
-      // (reading a binding before its first await) is caught rather than
-      // escaping past the aggregation.
-      //
-      // A rejection resolves to `true`. That is not leniency — it is the only
-      // safe default here. A wrong reply is noise the user sees and ignores; a
-      // wrong silence is invisible to the person who needed an answer, so a
-      // broken gate must degrade to "run the turn" and never to a mute agent.
-      const results = await Promise.allSettled(
-        turnGates.map(async (g) => g.gate(ctx))
-      );
-      return results.every((result, i) => {
-        if (result.status === "rejected") {
-          console.warn(
-            `[runtime] plugin "${turnGates[i].key}" turn gate failed, handling the turn`,
-            result.reason
-          );
-          return true;
-        }
-        return result.value;
-      });
     },
 
     async onMessagesDisplaced(messages: SessionMessage[]): Promise<void> {

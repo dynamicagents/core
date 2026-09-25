@@ -494,21 +494,6 @@ Best-effort in both directions — a listener that throws never aborts compactio
 must still shorten when a side store is down), and the fan-out is `Promise.allSettled`, so
 one plugin's outage cannot cost another its notification.
 
-`shouldHandleTurn` is the other side of the session: a gate that decides whether a turn
-runs at all, before the loop builds or calls anything. An agent that sees every message in
-its channels is mostly seeing messages that are not for it, and asking a model already
-trying to be helpful to stay quiet degrades _invisibly_ — failing to call a decline-tool
-looks identical to deciding not to. Every declaring plugin is consulted and the answers are
-AND-ed, so any one gate may decline.
-
-```ts
-if (!(await this.runtime.shouldHandleTurn({ history }))) return; // declined
-```
-
-It **fails open**: a gate that throws is counted as `true`. The two mistakes are not
-symmetric — a wrong reply is noise the user can see and ignore, while a wrong silence is
-invisible to the person who needed an answer.
-
 ### The workspace backend
 
 Core declares the `WorkspaceBacking` shape and enforces the caps, but ships no backend —

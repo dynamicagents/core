@@ -20,7 +20,7 @@ export interface GatekeeperTokenOptions {
    * agent's **endpoint**, not its origin.
    *
    * Pass this explicitly when a spec mounts an agent somewhere else — an agent
-   * at `/proactive/a2a` expects that string and refuses this default, which is
+   * at `/support/a2a` expects that string and refuses this default, which is
    * the whole point of scoping the audience to the endpoint.
    */
   audience?: string;

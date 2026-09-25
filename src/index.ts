@@ -34,8 +34,7 @@ export {
   type RecipeToolSet,
   type ResolveRuntimeContext,
   type ToolFamilyBuilder,
-  type ToolFamilyContext,
-  type TurnGateContext
+  type ToolFamilyContext
 } from "./contract/plugin.js";
 
 export type {

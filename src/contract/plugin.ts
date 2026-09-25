@@ -134,17 +134,6 @@ export interface MainAgentToolContext {
   signal?: AbortSignal;
 }
 
-/** What a plugin knows when deciding whether a turn should run at all. */
-export interface TurnGateContext {
-  /**
-   * The conversation so far, **including the message being judged** — which is
-   * already appended when a gate runs, so the agent reads a message it declines.
-   * A bare message is frequently unclassifiable ("yes", "thanks", "and the
-   * second one?"), so the tail is what makes the judgement possible at all.
-   */
-  history: SessionMessage[];
-}
-
 /**
  * Approval rules for main-agent tools, by tool name. See
  * {@link AgentPlugin.mainAgentToolApproval}.
@@ -290,29 +279,6 @@ export interface AgentPlugin<TRuntime = SubtaskRuntime> {
   onSettled?: (ctx: ResolveRuntimeContext) => Promise<void>;
 
   // --- session lifecycle ---
-
-  /**
-   * Decide whether a turn should run at all, before the loop builds or calls
-   * anything.
-   *
-   * An agent that sees every message in its channels is mostly seeing messages
-   * that are not for it. Left to the main loop that judgement is made by a model
-   * simultaneously trying to be helpful, with history and half a dozen tools in
-   * view, and it degrades exactly there — *invisibly*, because failing to call a
-   * decline-tool looks identical to deciding not to. A gate moves the decision
-   * somewhere it cannot be skipped.
-   *
-   * **Fails open, and the asymmetry is the whole design.** A gate that throws is
-   * counted as `true`, so an outage degrades to the previous behaviour (run the
-   * turn) and never to a silent agent: a wrong reply is noise the user can see
-   * and ignore, while a wrong silence is invisible — the person who needed the
-   * agent simply never hears back. Failing *synchronously* is as safe as
-   * rejecting.
-   *
-   * Every declaring plugin is consulted and the results are AND-ed: any one gate
-   * may decline the turn. Returning `true` is always valid.
-   */
-  shouldHandleTurn?: (ctx: TurnGateContext) => Promise<boolean>;
 
   /**
    * The raw messages a compaction is about to fold into a summary, handed over

@@ -19,8 +19,7 @@ export type AiGatewayMetadata = Record<string, number | string | boolean>;
 export const GATEWAY_METADATA_MAX = 5;
 
 /** Which kind of call this is. The dimension a gateway dashboard groups by. */
-export type GatewayPhase =
-  "round" | "subagent" | "compaction" | "triage" | "embed";
+export type GatewayPhase = "round" | "subagent" | "compaction" | "embed";
 
 /**
  * Everything a call site may know about itself. Every field is optional because

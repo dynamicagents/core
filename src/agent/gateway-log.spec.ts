@@ -71,10 +71,10 @@ describe("gatewayLogFields", () => {
     // would reach the log. The builder reads its own keys and no others.
     const fields = gatewayLogFields({
       ...(turn as unknown as GatewayCorrelation),
-      phase: "triage"
+      phase: "round"
     });
 
-    expect(fields.metadata).toEqual({ phase: "triage", channel: "C08ABC" });
+    expect(fields.metadata).toEqual({ phase: "round", channel: "C08ABC" });
     expect(JSON.stringify(fields)).not.toContain("U01XYZ");
     expect(JSON.stringify(fields)).not.toContain("Ada");
   });
