@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { UIMessage } from "ai";
-import { latestTaskId, readTurn } from "./outcome.js";
+import { latestTaskId, readRunSummary, readTurn } from "./outcome.js";
 
 const user = (id: string, taskId: string, text = "go"): UIMessage => ({
   id,
@@ -124,5 +124,44 @@ describe("reading a turn", () => {
   it("names the task a recovery is about from the latest user message", () => {
     expect(latestTaskId([user("u1", "t1"), assistant("a1", [])])).toBe("t1");
     expect(latestTaskId([])).toBeUndefined();
+  });
+});
+
+describe("reading a sub-agent run's result", () => {
+  it("reads a recovered run whole: the partial, then the continuation", () => {
+    const summary = readRunSummary([
+      user("u1", "t1", "fix the tests"),
+      assistant("a1", [
+        text("I'll read the tests first."),
+        toolPart("read", "output-error")
+      ]),
+      assistant("a2", [
+        toolPart("read", "output-available"),
+        text("Fixed: the fixture was stale.")
+      ])
+    ]);
+    expect(summary).toBe(
+      "I'll read the tests first.\nFixed: the fixture was stale."
+    );
+  });
+
+  it("reads only the latest run", () => {
+    expect(
+      readRunSummary([
+        user("u1", "t1"),
+        assistant("a1", [text("first run")]),
+        user("u2", "t1"),
+        assistant("a2", [text("second run")])
+      ])
+    ).toBe("second run");
+  });
+
+  it("is empty for a run that said nothing, so Think's own fallback applies", () => {
+    expect(
+      readRunSummary([
+        user("u1", "t1"),
+        assistant("a1", [toolPart("lookup", "output-available")])
+      ])
+    ).toBe("");
   });
 });
