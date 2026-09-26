@@ -3,8 +3,8 @@
  *
  * This root entry carries only what nearly every consumer touches: the plugin
  * contract and the env slices. Everything else lives behind a subpath
- * (`/agent`, `/subagent`, `/model`, `/a2a`, `/worker`, `/artifacts`,
- * `/testing`), so importing the contract does not pull in Think, and importing
+ * (`/agent`, `/subagent`, `/model`, `/a2a`, `/worker`, `/alarm`, `/job`,
+ * `/artifacts`, `/testing`), so importing the contract does not pull in Think, and importing
  * the test harness never reaches a production bundle.
  */
 

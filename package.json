@@ -61,6 +61,14 @@
       "types": "./dist/model/index.d.ts",
       "import": "./dist/model/index.js"
     },
+    "./alarm": {
+      "types": "./dist/alarm/index.d.ts",
+      "import": "./dist/alarm/index.js"
+    },
+    "./job": {
+      "types": "./dist/job/index.d.ts",
+      "import": "./dist/job/index.js"
+    },
     "./artifacts": {
       "types": "./dist/artifacts/index.d.ts",
       "import": "./dist/artifacts/index.js"
