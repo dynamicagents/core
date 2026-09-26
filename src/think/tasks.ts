@@ -18,8 +18,16 @@ import { taskStateLabel, type PlainTask } from "../a2a/task.js";
  *    a scheduled wake is a `da_a2a_work` row, and settlement asks this table —
  *    not the model — whether the task is finished.
  *
- * Idempotent DDL rather than a migrator: the tables are core's alone, and a
- * Durable Object that wipes on deploy has no journal worth keeping.
+ * Every side effect a transition owes — the callback, the settle hooks, a
+ * follow-up turn — is recorded **in the same statement** as the transition, and
+ * cleared once it has happened. An object evicted in between finds the record
+ * at its next start and finishes the job; see `A2AAgent.onStart`.
+ *
+ * `CREATE TABLE IF NOT EXISTS`, and storage outlives a deploy: a caller's
+ * object keeps these rows across every version of this code. So the schema may
+ * only grow in ways that statement already covers — a changed or added column
+ * needs a versioned migration, as the Artifacts store keeps one
+ * (`CURRENT_SCHEMA_VERSION` in `src/artifacts/store.ts`).
  */
 
 /** The states a task never leaves. */
@@ -56,6 +64,13 @@ export interface WorkRow {
   settled: boolean;
 }
 
+/** A follow-up turn a closed work row still owes its task. */
+export interface FollowUp {
+  /** The user message's id, and the submission's idempotency key. */
+  id: string;
+  text: string;
+}
+
 /** One task row, less the blob. */
 export interface TaskRow {
   taskId: string;
@@ -67,7 +82,15 @@ export interface TaskRow {
   submissionId: string | null;
   /** The question the task is parked on, or `null` when it is not parked. */
   request: HitlRequestData | null;
-  pendingDelivery: boolean;
+  /**
+   * The callback still owed, or `null`: the settled state, or
+   * `input-required:<requestId>` for a question. Keyed on the event rather than
+   * the state, so a delivery of an earlier question can never stand in for, or
+   * clear, a later one.
+   */
+  deliveryKey: string | null;
+  /** Whether the settle hooks are still owed. */
+  hooksPending: boolean;
 }
 
 /** What {@link A2ATasks.list} is asked for — the `ListTasks` filters. */
@@ -97,7 +120,8 @@ interface StoredTask {
   identity_json: string | null;
   submission_id: string | null;
   request_json: string | null;
-  pending_delivery: number;
+  delivery_key: string | null;
+  hooks_pending: number;
 }
 
 interface StoredWork {
@@ -107,6 +131,7 @@ interface StoredWork {
   name: string;
   schedule_id: string | null;
   runtime_json: string | null;
+  follow_up_json: string | null;
   open: number;
   settled: number;
 }
@@ -132,7 +157,8 @@ export class A2ATasks {
       identity_json TEXT,
       submission_id TEXT,
       request_json TEXT,
-      pending_delivery INTEGER NOT NULL DEFAULT 0,
+      delivery_key TEXT,
+      hooks_pending INTEGER NOT NULL DEFAULT 0,
       push_seq INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
@@ -144,6 +170,7 @@ export class A2ATasks {
       name TEXT NOT NULL,
       schedule_id TEXT,
       runtime_json TEXT,
+      follow_up_json TEXT,
       open INTEGER NOT NULL DEFAULT 1,
       settled INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL
@@ -198,11 +225,22 @@ export class A2ATasks {
     };
   }
 
-  /** Tasks whose settled callback has not been acknowledged. */
-  pendingDeliveries(): string[] {
+  /** Callbacks owed and not yet acknowledged. */
+  pendingDeliveries(): { taskId: string; key: string }[] {
+    this.#ensure();
+    return this.sql<{ task_id: string; delivery_key: string }>`
+      SELECT task_id, delivery_key FROM da_a2a_tasks
+      WHERE delivery_key IS NOT NULL`.map((r) => ({
+      taskId: r.task_id,
+      key: r.delivery_key
+    }));
+  }
+
+  /** Tasks whose settle hooks are owed. */
+  pendingHooks(): string[] {
     this.#ensure();
     return this.sql<{ task_id: string }>`
-      SELECT task_id FROM da_a2a_tasks WHERE pending_delivery = 1`.map(
+      SELECT task_id FROM da_a2a_tasks WHERE hooks_pending = 1`.map(
       (r) => r.task_id
     );
   }
@@ -317,31 +355,36 @@ export class A2ATasks {
   }
 
   /**
-   * Flip a task to `canceled` and return it, or `null` when it is not
-   * eligible. A task parked on a question is eligible: a cancel is how it stops
-   * waiting.
+   * Flip a task to `canceled` and return it, or `null` when this call did not
+   * — an unknown task, or one already settled. A task parked on a question is
+   * eligible: a cancel is how it stops waiting. `task` is the canceled task a
+   * caller already built (the request handler's carries its own status
+   * message). Owes the settle hooks, and no callback.
    */
-  cancel(taskId: string): PlainTask | null {
+  cancel(taskId: string, task?: Task): PlainTask | null {
     const row = this.#stored(taskId);
     if (!row || !OPEN.includes(row.state)) return null;
-    const task = parse(row.task_json);
-    task.status = {
-      state: TaskState.TASK_STATE_CANCELED,
-      message: task.status?.message,
-      timestamp: new Date().toISOString()
-    };
+    const canceled = task ? (task as PlainTask) : parse(row.task_json);
+    if (!task) {
+      canceled.status = {
+        state: TaskState.TASK_STATE_CANCELED,
+        message: canceled.status?.message,
+        timestamp: new Date().toISOString()
+      };
+    }
     const rows = this.sql<{ task_id: string }>`
       UPDATE da_a2a_tasks
-      SET state = 'canceled', task_json = ${serialize(task)},
-          request_json = NULL, updated_at = ${Date.now()}
+      SET state = 'canceled', task_json = ${serialize(canceled)},
+          request_json = NULL, delivery_key = NULL, hooks_pending = 1,
+          updated_at = ${Date.now()}
       WHERE task_id = ${taskId}
         AND state IN ('submitted', 'working', 'input-required')
       RETURNING task_id`;
-    return rows.length > 0 ? task : null;
+    return rows.length > 0 ? canceled : null;
   }
 
   /**
-   * Park a running task on a question, and mark it for delivery in the same
+   * Park a running task on a question, and owe its callback in the same
    * statement. Only from `working`, or from `input-required` — the same park
    * re-run.
    */
@@ -350,7 +393,8 @@ export class A2ATasks {
     const rows = this.sql<{ task_id: string }>`
       UPDATE da_a2a_tasks
       SET state = 'input-required', task_json = ${serialize(task)},
-          request_json = ${JSON.stringify(request)}, pending_delivery = 1,
+          request_json = ${JSON.stringify(request)},
+          delivery_key = ${questionKey(request.requestId)},
           updated_at = ${Date.now()}
       WHERE task_id = ${task.id} AND state IN ('working', 'input-required')
       RETURNING task_id`;
@@ -380,25 +424,35 @@ export class A2ATasks {
   }
 
   /**
-   * The one terminal transition. Guarded on the source state, and marks the
-   * callback for delivery in the same statement — so a crash between settling
-   * and queueing leaves a row the start-up sweep can act on.
+   * The one terminal transition. Guarded on the source state, and owes the
+   * callback and the settle hooks in the same statement — so a crash between
+   * settling and either leaves a row the start-up sweep can act on.
    */
   settle(task: Task): boolean {
     this.#ensure();
+    const state = stateLabelOf(task);
     const rows = this.sql<{ task_id: string }>`
       UPDATE da_a2a_tasks
-      SET state = ${stateLabelOf(task)}, task_json = ${serialize(task)},
-          pending_delivery = 1, request_json = NULL, updated_at = ${Date.now()}
+      SET state = ${state}, task_json = ${serialize(task)},
+          delivery_key = ${state}, hooks_pending = 1, request_json = NULL,
+          updated_at = ${Date.now()}
       WHERE task_id = ${task.id}
         AND state IN ('submitted', 'working', 'input-required')
       RETURNING task_id`;
     return rows.length > 0;
   }
 
-  clearPendingDelivery(taskId: string): void {
+  /** Acknowledge one callback — only if it is still the one owed. */
+  delivered(taskId: string, key: string): void {
     this.#ensure();
-    this.sql`UPDATE da_a2a_tasks SET pending_delivery = 0
+    this.sql`UPDATE da_a2a_tasks SET delivery_key = NULL
+      WHERE task_id = ${taskId} AND delivery_key = ${key}`;
+  }
+
+  /** The settle hooks ran. */
+  hooksRan(taskId: string): void {
+    this.#ensure();
+    this.sql`UPDATE da_a2a_tasks SET hooks_pending = 0
       WHERE task_id = ${taskId}`;
   }
 
@@ -469,6 +523,47 @@ export class A2ATasks {
     );
   }
 
+  /**
+   * Close a work row and owe its task the follow-up turn, in one statement,
+   * answering whether **this** call closed it. Closed first and submitted
+   * second, so the follow-up turn never finds its own work still open; owed in
+   * the same write, so a crash between the two leaves the follow-up to be sent
+   * rather than a task `working` with nothing left to answer it.
+   */
+  beginFollowUp(workId: string, followUp: FollowUp): boolean {
+    this.#ensure();
+    return (
+      this.sql<{ work_id: string }>`
+        UPDATE da_a2a_work SET open = 0, follow_up_json = ${JSON.stringify(followUp)}
+        WHERE work_id = ${workId} AND open = 1 RETURNING work_id`.length > 0
+    );
+  }
+
+  /** The follow-up a work row still owes, or `null`. */
+  followUp(workId: string): FollowUp | null {
+    this.#ensure();
+    const json = this.sql<{ follow_up_json: string | null }>`
+      SELECT follow_up_json FROM da_a2a_work WHERE work_id = ${workId}`[0]
+      ?.follow_up_json;
+    return json ? (JSON.parse(json) as FollowUp) : null;
+  }
+
+  /** The follow-up was submitted. */
+  endFollowUp(workId: string): void {
+    this.#ensure();
+    this.sql`UPDATE da_a2a_work SET follow_up_json = NULL
+      WHERE work_id = ${workId}`;
+  }
+
+  /** Work rows whose follow-up is still owed. */
+  pendingFollowUps(): string[] {
+    this.#ensure();
+    return this.sql<{ work_id: string }>`
+      SELECT work_id FROM da_a2a_work WHERE follow_up_json IS NOT NULL`.map(
+      (r) => r.work_id
+    );
+  }
+
   /** How much open work holds a task `working`. The settlement check. */
   openWork(taskId: string): number {
     this.#ensure();
@@ -534,6 +629,11 @@ function parse(json: string): PlainTask {
   return Task.fromJSON(JSON.parse(json)) as PlainTask;
 }
 
+/** The delivery key of a question's callback. */
+export function questionKey(requestId: string): string {
+  return `input-required:${requestId}`;
+}
+
 function stateLabelOf(task: Task): string {
   return taskStateLabel(task.status?.state ?? TaskState.TASK_STATE_UNSPECIFIED);
 }
@@ -552,7 +652,8 @@ function project(row: StoredTask): TaskRow {
     request: row.request_json
       ? (JSON.parse(row.request_json) as HitlRequestData)
       : null,
-    pendingDelivery: row.pending_delivery === 1
+    deliveryKey: row.delivery_key,
+    hooksPending: row.hooks_pending === 1
   };
 }
 

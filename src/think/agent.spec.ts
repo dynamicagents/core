@@ -9,6 +9,7 @@ import {
   type AgentHarness,
   type CapturedCallback
 } from "../testing/harness.js";
+import { buildCompletedTask } from "../a2a/notify.js";
 import { requireArtifactsStub } from "../artifacts/binding.js";
 import { SESSION_TRANSCRIPT_KIND } from "../artifacts/transcript.js";
 import worker, {
@@ -183,7 +184,7 @@ describe("the A2A lifecycle", () => {
 
 describe("cancellation", () => {
   it("cancels a turn that is still running, and never calls back as done", async () => {
-    const { harness, debug } = harnessFor("cancel");
+    const { harness, debug, agent } = harnessFor("cancel");
     using _ = harness.interceptGatekeeper();
 
     const accepted = await harness.send("wait:20");
@@ -199,6 +200,12 @@ describe("cancellation", () => {
     expect(state.row?.state).toBe("canceled");
     expect(state.settledHooks).toEqual([TaskState.TASK_STATE_CANCELED]);
     expect(terminals(harness, accepted.id)).toHaveLength(0);
+
+    // A replayed cancel answers with the task and stops nothing twice.
+    expect(await agent.cancelTask(accepted.id)).not.toBeNull();
+    expect((await debug(accepted.id)).settledHooks).toEqual([
+      TaskState.TASK_STATE_CANCELED
+    ]);
   });
 });
 
@@ -224,6 +231,24 @@ describe("asking the caller", () => {
     // The label the person saw, not the id the wire carried.
     expect(done.text).toBe("Yes");
     expect(terminals(harness, accepted.id)).toHaveLength(1);
+  });
+
+  it("ignores a reply picking an option the question never offered", async () => {
+    const { harness, debug } = harnessFor("bad-option");
+    using _ = harness.interceptGatekeeper();
+
+    const accepted = await harness.send("ask:which one?");
+    const [parked] = await harness.waitForState(
+      accepted.id,
+      "TASK_STATE_INPUT_REQUIRED"
+    );
+    await harness.answer(accepted.id, questionOf(parked).requestId, {
+      optionId: "option_9"
+    });
+    await pause(500);
+
+    expect((await debug(accepted.id)).row?.state).toBe("input-required");
+    expect(terminals(harness, accepted.id)).toHaveLength(0);
   });
 
   it("ignores a reply naming a question this task never asked", async () => {
@@ -432,6 +457,74 @@ describe("a detached sub-agent", () => {
     expect(done.text).toContain("late but real");
     await pause(500);
     expect(terminals(harness, taskId)).toHaveLength(1);
+  });
+});
+
+describe("recovering what an eviction cut short", () => {
+  /** A task accepted straight into the ledger, calling back to `harness`. */
+  function seed(instance: TestAgent, harness: AgentHarness, taskId: string) {
+    instance.ledger.accept({
+      messageId: `m-${taskId}`,
+      taskId,
+      contextId: "c1",
+      push: {
+        taskId,
+        contextId: "c1",
+        pushUrl: harness.pushUrl,
+        pushToken: "tok",
+        jku: "https://agent.test/.well-known/jwks.json"
+      },
+      identity: { key: "k" }
+    });
+    instance.ledger.markWorking(taskId);
+  }
+
+  it("sends the follow-up a closed work row still owes", async () => {
+    const { harness, agent } = harnessFor("follow-up");
+    using _ = harness.interceptGatekeeper();
+    const taskId = crypto.randomUUID();
+
+    await runInDurableObject(agent, async (instance: TestAgent) => {
+      seed(instance, harness, taskId);
+      instance.ledger.addWork({
+        workId: "detached:cut",
+        taskId,
+        kind: "detached",
+        name: "TestBackground"
+      });
+      // Closed, and the object gone before the submit.
+      instance.ledger.beginFollowUp("detached:cut", {
+        id: "finish:detached:cut",
+        text: "echo:recovered"
+      });
+      expect(instance.ledger.pendingFollowUps()).toEqual(["detached:cut"]);
+      // What the start-up sweep queues.
+      await instance.submitFollowUp({ workId: "detached:cut" });
+      await instance.submitFollowUp({ workId: "detached:cut" });
+    });
+
+    const done = await harness.waitForTerminal(taskId);
+    expect(done.text).toBe("recovered");
+    await pause(500);
+    expect(terminals(harness, taskId)).toHaveLength(1);
+  });
+
+  it("runs the settle hooks a settled task still owes, once", async () => {
+    const { harness, agent, debug } = harnessFor("hooks");
+    const taskId = crypto.randomUUID();
+
+    await runInDurableObject(agent, async (instance: TestAgent) => {
+      seed(instance, harness, taskId);
+      // Settled, and the object gone before the hooks ran.
+      instance.ledger.settle(buildCompletedTask(taskId, "c1", "done"));
+      expect(instance.ledger.pendingHooks()).toEqual([taskId]);
+      await instance.runSettleHooks({ taskId });
+      await instance.runSettleHooks({ taskId });
+    });
+
+    const state = await debug(taskId);
+    expect(state.row?.hooksPending).toBe(false);
+    expect(state.settledHooks).toEqual([TaskState.TASK_STATE_COMPLETED]);
   });
 });
 

@@ -92,6 +92,22 @@ describe("reading a turn", () => {
     });
   });
 
+  it("does not park on a question its own schema would refuse", () => {
+    for (const input of [
+      { question: "   " },
+      { question: "Which?", options: ["only one"] }
+    ]) {
+      const outcome = readTurn(
+        [
+          user("u1", "t1"),
+          assistant("a1", [toolPart("ask_user", "input-available", input)])
+        ],
+        "t1"
+      );
+      expect(outcome.ask).toBeUndefined();
+    }
+  });
+
   it("does not take an answered question for a pending one", () => {
     const outcome = readTurn(
       [

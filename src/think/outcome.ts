@@ -1,5 +1,5 @@
 import type { UIMessage } from "ai";
-import { ASK_USER_TOOL_NAME } from "./tools.js";
+import { ASK_USER_TOOL_NAME, askUserInputSchema } from "./tools.js";
 
 /**
  * What a finished turn amounts to, read back out of the session.
@@ -100,21 +100,17 @@ function pendingAsk(parts: Part[]): PendingAsk | undefined {
     const call = parts[i] as {
       toolCallId?: string;
       state?: string;
-      input?: { question?: unknown; options?: unknown };
+      input?: unknown;
     };
     if (call.state?.startsWith("output-")) return undefined;
-    const question =
-      typeof call.input?.question === "string" ? call.input.question : "";
-    if (!question) return undefined;
-    const options = Array.isArray(call.input?.options)
-      ? call.input.options.filter(
-          (o): o is string => typeof o === "string" && o.length > 0
-        )
-      : [];
+    // With no `execute`, nothing else holds the call to its schema: a question
+    // it would refuse is not parked on.
+    const input = askUserInputSchema.safeParse(call.input);
+    if (!input.success) return undefined;
     return {
       toolCallId: call.toolCallId ?? "",
-      question,
-      ...(options.length > 0 ? { options } : {})
+      question: input.data.question,
+      ...(input.data.options ? { options: input.data.options } : {})
     };
   }
   return undefined;

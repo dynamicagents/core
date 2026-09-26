@@ -205,7 +205,11 @@ export class TestBackground extends TestSubAgentBase {
 
 /** Read one task's ledger, as JSON: what a callback cannot carry. */
 export interface TaskDebug {
-  row: { state: string; pendingDelivery: boolean } | null;
+  row: {
+    state: string;
+    deliveryKey: string | null;
+    hooksPending: boolean;
+  } | null;
   work: { workId: string; kind: string; open: boolean; settled: boolean }[];
   runs: { runId: string; status: string }[];
   /** Every state `onTaskSettled` fired with, for this task. */
@@ -272,7 +276,11 @@ export class TestAgent extends A2AAgent<TestEnv> {
     }
     const debug: TaskDebug = {
       row: row
-        ? { state: row.state, pendingDelivery: row.pendingDelivery }
+        ? {
+            state: row.state,
+            deliveryKey: row.deliveryKey,
+            hooksPending: row.hooksPending
+          }
         : null,
       work: this.ledger.workRows(taskId).map((w) => ({
         workId: w.workId,

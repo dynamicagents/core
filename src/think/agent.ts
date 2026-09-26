@@ -62,6 +62,7 @@ import {
   A2ATasks,
   TASK_RETENTION_MS,
   isTerminalState,
+  questionKey,
   type WorkRow
 } from "./tasks.js";
 import {
@@ -95,7 +96,8 @@ export interface CheckBackWake {
 /** What the delivery outbox carries. Strings and JSON: it crosses a queue. */
 interface DeliveryJob {
   taskId: string;
-  state: string;
+  /** The ledger's `deliveryKey` for the event this callback reports. */
+  key: string;
   task: unknown;
 }
 
@@ -185,11 +187,22 @@ export abstract class A2AAgent<
     assertArtifactsBound(this.env);
     void this.plugins;
     await super.onStart();
-    // A crash between settling a task and queueing its callback leaves the row
-    // flagged; the sweep turns that into a delivery.
-    for (const taskId of this.ledger.pendingDeliveries()) {
+    // Every side effect a transition owes is recorded with it, so an object
+    // evicted between the two finds the debt here. Queued rather than run:
+    // each is retried, and none of them belongs in a start.
+    for (const { taskId, key } of this.ledger.pendingDeliveries()) {
       const task = this.ledger.get(taskId);
-      if (task) await this.#enqueueDelivery(taskId, task);
+      if (task) await this.#enqueueDelivery(taskId, key, task);
+    }
+    for (const taskId of this.ledger.pendingHooks()) {
+      await this.queue("runSettleHooks", { taskId }, { id: `hooks:${taskId}` });
+    }
+    for (const workId of this.ledger.pendingFollowUps()) {
+      await this.queue(
+        "submitFollowUp",
+        { workId },
+        { id: `follow-up:${workId}` }
+      );
     }
   }
 
@@ -430,10 +443,10 @@ export abstract class A2AAgent<
    * task's next turn. Nothing is woken: Think's first-in-first-out turn queue
    * orders the answer behind anything still running.
    *
-   * A reply naming no question of this task changes nothing. A timeout is
-   * settled from the queue, not here: the request handler loads the task
-   * before it takes the message, and a task failed inline would make it refuse
-   * the very message reporting the expiry.
+   * A reply naming no question of this task, or an option the question never
+   * offered, changes nothing. A timeout is settled from the queue, not here:
+   * the request handler loads the task before it takes the message, and a task
+   * failed inline would make it refuse the very message reporting the expiry.
    */
   async answerTask(input: {
     taskId: string;
@@ -456,12 +469,22 @@ export abstract class A2AAgent<
       await this.queue("expireTask", { taskId, requestId: reply.requestId });
       return this.ledger.get(taskId);
     }
+    const { optionId } = reply.answer;
+    const option = request.options?.find((o) => o.id === optionId);
+    if (optionId !== undefined && !option) {
+      console.warn(
+        "[agent] a reply picks an option the question never offered",
+        {
+          taskId,
+          requestId: reply.requestId,
+          optionId
+        }
+      );
+      return this.ledger.get(taskId);
+    }
     if (this.ledger.resume(taskId) === null) return this.ledger.get(taskId);
 
-    const picked = reply.answer.optionId
-      ? (request.options?.find((o) => o.id === reply.answer.optionId)?.label ??
-        reply.answer.optionId)
-      : undefined;
+    const picked = option?.label;
     const text = [picked, reply.answer.text]
       .filter((part): part is string => Boolean(part))
       .join("\n\n");
@@ -556,7 +579,11 @@ export abstract class A2AAgent<
       };
       const parked = buildInputRequiredTask(taskId, row.contextId, request);
       if (this.ledger.park(parked, request)) {
-        await this.#enqueueDelivery(taskId, parked);
+        await this.#enqueueDelivery(
+          taskId,
+          questionKey(request.requestId),
+          parked
+        );
       }
       return;
     }
@@ -576,47 +603,62 @@ export abstract class A2AAgent<
     );
   }
 
-  /** The guarded terminal write, then the durable callback, then the hooks. */
+  /**
+   * The guarded terminal write — which owes the callback and the hooks in the
+   * same statement — then the callback, then the hooks.
+   */
   async #finish(taskId: string, task: Task): Promise<void> {
     if (!this.ledger.settle(task)) return;
-    await this.#enqueueDelivery(taskId, task);
-    await this.#settled(
-      taskId,
-      task.status?.state ?? TaskState.TASK_STATE_UNSPECIFIED
-    );
-  }
-
-  /**
-   * Hand one callback to the durable queue. The stable id makes a repeat
-   * replace the pending item rather than queue a second.
-   */
-  async #enqueueDelivery(taskId: string, task: Task): Promise<void> {
     const state = taskStateLabel(
       task.status?.state ?? TaskState.TASK_STATE_UNSPECIFIED
     );
+    await this.#enqueueDelivery(taskId, state, task);
+    await this.#settled(taskId);
+  }
+
+  /**
+   * Hand one callback to the durable queue, keyed on the event it reports.
+   * The stable id makes a repeat replace the pending item rather than queue a
+   * second.
+   */
+  async #enqueueDelivery(
+    taskId: string,
+    key: string,
+    task: Task
+  ): Promise<void> {
     await this.queue<DeliveryJob>(
       "deliverTask",
-      { taskId, state, task: Task.toJSON(task) },
+      { taskId, key, task: Task.toJSON(task) },
       {
-        id: `deliver:${taskId}:${state}`,
+        id: `deliver:${taskId}:${key}`,
         retry: { maxAttempts: 8, baseDelayMs: 2_000, maxDelayMs: 300_000 }
       }
     );
   }
 
   /**
-   * POST one callback. Throws on a non-2xx so the queue retries. A question
-   * the task has moved past since it was queued is not sent.
+   * POST one callback, if it is still the one the task owes. Throws on a
+   * non-2xx so the queue retries. A question the task has moved past — to an
+   * answer, or to another question — is neither sent nor acknowledged.
    */
   async deliverTask(job: DeliveryJob): Promise<void> {
     await ensureStarted(this);
     const row = this.ledger.row(job.taskId);
-    if (!row?.push || row.state !== job.state) return;
+    if (!row?.push || row.deliveryKey !== job.key) return;
     this.#origin.note(row.push.jku);
     await createPushChannel(this.env.A2A_SIGNING_KEY, row.push).deliver(
       Task.fromJSON(job.task)
     );
-    this.ledger.clearPendingDelivery(job.taskId);
+    this.ledger.delivered(job.taskId, job.key);
+  }
+
+  /** The settle hooks a start-up sweep found owed. */
+  async runSettleHooks(payload: { taskId: string }): Promise<void> {
+    await ensureStarted(this);
+    const row = this.ledger.row(payload.taskId);
+    if (!row?.hooksPending) return;
+    if (row.state === "canceled") await this.#stopCanceled(payload.taskId);
+    else await this.#settled(payload.taskId);
   }
 
   // --- cancellation ----------------------------------------------------------
@@ -624,19 +666,30 @@ export abstract class A2AAgent<
   /**
    * The one place a task becomes canceled: the guarded flip first — terminal,
    * so every later non-canceled write is refused — then stop everything still
-   * running for it. The flip's verdict decides whether anything else happens.
+   * running for it. The flip's verdict decides whether anything else happens:
+   * a cancel replayed on a task already canceled answers with it and stops
+   * nothing twice.
    */
   async #cancel(taskId: string, task?: Task): Promise<PlainTask | null> {
-    const before = this.ledger.row(taskId);
-    const canceled = task
-      ? this.ledger.save(task)
+    const canceled = this.ledger.cancel(taskId, task);
+    if (!canceled) {
+      return this.ledger.row(taskId)?.state === "canceled"
         ? this.ledger.get(taskId)
-        : null
-      : this.ledger.cancel(taskId);
-    if (!canceled) return null;
+        : null;
+    }
+    await this.#stopCanceled(taskId);
+    return canceled;
+  }
 
-    if (before?.submissionId) {
-      await this.cancelSubmission(before.submissionId, "task canceled").catch(
+  /**
+   * Everything a cancel stops, then the hooks. Runs after the flip, and again
+   * from the start-up sweep if an eviction cut it short, so every step is safe
+   * to repeat.
+   */
+  async #stopCanceled(taskId: string): Promise<void> {
+    const submissionId = this.ledger.row(taskId)?.submissionId;
+    if (submissionId) {
+      await this.cancelSubmission(submissionId, "task canceled").catch(
         (err: unknown) =>
           console.warn("[agent] submission not canceled", {
             taskId,
@@ -673,18 +726,19 @@ export abstract class A2AAgent<
         err: String(err)
       });
     }
-    if (!before || !isTerminalState(before.state)) {
-      await this.#settled(taskId, TaskState.TASK_STATE_CANCELED);
-    }
-    return canceled;
+    await this.#settled(taskId);
   }
 
   /**
-   * End the transcript, then the subclass hook. Before the hook, because the
-   * hook may take as long as a container takes to stop, while somebody may be
-   * watching the transcript for the line that says it finished.
+   * End the transcript, then the subclass hook, then record that both ran.
+   * The transcript first, because the hook may take as long as a container
+   * takes to stop, while somebody may be watching for the line that says it
+   * finished. At least once: an eviction before the record reruns them.
    */
-  async #settled(taskId: string, state: TaskState): Promise<void> {
+  async #settled(taskId: string): Promise<void> {
+    const state =
+      this.ledger.get(taskId)?.status?.state ??
+      TaskState.TASK_STATE_UNSPECIFIED;
     await settleTranscript(this.env, taskId, state);
     try {
       await this.onTaskSettled(taskId, state);
@@ -695,19 +749,20 @@ export abstract class A2AAgent<
         err: String(err)
       });
     }
+    this.ledger.hooksRan(taskId);
   }
 
   /**
    * Stop work still in flight for a task just canceled, beyond what core
    * stops itself (the turn, detached runs, scheduled wakes). Best-effort:
-   * cancellation is already recorded.
+   * cancellation is already recorded. At least once, like the settle hook.
    */
   protected async onTaskCanceled(_taskId: string): Promise<void> {}
 
   /**
    * A task reached a state it never leaves — release what was held for its
-   * lifetime. Fires for every terminal state, `canceled` included. A throw is
-   * logged and swallowed: the row is already durable.
+   * lifetime. Fires for every terminal state, `canceled` included, at least
+   * once. A throw is logged and swallowed: the row is already durable.
    */
   protected async onTaskSettled(
     _taskId: string,
@@ -839,7 +894,7 @@ export abstract class A2AAgent<
   /**
    * The `onFinish` of every detached run: close its work and submit the
    * follow-up turn that carries its result. Delivery is at-least-once, and the
-   * guarded `closeWork` is what makes the follow-up fire once per run.
+   * work row is what makes the follow-up fire once per run.
    */
   async onSubAgentFinish(
     run: AgentToolRunInfo,
@@ -851,18 +906,38 @@ export abstract class A2AAgent<
     if (!work) return;
     const row = this.ledger.row(work.taskId);
     if (!row || isTerminalState(row.state)) return;
-    if (!this.ledger.closeWork(run.runId)) return;
-    await this.runTurn({
-      mode: "submit",
-      input: userMessage(
-        `finish:${run.runId}`,
-        this.formatDetachedCompletion(run, result),
-        work.taskId,
-        row.contextId
-      ),
-      idempotencyKey: `finish:${run.runId}`,
-      metadata: { taskId: work.taskId }
+    this.ledger.beginFollowUp(run.runId, {
+      id: `finish:${run.runId}`,
+      text: this.formatDetachedCompletion(run, result)
     });
+    await this.submitFollowUp({ workId: run.runId });
+  }
+
+  /**
+   * Submit the follow-up a closed work row owes, then clear it. A repeat — a
+   * redelivered finish, the start-up sweep — finds it owed and submits again
+   * under the same idempotency key, or finds it cleared and does nothing.
+   */
+  async submitFollowUp(payload: { workId: string }): Promise<void> {
+    await ensureStarted(this);
+    const work = this.ledger.work(payload.workId);
+    const followUp = this.ledger.followUp(payload.workId);
+    if (!work || !followUp) return;
+    const row = this.ledger.row(work.taskId);
+    if (row && !isTerminalState(row.state)) {
+      await this.runTurn({
+        mode: "submit",
+        input: userMessage(
+          followUp.id,
+          followUp.text,
+          work.taskId,
+          row.contextId
+        ),
+        idempotencyKey: followUp.id,
+        metadata: { taskId: work.taskId }
+      });
+    }
+    this.ledger.endFollowUp(payload.workId);
   }
 
   /**
@@ -899,18 +974,11 @@ export abstract class A2AAgent<
     await ensureStarted(this);
     const row = this.ledger.row(wake.taskId);
     if (!row || isTerminalState(row.state)) return;
-    if (!this.ledger.closeWork(wake.workId)) return;
-    await this.runTurn({
-      mode: "submit",
-      input: userMessage(
-        `wake:${wake.workId}`,
-        `Waited ${wake.seconds}s: ${wake.why}`,
-        wake.taskId,
-        row.contextId
-      ),
-      idempotencyKey: `wake:${wake.workId}`,
-      metadata: { taskId: wake.taskId }
+    this.ledger.beginFollowUp(wake.workId, {
+      id: `wake:${wake.workId}`,
+      text: `Waited ${wake.seconds}s: ${wake.why}`
     });
+    await this.submitFollowUp({ workId: wake.workId });
   }
 
   // --- the transcript --------------------------------------------------------

@@ -91,16 +91,31 @@ describe("transitions", () => {
     });
   });
 
-  it("settles once, and marks the callback for delivery in the same write", async () => {
+  it("settles once, owing the callback and the hooks in the same write", async () => {
     await withLedger((ledger) => {
       accept(ledger);
       ledger.markWorking("t1");
       expect(ledger.settle(buildCompletedTask("t1", "c1", "done"))).toBe(true);
-      expect(ledger.row("t1")?.pendingDelivery).toBe(true);
+      expect(ledger.row("t1")?.deliveryKey).toBe("completed");
+      expect(ledger.pendingHooks()).toEqual(["t1"]);
       expect(ledger.settle(buildFailedTask("t1", "c1", "no"))).toBe(false);
       expect(ledger.row("t1")?.state).toBe("completed");
-      ledger.clearPendingDelivery("t1");
+
+      ledger.delivered("t1", "completed");
+      ledger.hooksRan("t1");
       expect(ledger.pendingDeliveries()).toEqual([]);
+      expect(ledger.pendingHooks()).toEqual([]);
+    });
+  });
+
+  it("owes the hooks, and no callback, for a cancel — once", async () => {
+    await withLedger((ledger) => {
+      accept(ledger);
+      expect(ledger.cancel("t1")).not.toBeNull();
+      expect(ledger.row("t1")?.deliveryKey).toBeNull();
+      expect(ledger.pendingHooks()).toEqual(["t1"]);
+      // A replay of the cancel is not a second transition.
+      expect(ledger.cancel("t1")).toBeNull();
     });
   });
 
@@ -210,10 +225,28 @@ describe("a task parked on a question", () => {
       const parked = buildInputRequiredTask("t1", "c1", request);
       expect(ledger.park(parked, request)).toBe(true);
       expect(ledger.row("t1")?.request?.requestId).toBe(request.requestId);
-      expect(ledger.row("t1")?.pendingDelivery).toBe(true);
+      expect(ledger.row("t1")?.deliveryKey).toBe(
+        `input-required:${request.requestId}`
+      );
       expect(ledger.resume("t1")).not.toBeNull();
       expect(ledger.resume("t1")).toBeNull();
       expect(ledger.row("t1")?.request).toBeNull();
+    });
+  });
+
+  it("never lets an earlier question's delivery stand in for a later one", async () => {
+    await withLedger((ledger) => {
+      accept(ledger);
+      ledger.markWorking("t1");
+      ledger.park(buildInputRequiredTask("t1", "c1", request), request);
+      const first = ledger.row("t1")!.deliveryKey!;
+      ledger.resume("t1");
+      const second = { ...request, requestId: "t1:call-2" };
+      ledger.park(buildInputRequiredTask("t1", "c1", second), second);
+
+      // The first question's late acknowledgement clears nothing.
+      ledger.delivered("t1", first);
+      expect(ledger.row("t1")?.deliveryKey).toBe("input-required:t1:call-2");
     });
   });
 
@@ -306,6 +339,28 @@ describe("work", () => {
       expect(ledger.work("d")?.runtime).toEqual({ lease: "x" });
       expect(ledger.claimSettle("d")).toBe(true);
       expect(ledger.claimSettle("d")).toBe(false);
+    });
+  });
+
+  it("closes a row and owes its follow-up in one write, and keeps owing it until sent", async () => {
+    await withLedger((ledger) => {
+      ledger.addWork({
+        workId: "d",
+        taskId: "t1",
+        kind: "detached",
+        name: "C"
+      });
+      const followUp = { id: "finish:d", text: "done" };
+      expect(ledger.beginFollowUp("d", followUp)).toBe(true);
+      expect(ledger.openWork("t1")).toBe(0);
+      // A redelivery neither reopens nor re-records it.
+      expect(ledger.beginFollowUp("d", { id: "x", text: "y" })).toBe(false);
+      expect(ledger.followUp("d")).toEqual(followUp);
+      expect(ledger.pendingFollowUps()).toEqual(["d"]);
+
+      ledger.endFollowUp("d");
+      expect(ledger.followUp("d")).toBeNull();
+      expect(ledger.pendingFollowUps()).toEqual([]);
     });
   });
 
