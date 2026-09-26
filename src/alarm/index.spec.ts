@@ -89,6 +89,45 @@ describe("installScheduler — the undelegated-handler guard", () => {
   });
 
   /**
+   * Fields initialize in source order, so a handler field declared after the one
+   * that installs the scheduler lands over the lifecycle's handler once the check
+   * at construction has passed. A real class rather than a fake host, because the
+   * ordering is the class's.
+   */
+  it("refuses at start a handler a later field defines", async () => {
+    await runInDurableObject(fresh(plain, "late"), async (_instance, state) => {
+      class LateAlarm {
+        readonly ctx = state;
+        readonly wake = installScheduler(this as never);
+        alarm = () => Promise.resolve();
+      }
+      const { wake } = new LateAlarm();
+      await expect(wake.start()).rejects.toThrow(/"alarm" in a field declared/);
+      // The path that matters: nothing is scheduled on an alarm that never runs.
+      await expect(
+        wake.scheduler.set(new Date(Date.now() + 60_000), "mark", {})
+      ).rejects.toThrow(/silently unfired/);
+      expect(await state.storage.getAlarm()).toBeNull();
+    });
+  });
+
+  it("starts a later field's host once it declares the handler", async () => {
+    await runInDurableObject(
+      fresh(plain, "late-declared"),
+      async (_instance, state) => {
+        class LateDeclared {
+          readonly ctx = state;
+          readonly wake = installScheduler(this as never, {
+            hostOwns: ["alarm"]
+          });
+          alarm = () => Promise.resolve();
+        }
+        await expect(new LateDeclared().wake.start()).resolves.toBeUndefined();
+      }
+    );
+  });
+
+  /**
    * Declaring a handler the host does *not* have is harmless and stays that way
    * deliberately: the list is an acknowledgement, and a host that grows an
    * `alarm()` later should not have to remember to add one.

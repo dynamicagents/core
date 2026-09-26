@@ -34,8 +34,9 @@
  * handlers that the host does not already have — by design, so a framework can
  * keep its own dispatch. An object that overrides `alarm()` therefore installs
  * a `Scheduler` that never fires, with no error anywhere. {@link
- * installScheduler} turns that into a throw at construction: a host with its own
- * handler must say so in `hostOwns`, and an `alarm()` it owns must call through.
+ * installScheduler} turns that into a throw — at construction, or at start for
+ * a handler a later field defines: a host with its own handler must say so in
+ * `hostOwns`, and an `alarm()` it owns must call through.
  *
  * **2. There is no "move this deadline".** A schedule is a row with a minted id,
  * so pushing one later is {@link Scheduler.cancel} then {@link Scheduler.set} —
@@ -354,6 +355,21 @@ export function namedDeadline<
   };
 }
 
+function undelegated(
+  host: object,
+  names: readonly HostHandler[],
+  how: string
+): Error {
+  const one = names.length === 1;
+  return new Error(
+    `${host.constructor.name} defines ${names.map((n) => `"${n}"`).join(", ")} ` +
+      `${how}. ` +
+      `List ${one ? "it" : "each"} in \`hostOwns\` to say so. ` +
+      `An "alarm" the host owns must then call through to this object's \`alarm()\`, ` +
+      `or every schedule is silently unfired.`
+  );
+}
+
 /**
  * Compose a {@link Scheduler} onto a plain Durable Object.
  *
@@ -391,7 +407,10 @@ export function namedDeadline<
  * @throws if the host defines a handler it did not declare in `hostOwns`. That
  * is the whole reason to call this rather than assembling the lifecycle and the
  * scheduler by hand: the failure it prevents produces no error of its own, only
- * a schedule that never fires.
+ * a schedule that never fires. A handler defined by a field declared after this
+ * call's is only there once construction ends, so it is refused at start
+ * instead — by `start()`, and by every scheduler call, which starts the
+ * lifecycle first.
  */
 export function installScheduler<
   H extends SchedulerHandlers = SchedulerCallbacks,
@@ -411,19 +430,42 @@ export function installScheduler<
     (name) => name in host && !declared.has(name)
   );
   if (undeclared.length > 0) {
-    throw new Error(
-      `${host.constructor.name} defines ${undeclared.map((n) => `"${n}"`).join(", ")} ` +
-        `and the lifecycle will not replace ${undeclared.length === 1 ? "it" : "them"}. ` +
-        `List ${undeclared.length === 1 ? "it" : "each"} in \`hostOwns\` to say so. ` +
-        `An "alarm" the host owns must then call through to this object's \`alarm()\`, ` +
-        `or every schedule is silently unfired.`
+    throw undelegated(
+      host,
+      undeclared,
+      `and the lifecycle will not replace ${undeclared.length === 1 ? "it" : "them"}`
     );
   }
 
   const scheduler = new Scheduler<H>(schedulerOptions);
   const lifecycle = new Lifecycle<Env>(host);
+
+  // Fields initialize in source order, so a handler field declared after the
+  // one that called this overwrites what `installHandlers()` defines below, and
+  // the check above cannot see it coming. Asked again at start, once every field
+  // has run — and before the scheduler's own start, so nothing is scheduled on a
+  // host whose alarm will never reach it.
+  const handlers = host as unknown as Record<HostHandler, unknown>;
+  const installed = new Map<HostHandler, unknown>();
+  lifecycle.use({
+    onStart() {
+      const replaced = [...installed]
+        .filter(([name, handler]) => handlers[name] !== handler)
+        .map(([name]) => name);
+      if (replaced.length > 0) {
+        throw undelegated(
+          host,
+          replaced,
+          "in a field declared after the one that called installScheduler, over the lifecycle's"
+        );
+      }
+    }
+  });
   lifecycle.use(scheduler);
   lifecycle.installHandlers();
+  for (const name of HOST_HANDLERS) {
+    if (!declared.has(name)) installed.set(name, handlers[name]);
+  }
 
   return {
     scheduler,

@@ -377,44 +377,36 @@ describe("generation", () => {
 
 describe("reserved ids", () => {
   /**
-   * Empty is the only id that collides: it yields `:armed` and `:context`, which
-   * two differently-broken callers would share.
+   * An id is a storage key, so the ids refused are the ones whose keys land on
+   * another job's: empty, whose `:armed` two broken callers would share, and one
+   * holding `:`, whose record is another job's derived key.
    *
-   * Nothing else can, and the second test is what pins that. A schedule lives in
-   * its own row under an id the scheduler mints, so no job id reaches the
-   * scheduling machinery however it is spelled — which is why an id that reads
-   * like scheduler state is accepted rather than reserved.
+   * The last test pins what is *not* refused. A schedule lives in its own row
+   * under an id the scheduler mints, so no job id reaches the scheduling
+   * machinery however it is spelled — which is why an id that reads like
+   * scheduler state is accepted rather than reserved.
    */
+  const make = (id: string) => () =>
+    new JobLifecycle({
+      id,
+      storage: fakeStorage(),
+      scheduler: fakeScheduler().scheduler,
+      run: "jobRun",
+      watch: "jobWatch",
+      ...TIMINGS
+    });
+
   it("refuses an empty id", () => {
-    const storage = fakeStorage();
-    const { scheduler } = fakeScheduler();
-    expect(
-      () =>
-        new JobLifecycle({
-          id: "",
-          storage,
-          scheduler,
-          run: "jobRun",
-          watch: "jobWatch",
-          ...TIMINGS
-        })
-    ).toThrow(/non-empty/);
+    expect(make("")).toThrow(/non-empty/);
+  });
+
+  it("refuses an id that is another job's derived key", () => {
+    expect(make("install")().armedKey).toBe("install:armed");
+    expect(make("install:armed")).toThrow(/without ":"/);
   });
 
   it("accepts an id that reads like scheduler state", () => {
-    const storage = fakeStorage();
-    const { scheduler } = fakeScheduler();
-    expect(
-      () =>
-        new JobLifecycle({
-          id: "wake",
-          storage,
-          scheduler,
-          run: "jobRun",
-          watch: "jobWatch",
-          ...TIMINGS
-        })
-    ).not.toThrow();
+    expect(make("wake")).not.toThrow();
   });
 });
 

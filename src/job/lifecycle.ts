@@ -72,7 +72,10 @@ export interface JobContext {
 export interface JobLifecycleOptions<
   H extends SchedulerHandlers = SchedulerCallbacks
 > {
-  /** Namespaces every storage key. Also the state record's own key. */
+  /**
+   * Namespaces every storage key. Also the state record's own key. Non-empty
+   * and free of `:`, the separator the derived keys add.
+   */
   id: string;
   storage: DurableObjectStorage;
   /**
@@ -96,9 +99,10 @@ export interface JobLifecycleOptions<
   /** The registered callback that re-attaches to a job nobody is draining. */
   watch: keyof H & string;
   /*
-   * The three durations below are required: how long a job may overrun, how
-   * often a dead one is looked for and how often one may be re-armed are the
-   * owner's to decide for its own job, and core ships no numbers.
+   * `staleMs`, `watchMs` and `armCooldownMs` are required: how long a job may
+   * overrun, how often a dead one is looked for and how often one may be
+   * re-armed are the owner's to decide for its own job, and core ships no
+   * numbers.
    */
   /**
    * How long a `running` record may stand before it is presumed dead.
@@ -157,15 +161,20 @@ export class JobLifecycle<
   constructor(options: JobLifecycleOptions<H>) {
     /**
      * An id is a storage key, so a bad one is not a bad name — it is a write
-     * landing on somebody else's row. Empty is the case that actually collides:
-     * it yields `:armed` and `:context`, which two differently-broken callers
-     * would share.
+     * landing on somebody else's row. A `:` is how one collides: job
+     * `install:armed`'s record would be job `install`'s armed stamp. Without one,
+     * a record's key has no `:` and every derived key splits at its first, back
+     * to its own job.
      *
-     * Only empty: a schedule carries an id the scheduler mints and lives in its
-     * own row, so no job id can collide with the scheduling machinery however it
-     * is spelled. The keys derived here are the only ones worth guarding.
+     * A schedule carries an id the scheduler mints and lives in its own row, so
+     * no job id can collide with the scheduling machinery however it is spelled.
+     * The keys derived here are the only ones worth guarding.
      */
-    if (!options.id) throw new Error("a job id must be a non-empty string");
+    if (!options.id || options.id.includes(":")) {
+      throw new Error(
+        `a job id must be a non-empty string without ":", got ${JSON.stringify(options.id)}`
+      );
+    }
     this.#o = options;
     this.stateKey = options.id;
     this.armedKey = `${options.id}:armed`;
