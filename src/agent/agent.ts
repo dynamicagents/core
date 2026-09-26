@@ -51,13 +51,13 @@ import type { AgentPlugin, PluginContext } from "../contract/plugin.js";
 import type { CoreEnv } from "../env.js";
 import { ensureStarted } from "./lifecycle.js";
 import { latestTaskId, readTurn } from "./outcome.js";
+import type { SubAgentSpec } from "../contract/subagent.js";
 import {
   NOTE_MILESTONE,
   type NoteData,
   type SubAgentClass,
-  type SubAgentEnvelope,
-  type SubAgentSpec
-} from "./sub-agent.js";
+  type SubAgentEnvelope
+} from "../subagent/subagent.js";
 import {
   A2ATasks,
   TASK_RETENTION_MS,

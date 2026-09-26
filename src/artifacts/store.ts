@@ -13,7 +13,7 @@
 /**
  * How long an artifact is kept. The same clock the rest of a Task's durable
  * state ages out on — see `TASK_RETENTION_MS` in
- * {@link file://../think/tasks.ts A2ATasks}.
+ * {@link file://../agent/tasks.ts A2ATasks}.
  */
 export const ARTIFACT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 

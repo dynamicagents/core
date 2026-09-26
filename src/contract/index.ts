@@ -16,6 +16,12 @@ export {
   type RestrictToolsOptions
 } from "./plugin.js";
 
+export type {
+  SubAgentPrepareContext,
+  SubAgentSettleContext,
+  SubAgentSpec
+} from "./subagent.js";
+
 export {
   PluginSetupError,
   assemblePlugins,

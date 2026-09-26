@@ -49,9 +49,13 @@
       "types": "./dist/worker/index.d.ts",
       "import": "./dist/worker/index.js"
     },
-    "./think": {
-      "types": "./dist/think/index.d.ts",
-      "import": "./dist/think/index.js"
+    "./agent": {
+      "types": "./dist/agent/index.d.ts",
+      "import": "./dist/agent/index.js"
+    },
+    "./subagent": {
+      "types": "./dist/subagent/index.d.ts",
+      "import": "./dist/subagent/index.js"
     },
     "./model": {
       "types": "./dist/model/index.d.ts",

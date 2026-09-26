@@ -106,6 +106,12 @@ Adding an export subpath means adding it to `package.json`'s `exports` **and**
 confirming it emits: a subpath that resolves to a missing file is invisible until
 someone imports it.
 
+**A subpath names a domain a consumer builds with, never a package it is built
+on.** Every agent runs on Think, so a `/think` would distinguish nothing, grow into
+a bucket, and turn an upstream rename into a breaking one here. What a plugin
+exports as data — `SubAgentSpec` — is contract, at the root, so a plugin never
+imports the runtime that hosts it.
+
 ---
 
 ## Contract changes
@@ -131,7 +137,7 @@ publish train (core → plugins → starter), so one repo is always briefly behi
 **Core owns the A2A↔Think lifecycle, and ships no prompt copy and no numbers.**
 
 Think runs the turn — the loop, recovery, compaction, agent tools, actions.
-Core wraps it in the A2A task: the guarded ledger (`src/think/tasks.ts`), the mapping
+Core wraps it in the A2A task: the guarded ledger (`src/agent/tasks.ts`), the mapping
 from a turn's outcome to a task state, the durable delivery outbox, cancellation
 fan-out, and a task that outlives its turn through open work. Every one of those
 is an ordering an agent cannot vary and still be correct: a cancel decided by a probe
@@ -146,7 +152,7 @@ What is genuinely per-agent is explicit and mandatory:
   budget at all: the gatekeeper cancels a task that has not settled within the hour,
   so a ceiling below that is arbitrary, and one above it is never reached.
 
-So when adding to `/think`, the test is not "does an agent vary here" but "**could an
+So when adding to `/agent` or `/subagent`, the test is not "does an agent vary here" but "**could an
 agent vary here and still be correct**". A cancellation ordering cannot. A sentence
 the model reads always can.
 
@@ -231,7 +237,7 @@ Specs live next to the code they test (`src/**/*.spec.ts`) and run inside
 workerd, because a Think agent drives `ctx.storage.sql`, alarms and facets, none
 of which have a Node-side stand-in. `wrangler.jsonc` and `test/worker.ts` exist
 only to give the pool something to bind — they are dev-only and excluded from the
-published tarball. `src/think/agent.spec.ts` drives every lifecycle scenario
+published tarball. `src/agent/agent.spec.ts` drives every lifecycle scenario
 through the real A2A edge and asserts on the push callbacks.
 
 Two things `npm test` alone will not catch, so run `npm run check` before

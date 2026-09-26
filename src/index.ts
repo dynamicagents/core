@@ -3,9 +3,9 @@
  *
  * This root entry carries only what nearly every consumer touches: the plugin
  * contract and the env slices. Everything else lives behind a subpath
- * (`/think`, `/model`, `/a2a`, `/worker`, `/artifacts`, `/testing`), so
- * importing the contract does not pull in Think, and importing the test harness
- * never reaches a production bundle.
+ * (`/agent`, `/subagent`, `/model`, `/a2a`, `/worker`, `/artifacts`,
+ * `/testing`), so importing the contract does not pull in Think, and importing
+ * the test harness never reaches a production bundle.
  */
 
 export {
@@ -19,7 +19,10 @@ export {
   type PluginContext,
   type PluginContextBlock,
   type PluginRequirements,
-  type RestrictToolsOptions
+  type RestrictToolsOptions,
+  type SubAgentPrepareContext,
+  type SubAgentSettleContext,
+  type SubAgentSpec
 } from "./contract/index.js";
 
 export {

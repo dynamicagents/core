@@ -5,12 +5,9 @@ import { z } from "zod";
 import { handleArtifactRoute } from "../src/artifacts/route.js";
 import type { AgentManifest } from "../src/a2a/card.js";
 import type { CoreEnv } from "../src/env.js";
-import { A2AAgent, type A2ACopy } from "../src/think/agent.js";
-import {
-  SubAgent,
-  type SubAgentClass,
-  type SubAgentSpec
-} from "../src/think/sub-agent.js";
+import { A2AAgent, type A2ACopy } from "../src/agent/agent.js";
+import type { SubAgentSpec } from "../src/contract/subagent.js";
+import { SubAgent, type SubAgentClass } from "../src/subagent/subagent.js";
 import { createA2AWorker, defineAgent } from "../src/worker/index.js";
 import {
   call,

@@ -151,7 +151,7 @@ posted to the gatekeeper from a durable outbox. What is yours is what Think asks
 agent — plus the words core will not write.
 
 ```ts
-import { A2AAgent } from "@dynamicagents/core/think";
+import { A2AAgent } from "@dynamicagents/core/agent";
 import { gatewayLogFields, workersAIModel } from "@dynamicagents/core/model";
 
 export class MyAgent extends A2AAgent<Env> {
@@ -198,7 +198,8 @@ agent tools. Describe it as a `SubAgentSpec`, bind the spec to a class, and list
 class in `getSubAgents()`; core offers the model one tool per sub-agent.
 
 ```ts
-import { SubAgent, type SubAgentSpec } from "@dynamicagents/core/think";
+import type { SubAgentSpec } from "@dynamicagents/core";
+import { SubAgent } from "@dynamicagents/core/subagent";
 
 const RESEARCH: SubAgentSpec<{ task: string }> = {
   name: "research",
@@ -301,17 +302,18 @@ of a Task's state, swept lazily on the next write rather than by an alarm apiece
 Each area is its own subpath, so importing the contract does not drag in Think, and the
 test harness cannot reach a production bundle.
 
-| Subpath                            | What's in it                                                                   |
-| ---------------------------------- | ------------------------------------------------------------------------------ |
-| `@dynamicagents/core`              | the plugin contract (`definePlugin`, `restrictTools`), env slices, `withAbort` |
-| `@dynamicagents/core/think`        | `A2AAgent`, `SubAgent`, the task ledger, core's tools                          |
-| `@dynamicagents/core/model`        | `workersAIModel`, `gatewayLogFields`                                           |
-| `@dynamicagents/core/a2a`          | card signing, JWKS, gatekeeper-JWT verify, push notify, task store, executor   |
-| `@dynamicagents/core/worker`       | `createA2AWorker()`, `defineAgent()` — the whole zero-trust edge               |
-| `@dynamicagents/core/artifacts`    | the `Artifacts` object, its routes and viewer, the transcript emission         |
-| `@dynamicagents/core/testing`      | VCR, scripted models, the A2A harness, DO helpers, fixtures — _workerd realm_  |
-| `@dynamicagents/core/testing/node` | the VCR recorder + cassette store — _Node realm, never import from a spec_     |
-| `@dynamicagents/core/eslint`       | the `no-deprecated-object-properties` rule                                     |
+| Subpath                            | What's in it                                                                                   |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `@dynamicagents/core`              | the plugin contract (`definePlugin`, `restrictTools`, `SubAgentSpec`), env slices, `withAbort` |
+| `@dynamicagents/core/agent`        | `A2AAgent`, core's tools (`ask_user`, `check_back`, `search_history`)                          |
+| `@dynamicagents/core/subagent`     | `SubAgent`, the child an `A2AAgent` dispatches                                                 |
+| `@dynamicagents/core/model`        | `workersAIModel`, `gatewayLogFields`                                                           |
+| `@dynamicagents/core/a2a`          | card signing, JWKS, gatekeeper-JWT verify, push notify, task store, executor                   |
+| `@dynamicagents/core/worker`       | `createA2AWorker()`, `defineAgent()` — the whole zero-trust edge                               |
+| `@dynamicagents/core/artifacts`    | the `Artifacts` object, its routes and viewer, the transcript emission                         |
+| `@dynamicagents/core/testing`      | VCR, scripted models, the A2A harness, DO helpers, fixtures — _workerd realm_                  |
+| `@dynamicagents/core/testing/node` | the VCR recorder + cassette store — _Node realm, never import from a spec_                     |
+| `@dynamicagents/core/eslint`       | the `no-deprecated-object-properties` rule                                                     |
 
 `/testing*` and `/eslint` are structurally incapable of entering a runtime graph, and
 `npm run verify:exports` asserts exactly that before every publish.
