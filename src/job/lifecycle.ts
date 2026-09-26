@@ -95,6 +95,11 @@ export interface JobLifecycleOptions<
   run: keyof H & string;
   /** The registered callback that re-attaches to a job nobody is draining. */
   watch: keyof H & string;
+  /*
+   * The three durations below are required: how long a job may overrun, how
+   * often a dead one is looked for and how often one may be re-armed are the
+   * owner's to decide for its own job, and core ships no numbers.
+   */
   /**
    * How long a `running` record may stand before it is presumed dead.
    *
@@ -102,20 +107,16 @@ export interface JobLifecycleOptions<
    * this, never against this alone — the point is to outlast a job that is
    * merely slow, and only then to declare one that is gone.
    */
-  staleMs?: number;
+  staleMs: number;
   /** How often the watch intent re-checks a job nobody is draining. */
-  watchMs?: number;
+  watchMs: number;
   /**
    * The floor between two arming attempts.
    *
    * Without it a job that cannot start re-arms on every call into the object.
    */
-  armCooldownMs?: number;
+  armCooldownMs: number;
 }
-
-const DEFAULT_STALE_MS = 5 * 60_000;
-const DEFAULT_WATCH_MS = 60_000;
-const DEFAULT_ARM_COOLDOWN_MS = 5 * 60_000;
 
 export class JobLifecycle<
   TExtra extends object = Record<never, never>,
@@ -151,12 +152,7 @@ export class JobLifecycle<
      * is spelled. The keys derived here are the only ones worth guarding.
      */
     if (!options.id) throw new Error("a job id must be a non-empty string");
-    this.#o = {
-      ...options,
-      staleMs: options.staleMs ?? DEFAULT_STALE_MS,
-      watchMs: options.watchMs ?? DEFAULT_WATCH_MS,
-      armCooldownMs: options.armCooldownMs ?? DEFAULT_ARM_COOLDOWN_MS
-    };
+    this.#o = options;
     this.stateKey = options.id;
     this.armedKey = `${options.id}:armed`;
     this.lastArmedKey = `${options.id}:last-armed`;
@@ -284,10 +280,9 @@ export class JobLifecycle<
    * last, every displaced drain still attached and still writing verdicts.
    *
    * Applies the staleness bound **itself**, rather than trusting the caller to
-   * have repaired the record first. An earlier draft took an
-   * "already-repaired" state and said so in prose, which enforced nothing: the
-   * repaired and raw types are identical, so a caller passing a raw read got a
-   * `running` record that could never be claimed and a job wedged forever.
+   * have repaired the record first. Raw and repaired states have identical
+   * types, so nothing could hold a caller to that: a raw read would be a
+   * `running` record that could never be claimed, and a job wedged forever.
    * `timeoutMs` is the job's own budget; see {@link isStale}.
    */
   claim(

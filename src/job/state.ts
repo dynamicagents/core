@@ -9,12 +9,11 @@
  *
  * ## Why `TExtra` intersects rather than nests
  *
- * The obvious generic is `{ state: "running"; meta: TExtra }`. It is wrong here,
- * and expensively so: every existing reader spells the job's own field at the
- * top level (`status.command`), so nesting would rewrite every read site and
- * every spec assertion in both consumers to buy nothing. Intersecting keeps
- * `JobState<{ command: string }>` *byte-identical* to the hand-written union it
- * replaces, which is what makes adopting this a type change and not a refactor.
+ * The obvious generic is `{ state: "running"; meta: TExtra }`. It is wrong here:
+ * a job's own fields are read at the top level (`status.command`) and persisted
+ * there, so a stored record and its type agree without a mapping. Intersecting
+ * keeps `JobState<{ command: string }>` a flat union of exactly the fields a
+ * reader sees.
  *
  * The cost of the choice is that `TExtra` must not collide with the field names
  * below. That is a real constraint, and it is why they are named for the

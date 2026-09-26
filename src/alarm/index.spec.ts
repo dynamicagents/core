@@ -292,6 +292,69 @@ describe("namedDeadline", () => {
     });
   });
 
+  /**
+   * The id is the only handle on the row. Stored nowhere, the row would fire
+   * on a deadline nothing can move, and a retry would set a second one.
+   */
+  it("cancels the new schedule when its id cannot be stored", async () => {
+    const stub = fresh(plain, "put-fails");
+    await runInDurableObject(stub, async (instance, state) => {
+      await instance.wake.start();
+      const refusing = {
+        get: (key: string) => state.storage.get(key),
+        put: async () => {
+          throw new Error("storage refused the write");
+        },
+        delete: (key: string) => state.storage.delete(key)
+      } as unknown as DurableObjectStorage;
+      const idle = namedDeadline({
+        storage: refusing,
+        scheduler: instance.wake.scheduler,
+        key: "idle-id",
+        callback: "mark"
+      });
+
+      await expect(
+        idle.set(new Date(Date.now() + 60_000), { at: "a" })
+      ).rejects.toThrow("storage refused the write");
+      expect(await instance.wake.scheduler.list()).toHaveLength(0);
+    });
+  });
+
+  it("reports both failures when the schedule cannot be cancelled either", async () => {
+    const stub = fresh(plain, "rollback-fails");
+    await runInDurableObject(stub, async (instance, state) => {
+      await instance.wake.start();
+      const scheduler = instance.wake.scheduler;
+      const idle = namedDeadline({
+        storage: {
+          get: (key: string) => state.storage.get(key),
+          put: async () => {
+            throw new Error("storage refused the write");
+          },
+          delete: (key: string) => state.storage.delete(key)
+        } as unknown as DurableObjectStorage,
+        scheduler: {
+          set: scheduler.set.bind(scheduler),
+          get: scheduler.get.bind(scheduler),
+          cancel: async () => {
+            throw new Error("cancel refused");
+          }
+        } as unknown as typeof scheduler,
+        key: "idle-id",
+        callback: "mark"
+      });
+
+      const failure = await idle
+        .set(new Date(Date.now() + 60_000), { at: "a" })
+        .catch((err: unknown) => err);
+      expect(failure).toBeInstanceOf(AggregateError);
+      expect(
+        (failure as AggregateError).errors.map((e) => (e as Error).message)
+      ).toEqual(["storage refused the write", "cancel refused"]);
+    });
+  });
+
   it("moves the physical alarm with it, later as well as earlier", async () => {
     const stub = fresh(plain, "later");
     await runInDurableObject(stub, async (instance, state) => {

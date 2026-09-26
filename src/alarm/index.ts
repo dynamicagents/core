@@ -325,7 +325,22 @@ export function namedDeadline<
         // caller has already moved.
         await cancel();
         const schedule = await scheduler.set(when, callback, payload);
-        await storage.put(key, schedule.id);
+        try {
+          await storage.put(key, schedule.id);
+        } catch (err) {
+          // The id is the only handle on the row, so a row whose id was not
+          // stored could never be cancelled: it goes with the failure, and a
+          // retry starts from no row rather than beside one.
+          try {
+            await scheduler.cancel(schedule.id);
+          } catch (rollback) {
+            throw new AggregateError(
+              [err, rollback],
+              `deadline "${key}": its schedule's id could not be stored, and the schedule could not be cancelled`
+            );
+          }
+          throw err;
+        }
         return schedule;
       });
     },

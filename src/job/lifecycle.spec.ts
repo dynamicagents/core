@@ -4,10 +4,10 @@ import { JobLifecycle } from "./lifecycle.js";
 import type { JobState } from "./state.js";
 
 /**
- * What these specs pin is the *choreography*, not the job. Every rule here
- * exists because its absence was a production failure in the predecessor, so
- * each one is asserted negatively — that the wrong thing is refused — rather
- * than merely that the right thing works.
+ * What these specs pin is the *choreography*, not the job. Each rule is
+ * asserted negatively — that the wrong thing is refused — rather than merely
+ * that the right thing works, because a guard that lets the right thing through
+ * passes that check whether or not it refuses anything.
  *
  * Driven through fakes rather than a real Durable Object because the rules are
  * about which keys are written in which order and which scheduling calls are
@@ -71,6 +71,13 @@ function fakeScheduler() {
 
 type Install = { command: string };
 
+/** The timings a job owner supplies; any will do where a spec is not about them. */
+const TIMINGS = {
+  staleMs: 5 * 60_000,
+  watchMs: 60_000,
+  armCooldownMs: 5 * 60_000
+};
+
 function lifecycle(id = "install", over: { watchMs?: number } = {}) {
   const storage = fakeStorage();
   const sched = fakeScheduler();
@@ -83,6 +90,7 @@ function lifecycle(id = "install", over: { watchMs?: number } = {}) {
       scheduler: sched.scheduler,
       run: "jobRun",
       watch: "jobWatch",
+      ...TIMINGS,
       ...over
     })
   };
@@ -236,9 +244,9 @@ describe("claim", () => {
   });
 
   it("applies the staleness bound itself rather than trusting the caller", () => {
-    // The previous signature took an "already-repaired" state and said so only
-    // in prose. Nothing enforced it, so a caller passing a raw read got a
-    // `running` record that could never be claimed and a job wedged forever.
+    // Raw and repaired states have identical types, so nothing could hold a
+    // caller to repairing first: a raw read would be a `running` record that
+    // could never be claimed, and a job wedged forever.
     const { job } = lifecycle();
     // In flight and inside its budget: a second run must wait.
     expect(job.claim(running(Date.now()), LIVE).ok).toBe(false);
@@ -315,7 +323,8 @@ describe("reserved ids", () => {
           storage,
           scheduler,
           run: "jobRun",
-          watch: "jobWatch"
+          watch: "jobWatch",
+          ...TIMINGS
         })
     ).toThrow(/non-empty/);
   });
@@ -330,7 +339,8 @@ describe("reserved ids", () => {
           storage,
           scheduler,
           run: "jobRun",
-          watch: "jobWatch"
+          watch: "jobWatch",
+          ...TIMINGS
         })
     ).not.toThrow();
   });
@@ -394,7 +404,8 @@ describe("the watchdog", () => {
     const scheduled = [...live.values()];
     expect(scheduled).toHaveLength(1);
     expect(scheduled[0]!.callback).toBe("jobWatch");
-    // Default watchMs is 60s; the deadline is what a dead drain is recovered by.
+    // The helper's watchMs is 60s; the deadline is what a dead drain is
+    // recovered by.
     expect(scheduled[0]!.when).toBeInstanceOf(Date);
     expect((scheduled[0]!.when as Date).getTime()).toBe(now + 60_000);
     // The id is held so the next re-arm can cancel this row.
