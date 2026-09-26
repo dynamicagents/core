@@ -100,8 +100,8 @@ describe("Artifacts — opening one", () => {
   it("is idempotent on a source key, which is what a retry needs", async () => {
     const artifacts = fresh("idempotent");
     const first = await artifacts.createArtifact(KIND, "task-1");
-    // The call a Workflow step makes again after a crash: no caller between
-    // turns remembers the token, so opening has to *find* rather than create.
+    // The call a replay makes again after a crash: no caller between turns
+    // remembers the token, so opening has to *find* rather than create.
     expect(await artifacts.createArtifact(KIND, "task-1")).toBe(first);
     expect(await artifacts.tokenFor(KIND, "task-1")).toBe(first);
   });

@@ -17,7 +17,8 @@ import type { AgentManifest } from "../a2a/card.js";
 import type { A2ASecretsEnv } from "../env.js";
 import type { AgentResolver, TaskAgent } from "../a2a/agent-stub.js";
 import type { AcceptedTurn } from "../a2a/executor.js";
-import type { TurnWake } from "../a2a/hitl.js";
+import type { HumanReply } from "../a2a/hitl.js";
+import { buildSubmittedTask } from "../a2a/notify.js";
 import type { PlainTask } from "../a2a/task.js";
 import { makeGatekeeperToken, TEST_TENANT } from "../testing/auth.js";
 import {
@@ -67,8 +68,7 @@ const resolveAgent: AgentResolver = () => {
 
 const tenantAgent = (name: string) => ({
   manifest: manifest(name),
-  resolveAgent,
-  startTurn: async () => {}
+  resolveAgent
 });
 
 /**
@@ -76,25 +76,25 @@ const tenantAgent = (name: string) => ({
  *
  * The namespace is over a class carrying the task lifecycle, because that is the
  * contract: `createA2AWorker` builds a `DurableTaskStore` over whatever
- * `resolveAgent` returns, so a Durable Object without these four methods is not
+ * `resolveAgent` returns, so a Durable Object without these methods is not
  * mountable — and the compiler is where that is caught. Nothing here is called;
  * these specs are about what is refused at construction.
  */
 declare class SpecAgent implements TaskAgent {
   __DURABLE_OBJECT_BRAND: never;
-  beginTask(input: {
-    messageId: string;
-    taskId: string;
-    contextId: string;
-  }): Promise<PlainTask>;
+  acceptTask(turn: AcceptedTurn): Promise<PlainTask>;
   getTask(taskId: string): Promise<PlainTask | null>;
   saveTask(task: Task): Promise<boolean>;
   cancelTask(taskId: string): Promise<PlainTask | null>;
+  answerTask(input: {
+    taskId: string;
+    messageId: string;
+    reply: HumanReply;
+  }): Promise<PlainTask | null>;
 }
 
 interface TestEnv extends A2ASecretsEnv {
   AGENT_DO: DurableObjectNamespace<SpecAgent>;
-  TURN_WORKFLOW: Workflow<AcceptedTurn>;
 }
 
 const worker = createA2AWorker({
@@ -299,8 +299,7 @@ describe("startup validation", () => {
           defineAgent({
             tenant: "twice",
             manifest: hostManifest,
-            agent: (env: TestEnv) => env.AGENT_DO,
-            workflow: (env: TestEnv) => env.TURN_WORKFLOW
+            agent: (env: TestEnv) => env.AGENT_DO
           })
         ]
       })
@@ -893,18 +892,10 @@ describe("protocol version negotiation", () => {
  */
 describe("a message on an existing task", () => {
   const parkedId = "t-parked";
-  const wake: TurnWake = { messageId: "m-original", eventType: "hitl-q1" };
 
   /** A tenant whose one Task is parked on a question, recording what reaches it. */
-  function parkedTenant(
-    options: {
-      resumable?: boolean;
-      /** `false` for a stub with no `answerTask`; `"throws"` for one that fails. */
-      recording?: false | "throws";
-    } = {}
-  ) {
+  function parkedTenant(options: { recording?: "throws" } = {}) {
     const answered: unknown[] = [];
-    const woken: TurnWake[] = [];
     // What the handler last wrote, so a read after its own write sees it — a
     // cancel reads the Task back to confirm it took.
     let stored: Task = testTask(
@@ -913,7 +904,7 @@ describe("a message on an existing task", () => {
       TaskState.TASK_STATE_INPUT_REQUIRED
     );
     const agent = {
-      async beginTask(): Promise<never> {
+      async acceptTask(): Promise<never> {
         throw new Error("a reply must never begin a task");
       },
       async getTask(taskId: string) {
@@ -926,25 +917,18 @@ describe("a message on an existing task", () => {
       async cancelTask() {
         return null;
       },
-      ...(options.recording === false
-        ? {}
-        : {
-            async answerTask(input: unknown) {
-              if (options.recording === "throws") {
-                throw new Error("Durable Object reset");
-              }
-              answered.push(input);
-              // Resumed, as the Durable Object resumes it: the handler loads the
-              // Task after this, and answers with what it finds.
-              stored = {
-                ...stored,
-                status: testStatus(TaskState.TASK_STATE_WORKING)
-              };
-              return { task: structuredClone(stored), wake };
-            }
-          }),
-      async humanWake() {
-        return wake;
+      async answerTask(input: unknown) {
+        if (options.recording === "throws") {
+          throw new Error("Durable Object reset");
+        }
+        answered.push(input);
+        // Resumed, as the Durable Object resumes it: the handler loads the
+        // Task after this, and answers with what it finds.
+        stored = {
+          ...stored,
+          status: testStatus(TaskState.TASK_STATE_WORKING)
+        };
+        return structuredClone(stored);
       }
     };
     const handler = createA2AWorker({
@@ -952,17 +936,7 @@ describe("a message on an existing task", () => {
       tenants: {
         [TEST_TENANT]: {
           manifest: manifest("worker-spec-parked"),
-          resolveAgent: () => agent as never,
-          startTurn: async () => {
-            throw new Error("a reply must never start a turn");
-          },
-          ...(options.resumable === false
-            ? {}
-            : {
-                resumeTurn: async (w: TurnWake) => {
-                  woken.push(w);
-                }
-              })
+          resolveAgent: () => agent as never
         }
       }
     });
@@ -974,7 +948,7 @@ describe("a message on an existing task", () => {
         }),
         env
       );
-    return { call, answered, woken, state: () => stored.status?.state };
+    return { call, answered, state: () => stored.status?.state };
   }
 
   /** A `SendMessage` onto the parked Task, carrying `parts`. */
@@ -1007,8 +981,8 @@ describe("a message on an existing task", () => {
     }
   ];
 
-  it("hands an answer to the waiting task and wakes its run", async () => {
-    const { call, answered, woken } = parkedTenant();
+  it("hands an answer to the waiting task", async () => {
+    const { call, answered } = parkedTenant();
 
     const res = await call(onto(answer));
     const body = await res.json<{
@@ -1026,11 +1000,10 @@ describe("a message on an existing task", () => {
         reply: expect.objectContaining({ kind: "answer", requestId: "q1" })
       })
     ]);
-    expect(woken).toEqual([wake]);
   });
 
   it("refuses an ordinary message on a task, and leaves the task waiting", async () => {
-    const { call, answered, woken } = parkedTenant();
+    const { call, answered } = parkedTenant();
 
     const res = await call(onto([{ text: "and one more thing" }]));
     const body = await res.json<{ error?: { message: string } }>();
@@ -1039,7 +1012,6 @@ describe("a message on an existing task", () => {
       /must answer the question the task asked/
     );
     expect(answered).toEqual([]);
-    expect(woken).toEqual([]);
   });
 
   it("refuses an over-long answer, and leaves the task waiting", async () => {
@@ -1048,7 +1020,7 @@ describe("a message on an existing task", () => {
     // after that leaves the question spent and the answer nowhere, and the only
     // repair is to ask again. As a JSON-RPC error it is a refusal of the
     // message, and the Task is still waiting for a shorter one.
-    const { call, answered, woken } = parkedTenant();
+    const { call, answered } = parkedTenant();
 
     const res = await call(
       onto([{ text: "x".repeat(MAX_MESSAGE_TEXT_BYTES + 1) }, answer[1]])
@@ -1057,13 +1029,12 @@ describe("a message on an existing task", () => {
 
     expect(body.error?.message).toMatch(/message text exceeds/);
     expect(answered).toEqual([]);
-    expect(woken).toEqual([]);
   });
 
   it("answers a reply it could not record with an internal error, and leaves the task waiting", async () => {
     // Recorded in the executor, this throw would be a failed Task: the Task the
     // person was answering, ended over a fault inside the agent.
-    const { call, woken, state } = parkedTenant({ recording: "throws" });
+    const { call, state } = parkedTenant({ recording: "throws" });
 
     const res = await call(onto(answer));
     const body = await res.json<{
@@ -1074,14 +1045,13 @@ describe("a message on an existing task", () => {
     expect(body.result).toBeUndefined();
     expect(body.error?.code).toBe(A2A_ERROR_CODE.INTERNAL_ERROR);
     expect(state()).toBe(TaskState.TASK_STATE_INPUT_REQUIRED);
-    expect(woken).toEqual([]);
   });
 
   it("refuses a reply in another context before recording it", async () => {
     // The handler refuses this too, but only after the Worker has recorded the
     // reply: without the Worker's own check, the run takes an answer the person
     // is shown a refusal for.
-    const { call, answered, woken, state } = parkedTenant();
+    const { call, answered, state } = parkedTenant();
 
     const res = await call(
       sendMessage({
@@ -1104,53 +1074,81 @@ describe("a message on an existing task", () => {
 
     expect(body.error?.message).toMatch(/is not the context of task/);
     expect(answered).toEqual([]);
-    expect(woken).toEqual([]);
     expect(state()).toBe(TaskState.TASK_STATE_INPUT_REQUIRED);
   });
+});
 
-  it("refuses a reply to an agent that cannot record one", async () => {
-    // Refused rather than acknowledged: an acknowledged reply is a question the
-    // gatekeeper closes, on an answer nothing kept.
-    const { call, woken, state } = parkedTenant({ recording: false });
-
-    const res = await call(onto(answer));
-    const body = await res.json<{
-      error?: { code: number; message: string };
-    }>();
-
-    expect(body.error?.message).toMatch(/cannot record an answer/);
-    expect(body.error?.code).not.toBe(A2A_ERROR_CODE.INTERNAL_ERROR);
-    expect(state()).toBe(TaskState.TASK_STATE_INPUT_REQUIRED);
-    expect(woken).toEqual([]);
-  });
-
-  it("refuses a message on a task when the agent's tasks never ask", async () => {
-    const { call, answered } = parkedTenant({ resumable: false });
-
-    const res = await call(onto(answer));
-    const body = await res.json<{ error?: { message: string } }>();
-
-    expect(body.error?.message).toMatch(
-      /takes no messages on an existing task/
-    );
-    expect(answered).toEqual([]);
-  });
-
-  it("wakes the run of a task canceled while it waited", async () => {
-    // The cancel reaches the Durable Object through the task store, where
-    // nothing can reach a Workflow. Without this the run sits on its question
-    // until the question expires.
-    const { call, woken } = parkedTenant();
-
-    const res = await call({
-      jsonrpc: "2.0",
-      id: 9,
-      method: "CancelTask",
-      params: { tenant: TEST_TENANT, id: parkedId }
+describe("delivery", () => {
+  it("leaves every callback to the agent: the handler posts none itself", async () => {
+    // Left to the SDK's default sender, the handler also posts the task it
+    // published — unsigned, and read at send time, so a turn fast enough to
+    // have finished is delivered twice.
+    const agent = {
+      async acceptTask(turn: AcceptedTurn) {
+        return buildSubmittedTask(turn.taskId, turn.contextId);
+      },
+      async getTask() {
+        return null;
+      },
+      async saveTask() {
+        return true;
+      },
+      async cancelTask() {
+        return null;
+      },
+      async answerTask() {
+        return null;
+      }
+    };
+    const handler = createA2AWorker({
+      manifest: hostManifest,
+      tenants: {
+        [TEST_TENANT]: {
+          manifest: manifest("worker-spec-delivery"),
+          resolveAgent: () => agent as never
+        }
+      }
     });
-    const body = await res.json<{ error?: { message: string } }>();
-
-    expect(body.error).toBeUndefined();
-    expect(woken).toEqual([wake]);
+    const before = globalThis.fetch;
+    const posted: string[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit
+    ) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.startsWith("https://gatekeeper.test/cb")) posted.push(url);
+      return before(input, init);
+    }) as typeof fetch;
+    try {
+      const res = await handler(
+        post(
+          sendMessage({
+            message: {
+              messageId: "m-push",
+              role: "ROLE_USER",
+              parts: [{ text: "hi" }]
+            },
+            configuration: {
+              taskPushNotificationConfig: {
+                url: "https://gatekeeper.test/cb",
+                token: "gk-token"
+              }
+            }
+          }),
+          {
+            authorization: `Bearer ${await makeGatekeeperToken()}`,
+            "A2A-Version": A2A_PROTOCOL_VERSION
+          }
+        ),
+        env
+      );
+      const body = await res.json<{ error?: unknown }>();
+      expect(body.error).toBeUndefined();
+      // The SDK's own post is fire-and-forget, so give it the chance to happen.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(posted).toEqual([]);
+    } finally {
+      globalThis.fetch = before;
+    }
   });
 });

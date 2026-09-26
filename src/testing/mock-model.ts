@@ -1,258 +1,264 @@
 import { MockLanguageModelV3 } from "ai/test";
-// From `ai`, not `@ai-sdk/provider`. `ai` re-exports the class and is a declared
-// peer; reaching for the provider package directly makes this module — which is
-// on the published `/testing` subpath every consumer loads — depend on a package
-// core does not declare and only resolves today by hoisting.
-import { APICallError } from "ai";
+// From `ai`, not `@ai-sdk/provider`: `ai` is a declared peer, and reaching for
+// the provider package directly would make this published subpath depend on a
+// package core does not declare.
+import { simulateReadableStream } from "ai";
 
 /**
- * The provider-level prompt, derived from the mock's own `doGenerate` rather
- * than imported.
+ * Test doubles for the LLM, so a Think turn runs its real loop — tool
+ * execution, multi-step, recovery — against a scripted model with no network
+ * and no `AI` binding.
  *
- * `LanguageModelV3Prompt` lives in `@ai-sdk/provider`, which this module must not
- * import for the reason above — so the type is read off the one declaration that
- * is already here. It also cannot go stale: it is by construction whatever the
- * installed SDK hands `doGenerate`.
- */
-type ModelPrompt = Parameters<MockLanguageModelV3["doGenerate"]>[0]["prompt"];
-
-/**
- * Test doubles for the LLM. Lets the tool-loop / executor specs run the real
- * `generateText` machinery (tool execution, multi-step, fallback) against a
- * scripted model with no network or `AI` binding.
+ * **`doStream`, not only `doGenerate`.** Think calls `streamText`; a model with
+ * only `doGenerate` is never asked anything and the turn fails on a missing
+ * implementation. `doGenerate` is kept for `generateText` callers such as
+ * compaction.
  */
 
-/** Zeroed usage block satisfying the LanguageModelV3 result shape. */
+/** The provider-level prompt, read off the mock rather than imported. */
+export type ModelPrompt = Parameters<
+  MockLanguageModelV3["doStream"]
+>[0]["prompt"];
+type StreamResult = Awaited<ReturnType<MockLanguageModelV3["doStream"]>>;
+type StreamPart =
+  StreamResult["stream"] extends ReadableStream<infer P> ? P : never;
+
+/** Zeroed usage, satisfying the result shape without pretending to measure. */
 const USAGE = {
   inputTokens: { total: 0, noCache: 0, cacheRead: 0, cacheWrite: 0 },
   outputTokens: { total: 0, text: 0, reasoning: 0 }
 };
 
+/** One model step. */
 export interface MockStep {
-  /**
-   * Assistant text for this step. On its own → finishReason "stop", which for the
-   * main-agent round is a *failed* attempt: prose is not an ending there, so use
-   * {@link finalReply} to script an answer. Alongside `toolCall` → the
-   * intermediate content emitted before a tool call.
-   */
+  /** Assistant text. Alongside tool calls, it is what the model says first. */
   text?: string;
-  /** Emit a tool call (finishReason "tool-calls"); may accompany `text`. */
-  toolCall?: { toolName: string; input?: unknown };
-  /**
-   * Emit several tool calls in **one** step, which a real model does whenever it
-   * decides two things at once. That is the only way to script the cases the round
-   * has to arbitrate: two different endings in one step (precedence decides), or
-   * the same ending twice (the tool's own `parse` decides).
-   */
-  toolCalls?: { toolName: string; input?: unknown }[];
-  /**
-   * Finish this step on `length` — the provider cut the response off at
-   * `maxOutputTokens` rather than because the model was done.
-   *
-   * Scriptable because the round treats truncation as its own diagnosis, and
-   * whether a step *ended* or was *cut off* is invisible from its content. Note
-   * that a truncated step carrying no tool call never reaches that branch: the
-   * SDK enforces `toolChoice` first and throws.
-   */
-  truncated?: boolean;
+  /** Tool calls in this step (finish reason `tool-calls`). */
+  calls?: { toolName: string; input?: unknown }[];
+  /** Fail the step with a stream error instead — the failed-turn path. */
+  error?: string;
 }
 
-/**
- * A step where the main agent answers the user — the `final_reply` control call.
- *
- * Scripting a bare `{ text }` instead reproduces the bug this tool exists to catch
- * (a model narrating rather than acting) and fails the attempt, which is what the
- * error-path specs use it for.
- */
-export function finalReply(
-  text: string,
-  opts: { text?: string } = {}
+/** A step that answers. */
+export function reply(text: string): MockStep {
+  return { text };
+}
+
+/** A step that calls one tool, optionally saying something first. */
+export function call(
+  toolName: string,
+  input: unknown = {},
+  text?: string
 ): MockStep {
   return {
-    ...(opts.text !== undefined ? { text: opts.text } : {}),
-    toolCall: { toolName: "final_reply", input: { text } }
+    ...(text !== undefined ? { text } : {}),
+    calls: [{ toolName, input }]
   };
 }
 
-function stepResult(step: MockStep) {
-  const content: Array<
-    | { type: "text"; text: string }
-    | { type: "tool-call"; toolCallId: string; toolName: string; input: string }
-  > = [];
-  // Keep the empty-string text part so a `{ text: "" }` step still yields "".
-  if (step.text !== undefined) content.push({ type: "text", text: step.text });
-  const calls = [
-    ...(step.toolCall ? [step.toolCall] : []),
-    ...(step.toolCalls ?? [])
-  ];
-  for (const call of calls) {
-    content.push({
-      type: "tool-call",
-      toolCallId: crypto.randomUUID(),
-      toolName: call.toolName,
-      input: JSON.stringify(call.input ?? {})
-    });
-  }
-  const unified = step.truncated
-    ? ("length" as const)
-    : calls.length > 0
-      ? ("tool-calls" as const)
-      : ("stop" as const);
-  return {
-    content,
-    finishReason: { unified, raw: undefined },
-    usage: USAGE,
-    warnings: []
-  };
+/** A step that asks the person something, through core's `ask_user`. */
+export function askUser(question: string, options?: string[]): MockStep {
+  return call("ask_user", { question, ...(options ? { options } : {}) });
+}
+
+/** What a scripted rule is shown of the call it answers. */
+export interface ModelTurnView {
+  /** The last user message's text — what the turn is about. */
+  lastUserText: string;
+  /** Whether a tool has answered since that message. */
+  answered: boolean;
+  prompt: ModelPrompt;
 }
 
 /**
- * A mock model that returns each step in sequence — one per `generateText` call.
- * Uses the function form (with our own counter) rather than the array form, whose
- * call-count indexing is off by one in this SDK version. Extra calls repeat the
- * last step.
+ * A model that answers each call from a rule over what it was asked, rather
+ * than from a queue.
+ *
+ * A queue is the wrong shape once a task spans turns: a follow-up turn, a
+ * recovered one and a sub-agent's run all consume steps, and which call comes
+ * next depends on scheduling the spec does not control. A rule keyed on the
+ * last user message answers the same thing however the calls interleave. Emit a
+ * tool call when `!answered` and plain text after, and the turn converges.
  */
-export function mockModel(...steps: MockStep[]): MockLanguageModelV3 {
-  let i = 0;
+export function scriptedModel(
+  rule: (view: ModelTurnView) => MockStep
+): MockLanguageModelV3 {
+  let n = 0;
+  const step = (prompt: ModelPrompt) =>
+    rule({
+      lastUserText: lastUserText(prompt),
+      answered: hasToolResult(prompt),
+      prompt
+    });
   return new MockLanguageModelV3({
-    doGenerate: async () => stepResult(steps[Math.min(i++, steps.length - 1)])
+    doStream: async ({ prompt }) => streamOf(step(prompt), n++),
+    doGenerate: async ({ prompt }) => generateOf(step(prompt), n++)
   });
 }
 
 /**
- * A model whose every call throws, and a count of how many times it was asked.
- *
- * The count is the point. Several of the attempt ladder's rules are about a call
- * that must *not* happen — a fallback slot left unspent, a repair not attempted
- * — and those are invisible to an assertion on the returned outcome alone, which
- * can be right for the wrong reason.
+ * A model that returns each step in sequence, one per call; extra calls repeat
+ * the last step.
  */
+export function mockModel(...steps: MockStep[]): MockLanguageModelV3 {
+  let i = 0;
+  const next = () => steps[Math.min(i++, steps.length - 1)] ?? {};
+  return new MockLanguageModelV3({
+    doStream: async () => streamOf(next(), i),
+    doGenerate: async () => generateOf(next(), i)
+  });
+}
+
+/** A model whose every call throws, and a count of how often it was asked. */
 export function throwingModel(error: unknown): {
   model: MockLanguageModelV3;
   calls: () => number;
 } {
   let calls = 0;
+  const fail = async (): Promise<never> => {
+    calls += 1;
+    throw error;
+  };
   return {
-    model: new MockLanguageModelV3({
-      doGenerate: async () => {
-        calls += 1;
-        throw error;
-      }
-    }),
+    model: new MockLanguageModelV3({ doStream: fail, doGenerate: fail }),
     calls: () => calls
   };
 }
 
-/** {@link mockModel}, plus the same call count {@link throwingModel} reports. */
-export function countingModel(...steps: MockStep[]): {
-  model: MockLanguageModelV3;
-  calls: () => number;
-} {
-  let calls = 0;
-  let i = 0;
-  return {
-    model: new MockLanguageModelV3({
-      doGenerate: async () => {
-        calls += 1;
-        return stepResult(steps[Math.min(i++, steps.length - 1)]);
-      }
-    }),
-    calls: () => calls
-  };
-}
-
-/** What one call was asked with: the tools it was offered and what it was told. */
+/** What one call was asked with: the tools offered and the system prompt. */
 export interface ModelCall {
   tools: string[];
   system: string;
-  /**
-   * Everything below the system prompt — the conversation the round assembled.
-   *
-   * The one thing about a round that is invisible from both its outcome and its
-   * tools: whether it was handed the *evidence* its predecessors produced, or
-   * only their conclusions. A round that carries no work-tool exchanges and one
-   * that carries all of them run the same script and return the same answer, and
-   * the difference between them is thirteen rounds of an incident.
-   *
-   * The provider prompt shape, not `ModelMessage` — this is what actually reached
-   * the model, which is the level a spec about replay wants to assert at.
-   */
   messages: ModelPrompt;
 }
 
-/**
- * {@link mockModel}, plus what each call was actually asked with.
- *
- * Both halves are decisions the *round* makes and the model merely reacts to, so
- * both are invisible to any assertion on the outcome: a round that withheld its
- * work tools and one that left them on end in whatever the script says, and a
- * round handed the wrong note still answers. Yet each is the entire content of a
- * rule — that a round which has to answer is handed nothing but the answer, that
- * neither is an attempt down to its last step, and that a forced round is told
- * the true reason it was forced rather than a plausible one.
- *
- * One entry per call, so a spec can tell the primary's view from the fallback's.
- */
+/** {@link mockModel}, plus what each call was actually asked with. */
 export function inspectingModel(...steps: MockStep[]): {
   model: MockLanguageModelV3;
   asked: () => ModelCall[];
 } {
   const asked: ModelCall[] = [];
   let i = 0;
+  const record = (options: {
+    prompt: ModelPrompt;
+    tools?: { name: string }[];
+  }) => {
+    asked.push({
+      tools: (options.tools ?? []).map((t) => t.name),
+      system: options.prompt
+        .filter((m) => m.role === "system")
+        .map((m) => m.content)
+        .join("\n"),
+      messages: options.prompt.filter((m) => m.role !== "system")
+    });
+    return steps[Math.min(i++, steps.length - 1)] ?? {};
+  };
   return {
     model: new MockLanguageModelV3({
-      doGenerate: async (options) => {
-        asked.push({
-          tools: (options.tools ?? []).map((t) => t.name),
-          system: options.prompt
-            .filter((m) => m.role === "system")
-            .map((m) => m.content)
-            .join("\n"),
-          messages: options.prompt.filter((m) => m.role !== "system")
-        });
-        return stepResult(steps[Math.min(i++, steps.length - 1)]);
-      }
+      doStream: async (options) => streamOf(record(options), i),
+      doGenerate: async (options) => generateOf(record(options), i)
     }),
     asked: () => asked
   };
 }
 
-/**
- * A model that fails the first `failures` calls with a retryable `APICallError`,
- * then behaves like {@link mockModel}.
- *
- * Exists for the one behaviour a scripted-outcome assertion cannot see: whether
- * a rate limit was *waited out on the same model* or fell straight through to
- * the fallback. Only the call count distinguishes them — both produce a
- * successful round.
- *
- * `retry-after: 0` is deliberate. The AI SDK honours the header and its own
- * backoff opens at two seconds, which would spend real seconds asserting
- * something that has nothing to do with duration. Zero exercises the identical
- * path — header parsed, preferred over the exponential delay, waited — for free.
- */
-export function rateLimitedModel(
-  failures: number,
-  ...steps: MockStep[]
-): { model: MockLanguageModelV3; calls: () => number } {
-  let calls = 0;
-  let i = 0;
+// --- encoding ----------------------------------------------------------------
+
+function streamOf(step: MockStep, n: number): StreamResult {
   return {
-    model: new MockLanguageModelV3({
-      doGenerate: async () => {
-        calls += 1;
-        if (calls <= failures) {
-          throw new APICallError({
-            message: "429 Wholesale Rate limited",
-            url: "mock:chat:test",
-            requestBodyValues: {},
-            statusCode: 429,
-            responseHeaders: { "retry-after": "0" }
-          });
-        }
-        return stepResult(steps[Math.min(i++, steps.length - 1)]);
-      }
-    }),
-    calls: () => calls
+    stream: simulateReadableStream<StreamPart>({
+      chunks: chunksOf(step, n),
+      initialDelayInMs: 0,
+      chunkDelayInMs: 0
+    })
   };
+}
+
+function chunksOf(step: MockStep, n: number): StreamPart[] {
+  const chunks: StreamPart[] = [{ type: "stream-start", warnings: [] }];
+  if (step.error !== undefined) {
+    chunks.push({ type: "error", error: new Error(step.error) });
+    chunks.push({
+      type: "finish",
+      usage: USAGE,
+      finishReason: { unified: "error", raw: undefined }
+    });
+    return chunks;
+  }
+  if (step.text) {
+    const id = `t${n}`;
+    chunks.push({ type: "text-start", id });
+    chunks.push({ type: "text-delta", id, delta: step.text });
+    chunks.push({ type: "text-end", id });
+  }
+  const calls = step.calls ?? [];
+  calls.forEach((c, index) => {
+    const id = `c${n}-${index}-${crypto.randomUUID().slice(0, 8)}`;
+    const input = JSON.stringify(c.input ?? {});
+    chunks.push({ type: "tool-input-start", id, toolName: c.toolName });
+    chunks.push({ type: "tool-input-delta", id, delta: input });
+    chunks.push({ type: "tool-input-end", id });
+    chunks.push({
+      type: "tool-call",
+      toolCallId: id,
+      toolName: c.toolName,
+      input
+    });
+  });
+  chunks.push({
+    type: "finish",
+    usage: USAGE,
+    finishReason: {
+      unified: calls.length > 0 ? "tool-calls" : "stop",
+      raw: undefined
+    }
+  });
+  return chunks;
+}
+
+type GenerateResult = Awaited<ReturnType<MockLanguageModelV3["doGenerate"]>>;
+
+function generateOf(step: MockStep, n: number): GenerateResult {
+  if (step.error !== undefined) throw new Error(step.error);
+  const content: GenerateResult["content"] = [];
+  if (step.text !== undefined) content.push({ type: "text", text: step.text });
+  (step.calls ?? []).forEach((c, index) =>
+    content.push({
+      type: "tool-call",
+      toolCallId: `g${n}-${index}`,
+      toolName: c.toolName,
+      input: JSON.stringify(c.input ?? {})
+    })
+  );
+  return {
+    content,
+    finishReason: {
+      unified: step.calls?.length ? "tool-calls" : "stop",
+      raw: undefined
+    },
+    usage: USAGE,
+    warnings: []
+  };
+}
+
+function lastUserText(prompt: ModelPrompt): string {
+  for (let i = prompt.length - 1; i >= 0; i--) {
+    const message = prompt[i];
+    if (message.role !== "user") continue;
+    return message.content
+      .filter((part) => part.type === "text")
+      .map((part) => (part as { text: string }).text)
+      .join("")
+      .trim();
+  }
+  return "";
+}
+
+function hasToolResult(prompt: ModelPrompt): boolean {
+  for (let i = prompt.length - 1; i >= 0; i--) {
+    const role = prompt[i].role;
+    if (role === "user") return false;
+    if (role === "tool") return true;
+  }
+  return false;
 }

@@ -70,8 +70,7 @@ export interface RecordedNote {
 
 export class Artifacts extends DurableObject {
   /**
-   * Test-only clock injection (a field, so never on the RPC stub, the
-   * convention `DynamicAgent.modelsOverride` sets). Retention is the one
+   * Test-only clock injection (a field, so never on the RPC stub). Retention is the one
    * behaviour here that cannot be reached in a test any other way: a month is
    * not a thing a spec can wait for, and backdating a row would assert against
    * SQL rather than against the sweep.
@@ -107,7 +106,7 @@ export class Artifacts extends DurableObject {
    *
    * `sourceKey` makes the call **idempotent**: the same kind and key return the
    * token already minted for them. That is what lets a caller with no memory of
-   * its own — a Workflow step, a fresh isolate, a retry — find the artifact it
+   * its own — a replay, a fresh isolate, a retry — find the artifact it
    * opened earlier instead of starting a second one. Without a key every call
    * opens a new artifact.
    */

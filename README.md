@@ -2,10 +2,12 @@
 
 **The mandatory foundation for a Dynamic Agent on Cloudflare Workers.**
 
-Zero-trust A2A (signed AgentCard, gatekeeper-JWT verification, no shared secrets), the
-durable task lifecycle, the delegation and subagent runtime, and the test harness.
+Zero-trust A2A (signed AgentCard, gatekeeper-JWT verification, no shared secrets), and
+the durable A2A task lifecycle on [`@cloudflare/think`](https://www.npmjs.com/package/@cloudflare/think):
+accept, ask, cancel, delegate, deliver — and a task that outlives the turn that started it.
 
-You bring the loop and the prompts. Core brings everything you cannot choose not to have.
+Think runs the turn. You bring the model and the prompts. Core brings everything you
+cannot choose not to have.
 
 ```bash
 npm install @dynamicagents/core
@@ -22,7 +24,7 @@ npm install @dynamicagents/core
 
 An agent that talks to other agents has to answer one question before anything else:
 _is the caller who they claim to be, and can they prove it without a shared secret?_
-That answer — and the durable machinery for accepting a turn, decomposing it, and
+That answer — and the durable machinery for accepting a turn, running it, and
 delivering a result out of band — is identical for every agent. It is also the part
 that is easy to get subtly and silently wrong.
 
@@ -55,7 +57,7 @@ key and serves it at the card's `jku`.
 ### 2. Put the A2A edge in front of your Durable Object
 
 ```ts
-import { createA2AWorker } from "@dynamicagents/core/worker";
+import { createA2AWorker, defineAgent } from "@dynamicagents/core/worker";
 
 const manifest = {
   name: "my-agent",
@@ -67,25 +69,18 @@ const manifest = {
   skills: []
 };
 
+// One Durable Object per verified caller, keyed by the gatekeeper identity —
+// which is what makes a task unreachable from any other caller by construction.
+const myAgent = defineAgent({
+  tenant: "my-agent",
+  manifest,
+  agent: (env: Env) => env.MyAgent
+});
+
 export default {
-  fetch: createA2AWorker({
-    // The stub card at /.well-known/agent-card.json. It describes the origin,
-    // not an agent — see below.
-    manifest: hostManifest,
-    tenants: {
-      "my-agent": {
-        manifest,
-        // One DO instance per verified caller — this is what makes a task
-        // unreachable from any other caller by construction.
-        resolveAgent: (identity) =>
-          env.MY_AGENT.get(env.MY_AGENT.idFromName(identity.key!)),
-        // Must be idempotent: the gatekeeper retries dispatch.
-        startTurn: async (turn) => {
-          await env.TURN_WORKFLOW.create({ id: turn.messageId, params: turn });
-        }
-      }
-    }
-  })
+  // The stub card at /.well-known/agent-card.json describes the origin, not an
+  // agent — see below.
+  fetch: createA2AWorker<Env>({ manifest: hostManifest, agents: [myAgent] })
 } satisfies ExportedHandler<Env>;
 ```
 
@@ -148,142 +143,103 @@ wildcard.
 > interoperate across this change in either direction, so they deploy together and
 > registered agents are re-registered.
 
-### 3. Write your Durable Object
+### 3. Write your agent
 
-`DynamicAgent` is the DO body every agent has: the runtime and database built once
-per instance, one continuous Session per verified caller, the gatekeeper callback
-channel, and the task lifecycle a Workflow drives. Three seams are yours.
+`A2AAgent` is a Think agent with the A2A task lifecycle on it. `SendMessage` becomes a
+durable Think submission; the turn's outcome becomes the task's state; the result is
+posted to the gatekeeper from a durable outbox. What is yours is what Think asks of any
+agent — plus the words core will not write.
 
 ```ts
-import { DynamicAgent, type PluginHost } from "@dynamicagents/core/host";
+import { A2AAgent } from "@dynamicagents/core/agent";
+import { gatewayLogFields, workersAIModel } from "@dynamicagents/core/model";
 
-export class MyAgent extends DynamicAgent<Env> {
-  protected agentConfig() {
-    return {
-      model: {
-        chatModelId: "@cf/zai-org/glm-5.2",
-        fallbackChatModelId: "@cf/meta/llama-4-scout-17b-16e-instruct"
-      }
-    };
+export class MyAgent extends A2AAgent<Env> {
+  protected readonly copy = {
+    failed: "Something went wrong on my side.",
+    emptyReply: "I finished, but had nothing to say.",
+    questionExpired: "Nobody answered in time, so I stopped."
+  };
+  protected readonly compactAfterTokens = 100_000;
+  protected readonly keepRecentTokens = 20_000;
+
+  getModel() {
+    return workersAIModel(this.env, {
+      modelId: "@cf/zai-org/glm-5.2",
+      sessionAffinity: this.name,
+      ...gatewayLogFields({ agent: "my-agent", taskId: this.turnTaskId() })
+    });
   }
-  protected agentPlugins(host: PluginHost<Env>) {
-    return [scraper({ apiKey: host.env.SCRAPER_API_KEY })];
+
+  configureContext() {
+    return [soulBlock, ...super.configureContext()];
   }
-  protected agentSoul(capabilities: string) {
-    return soulPrompt(capabilities);
+
+  getPlugins() {
+    return [scraper({ apiKey: this.env.SCRAPER_API_KEY })];
   }
 }
 ```
 
-Everything that would otherwise be a module-level constant is resolved from those,
-once per instance. Resolving a registry at _import_ time is the one thing this
-package exists to prevent: it freezes the registry before `env` exists (which on
-Workers is always), defeats tree-shaking, and makes runtime plugin selection
-impossible.
+A turn ends the way every Think turn does: when the model stops calling tools. Its
+last words answer the task. On top of that, core gives the model `ask_user` — the task
+parks as `input-required`, and the person's answer is the next turn — and
+`search_history` over the conversation's own full-text index. `check_back` is opt-in:
+`check_back: this.checkBackTool()` in `getTools()` lets the model put a task down and
+pick it up later, as a scheduled wake rather than a wait inside the turn.
 
-`Env` here is your generated one, and `DynamicAgent` constrains it to `CoreEnv` —
-`AI`, the two A2A secrets, and the `ARTIFACTS` namespace from step 5. Wire that
-binding before this typechecks.
-
-`createAgentRuntime` and `AgentDB` are still exported and still work on a bare
-`Agent<Env>` — but everything the base class does is lifecycle with an ordering
-that is load-bearing and invisible (migrations awaited before the first RPC, the
-guarded terminal write, the cancellation verdict that must be read and not
-probed for), and hand-rolling it is how two agents in one repo drift apart.
+`Env` here is your generated one, and `A2AAgent` constrains it to `CoreEnv` — `AI`,
+the two A2A secrets, and the `ARTIFACTS` namespace from step 5.
 
 ### 4. Delegate, if your agent delegates
 
-`@dynamicagents/core/round` adds the other half: durable Subtasks, concurrent
-execution, isolated subagents, and the round loop over them.
+A sub-agent is a Think agent of its own — a `SubAgent` — dispatched through Think's
+agent tools. Describe it as a `SubAgentSpec`, bind the spec to a class, and list the
+class in `getSubAgents()`; core offers the model one tool per sub-agent.
 
 ```ts
-import { RoundAgentBase, type RoundPolicy } from "@dynamicagents/core/round";
+import type { SubAgentSpec } from "@dynamicagents/core";
+import { SubAgent } from "@dynamicagents/core/subagent";
 
-export class MyAgent extends RoundAgentBase<Env> {
-  // …the three seams above, plus:
-  protected roundPolicy(): RoundPolicy {
-    return policy;
-  }
-  protected subagentClass() {
-    return MySubagent;
+const RESEARCH: SubAgentSpec<{ task: string }> = {
+  name: "research",
+  description: "Look something up and report back.",
+  inputSchema: z.object({ task: z.string() }),
+  soul: "You research one question thoroughly.",
+  formatInput: ({ task }) => task
+};
+
+export class Researcher extends SubAgent<Env> {
+  static override spec = RESEARCH;
+  getModel() {
+    return workersAIModel(this.env, { modelId: "@cf/zai-org/glm-5.2" });
   }
 }
 ```
 
-#### The round policy
+**Awaited or detached, nothing in between.** A Think turn lives inside one invocation
+and is cut after at most fifteen minutes, and an awaited run in flight at the cut is
+lost. So a sub-agent that may run longer declares `detached: true`: the call returns at
+once, the task stays `working` while the run is open, and the run's result arrives as a
+follow-up turn that answers the task. Every other sub-agent is awaited and finishes
+inside the turn. A task settles on the turn that ends with no open work — no detached
+run, no pending `check_back`.
 
-Core ships the machine and none of the words. `RoundPolicy` is every string the
-loop emits — the round contract the model is held to, the note appended when the
-loop forces a round to answer, and the three user-facing messages. Nothing has a
-default: a lent-out round contract is exactly the house prompt copy this package
-refuses to have.
-
-The loop forces an answer for more than one reason, so `finalRoundNote` is handed
-the one that applies:
-
-```ts
-finalRoundNote: (limits, reason) =>
-  reason === "unresponsive-tools"
-    ? "\n\n# Your tools are not answering\n…"
-    : reason === "no-progress"
-      ? "\n\n# This keeps coming back the same way\n…"
-      : `\n\n# Your budget is spent\n…${limits.maxTurns} turns…`;
-```
-
-`budget` is the Task's turns or wall clock running out. `no-progress` is several
-rounds in a row whose every subtask failed with the identical message: the budget
-is intact, and a round told otherwise passes that on to the user as the
-explanation for what went wrong. `unresponsive-tools` is a round whose tool calls
-kept running past their time limit: whatever they reach has stopped answering,
-so the round is made to answer from the next step rather than spend the limit on
-each call after it. An implementation that ignores the argument still satisfies
-the interface and gets one note for all of them — accurate about the constraint,
-wrong about the cause.
-
-#### What a round remembers
-
-A round is one `generateText` call, so the work tools it uses and the results
-they return live inside it. What reaches the Session is the round's _ending_ —
-the acknowledgment the user read. Left there, every round inherits its
-predecessors' claims and none of their evidence, and a loop that cannot see what
-it already tried repeats it: one deployed task delegated thirteen times over
-twelve minutes and re-made the same rejected clone URL in every round, because
-the rejection was a tool result and tool results did not survive a round.
-
-So a delegating round's work-tool exchanges are persisted alongside its Subtask
-rows and restored for the rounds after it, as the call-and-result pairs they
-actually were — the same reconstruction the `delegate` call itself already gets.
-`roundObservationWindow` is how many earlier rounds a round can still see, and
-the carried rounds are elided against one another, so a tool called three times
-costs roughly one result rather than three:
-
-```ts
-resolveConfig({
-  model: MODELS,
-  // Two is enough for the case this exists for: the wall a round just hit is the
-  // wall it is about to hit again. Zero opts out entirely.
-  roundObservationWindow: 2,
-  toolOutputWindow: 4
-});
-```
-
-The rows are core's third table, they are never written into the Session — history
-stays text-only — and they age out on the same 30-day clock as the rest of a
-Task's state.
+`prepare` and `settle` bracket each run on the parent: acquire what the run needs and
+no model can supply, and release it once, on every terminal.
 
 ### 5. Wire the artifacts binding — it is required
 
-A delegating round narrates itself: every time a subagent has something to say, a
-labelled note lands in the thread the person is reading, in the same voice as the
-answer they are waiting for. A long run produces dozens. The notes are worth
-keeping — they are the only account of what the run actually did — and a thread is
-the wrong place to keep them.
+A sub-agent narrates itself: whatever it says before a tool call is a note for the
+person following the task. A long run produces dozens. The notes are worth keeping —
+they are the only account of what the run actually did — and a thread is the wrong
+place to keep them.
 
 `@dynamicagents/core/artifacts` is where they go instead. A note is posted as a link
 and nothing else until one such post **reaches** the thread; every note after that is
 recorded and not posted at all, and the link streams live and then ends with the
-state the task settled in. Main-agent progress is untouched: a round's acknowledgment
-and its step text are the conversation, not an account of one.
+state the task settled in. The agent's own progress is untouched: its step text is the
+conversation, not an account of one.
 
 **Every agent binds `ARTIFACTS`**, and the wiring is a binding, a migration, an
 export and the route delegation below. A Durable Object that starts without the
@@ -309,7 +265,7 @@ export default {
 };
 ```
 
-There is no unwired mode. The notes of a delegating round go on a transcript on
+There is no unwired mode. A sub-agent's notes go on a transcript on
 every path core owns, so "no binding" is not a second behaviour an agent can want —
 it is a thread full of the notes the link exists to replace, arrived at by
 forgetting a line. Requiring it makes the store a structural assumption core can
@@ -321,8 +277,8 @@ Two things still put the note in the thread instead of a link, and both are fact
 about that note rather than about the wiring: this deployment has not learned its
 own origin yet (it arrives with the first turn), or retention has already swept the
 artifact. An ingest that **fails** is neither, and does not fall back to posting the
-note: it throws, the durable step retries, and the artifact's dedupe on the
-notification key records the note once however many times the step runs.
+note: every note is persisted by the run that wrote it and replayed when the run
+finishes, and the artifact's dedupe on the note's key records it once.
 
 Posting is best-effort — `PushChannel.working` swallows a network failure and a
 non-2xx, because a turn that cannot report its progress is still a turn that should
@@ -343,24 +299,21 @@ of a Task's state, swept lazily on the next write rather than by an alarm apiece
 
 ## Exports
 
-No root barrel. Each area is its own subpath, so importing the delegation layer does
-not drag in the A2A adapter, and the test harness cannot reach a production bundle.
+Each area is its own subpath, so importing the contract does not drag in Think, and the
+test harness cannot reach a production bundle.
 
-| Subpath                            | What's in it                                                                 |
-| ---------------------------------- | ---------------------------------------------------------------------------- |
-| `@dynamicagents/core`              | `createAgentRuntime`, the plugin contract, config shapes, platform facts     |
-| `@dynamicagents/core/a2a`          | card signing, JWKS, gatekeeper-JWT verify, push notify, task store, executor |
-| `@dynamicagents/core/worker`       | `createA2AWorker()` — the whole zero-trust edge                              |
-| `@dynamicagents/core/agent`        | session, history, models + Workers AI, inference, budget, control tools      |
-| `@dynamicagents/core/host`         | `DynamicAgent` — the Durable Object body — and `PluginHost`                  |
-| `@dynamicagents/core/round`        | the delegating round loop: `RoundAgentBase`, `runHandleTask`, `runTurn`      |
-| `@dynamicagents/core/subtasks`     | delegation types, decomposition, the `delegate` tool                         |
-| `@dynamicagents/core/subagent`     | `RecipeSubagentBase`, resumable runs, fingerprinting, workspace              |
-| `@dynamicagents/core/artifacts`    | the `Artifacts` object, its routes and viewer, the transcript emission       |
-| `@dynamicagents/core/db`           | `AgentDB`, core's schema and migrations                                      |
-| `@dynamicagents/core/testing`      | VCR, `FakeSession`, `mockModel`, DO helpers, JWK fixtures — _workerd realm_  |
-| `@dynamicagents/core/testing/node` | the VCR recorder + cassette store — _Node realm, never import from a spec_   |
-| `@dynamicagents/core/eslint`       | the `no-deprecated-object-properties` rule                                   |
+| Subpath                            | What's in it                                                                                   |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `@dynamicagents/core`              | the plugin contract (`definePlugin`, `restrictTools`, `SubAgentSpec`), env slices, `withAbort` |
+| `@dynamicagents/core/agent`        | `A2AAgent`, core's tools (`ask_user`, `check_back`, `search_history`)                          |
+| `@dynamicagents/core/subagent`     | `SubAgent`, the child an `A2AAgent` dispatches                                                 |
+| `@dynamicagents/core/model`        | `workersAIModel`, `gatewayLogFields`                                                           |
+| `@dynamicagents/core/a2a`          | card signing, JWKS, gatekeeper-JWT verify, push notify, task store, executor                   |
+| `@dynamicagents/core/worker`       | `createA2AWorker()`, `defineAgent()` — the whole zero-trust edge                               |
+| `@dynamicagents/core/artifacts`    | the `Artifacts` object, its routes and viewer, the transcript emission                         |
+| `@dynamicagents/core/testing`      | VCR, scripted models, the A2A harness, DO helpers, fixtures — _workerd realm_                  |
+| `@dynamicagents/core/testing/node` | the VCR recorder + cassette store — _Node realm, never import from a spec_                     |
+| `@dynamicagents/core/eslint`       | the `no-deprecated-object-properties` rule                                                     |
 
 `/testing*` and `/eslint` are structurally incapable of entering a runtime graph, and
 `npm run verify:exports` asserts exactly that before every publish.
@@ -402,128 +355,75 @@ short-lived token for that: `iss` is
 this deployment's origin, `jku` is derived from it, and the audience is normalized to a
 bare origin because the far side compares it byte-for-byte.
 
-Its `iss` is **not** something to configure. Inside a Durable Object it is:
+Its `iss` is **not** something to configure. Inside an `A2AAgent` it is:
 
 ```ts
-protected override modelRuntime(model: ModelConfig): ModelRuntime {
-  return myProvider(this.env, model, () => this.requireSelfOrigin());
+getModel() {
+  return myProvider(this.env, () => this.requireSelfOrigin());
 }
 ```
 
 `requireSelfOrigin()` (and `selfOrigin()`, which returns `undefined` instead of
 throwing) answer with the origin core already delivers: the executor computes the
-callback `jku` from `new URL(request.url).origin`, and it rides every turn into the DO
-and on into each subagent facet. A `SELF_ORIGIN` secret only restates that, and has to
+callback `jku` from `new URL(request.url).origin`, and it rides every accepted turn
+into the object. A `SELF_ORIGIN` secret only restates that, and has to
 be kept byte-identical with the verifier's allowlist by hand in every environment.
 
 The first turn an instance serves **pins** it, and nothing is persisted. Pinning is
-what makes it safe to read: turns run concurrently in one Durable Object and a
-credential thunk fires several frames below the turn that set the value, so a mutable
-field could hand one turn another's origin. An agent has one endpoint anyway — the one
+what makes it safe to read: one object serves RPCs, queue items and its own turn
+concurrently, and a credential thunk fires several frames below the code that set the
+value, so a mutable field could hand one call another's origin. An agent has one endpoint anyway — the one
 its card advertises and a verifier allowlists — and a fresh isolate on deploy re-learns
 it.
 
-It is known **inside a turn or a chunk**: `onStart`, a constructor and a scheduled
-callback all run before any request has said what this deployment is called, and
-`requireSelfOrigin()` throws there saying so.
+It is known **once a turn has been accepted**: `onStart`, a constructor and a
+scheduled callback can run before any request has said what this deployment is
+called, and `requireSelfOrigin()` throws there saying so.
 
 ---
 
 ## Plugins
 
-A capability is a plugin. Core never imports one — your app registers it, which keeps
-bundle size proportional to what you actually installed.
+A capability is a plugin. Core never imports one — your agent installs it in
+`getPlugins()`, which keeps bundle size proportional to what you actually installed.
+The contract has Think's own shape: tools, actions and prompt blocks.
 
 ```ts
 import { definePlugin } from "@dynamicagents/core";
 
 export const scraper = (config: { apiKey: string }) =>
   definePlugin({
-    key: "scraper",
-    subtaskType: {
-      key: "scrape",
-      description: "fetch a page and summarize it",
-      params: z.object({ url: z.string().describe("page to fetch") }),
-      recipe
-    },
-    toolFamilies: { web: (ctx) => ({ tools: { fetchPage: /* … */ } }) },
-    capability: "You can scrape a page and summarize it.",
+    name: "scraper",
+    tools: (ctx) => ({ fetch_page: fetchPageTool(config, ctx) }),
+    context: [
+      {
+        provider: { get: async () => "You can fetch a page and summarize it." }
+      }
+    ],
     requires: { secrets: ["SCRAPER_API_KEY"] }
   });
 ```
 
-`createAgentRuntime` fails at DO start — never mid-request — on a duplicate plugin
-key, a duplicate tool family, a missing declared binding, or a
-`PLUGIN_CONTRACT_VERSION` mismatch. Because core, plugins, and starter publish from
-separate repos, one of them is always briefly behind; that version assert turns the
-skew into a readable sentence instead of a structural-type error several frames from
-its cause.
+`tools` is synchronous, because Think's `getTools()` is. `actions` are Think actions:
+tools with an idempotency ledger, so a recovered turn never repeats a side effect. A
+plugin's blocks are namespaced under its name. A plugin that describes a sub-agent
+exports its `SubAgentSpec` as data; the agent binds it to a class.
 
-The contract is **additive-only within a major**: new capabilities arrive as optional
-fields on `AgentPlugin`.
+The agent assembles its plugins at DO start — never mid-request — and fails on a
+duplicate plugin name, a missing declared binding, or a `PLUGIN_CONTRACT_VERSION`
+mismatch; two plugins offering one tool fail the first turn. Because core, plugins,
+and starter publish from separate repos, one of them is always briefly behind; the
+version assert turns the skew into a readable sentence instead of a structural-type
+error several frames from its cause.
 
-### Session hooks
-
-`onMessagesDisplaced` hands over the raw messages a compaction is about to fold into a
-summary. Core performs the compaction, so core announces the loss; it neither stores the
-messages nor knows who wants them. An episodic-memory plugin, an audit log, and a
-cold-storage dump all want exactly this callback, and each gets it:
-
-```ts
-// In a DO of your own. `DynamicAgent` does all of this for you — it owns a
-// `Sessions` capability and calls `getSession()`; this is the wiring underneath.
-class MyAgent extends Agent<Env> {
-  readonly sessions = new Sessions(); // from `agents/sessions`
-
-  constructor(ctx: AgentContext, env: Env) {
-    super(ctx, env);
-    // Before anything starts the lifecycle: it refuses a capability after that.
-    this.lifecycle.use(this.sessions);
-  }
-
-  session() {
-    return buildAgentSession(this, this.sessions.session(), model, {
-      …,
-      onMessagesDisplaced: this.runtime.onMessagesDisplaced
-    });
-  }
-}
-```
-
-Best-effort in both directions — a listener that throws never aborts compaction (history
-must still shorten when a side store is down), and the fan-out is `Promise.allSettled`, so
-one plugin's outage cannot cost another its notification.
-
-### The workspace backend
-
-Core declares the `WorkspaceBacking` shape and enforces the caps, but ships no backend —
-the predecessor's was `@cloudflare/shell`, which is experimental, and an agent that never
-delegates file work should not carry it. A plugin supplies one via `workspaceBacking`; at
-most one may, and an agent that installs none gets `memoryWorkspaceBacking`. So
-`runtime.workspaceBacking` is always defined and your `SubagentRuntime` never needs a null
-check.
+`restrictTools(plugin, { allow })` narrows what an agent takes from a plugin — "my
+sub-agents can run a shell, I cannot" — while the plugin's `requires` still holds.
 
 ---
 
 ## Testing
 
 The harness both predecessor agents grew, shipped so you don't grow it a third time.
-
-```ts
-import {
-  FakeSession,
-  mockModel,
-  makeGatekeeperToken,
-  makeDoHelpers
-} from "@dynamicagents/core/testing";
-
-const { withDb } = makeDoHelpers(env.MY_AGENT);
-
-await withDb("accepts a turn once", async (db) => {
-  await db.ensureReady();
-  db.tasks.begin({ messageId: "m1", taskId: "t1", contextId: "c1" });
-});
-```
 
 - **VCR** — record/replay real HTTP against on-disk cassettes, split across the Node
   and workerd realms because specs run in workerd, which has no filesystem. The
@@ -547,8 +447,10 @@ await withDb("accepts a turn once", async (db) => {
   request with no active cassette is blocked rather than reaching the network.
   Point vitest's `globalSetup` at `@dynamicagents/core/testing/vcr-global-setup`.
 
-- **Fakes** — `FakeSession` (a `SessionLike` reference implementation) and `mockModel`
-  (a scripted `LanguageModel`), so a loop can be driven with no model call at all.
+- **Fakes** — scripted streaming models, so a Think turn runs with no model call at
+  all. `scriptedModel(rule)` answers each call from the message that started the turn,
+  which is the shape that survives a task spanning several turns; `mockModel(...steps)`
+  plays a fixed sequence.
 - **Fixtures** — Ed25519 keypairs and a gatekeeper-JWT signer, so the zero-trust path is
   exercisable end to end without a real gatekeeper.
 - **`createAgentHarness`** — the assembly of all of the above: send one A2A turn the
@@ -559,8 +461,13 @@ await withDb("accepts a turn once", async (db) => {
   using _ = harness.interceptGatekeeper();
 
   const accepted = await harness.send("what's the weather?");
-  expect(accepted.status.state).toBe(TaskState.TASK_STATE_SUBMITTED);
+  const done = await harness.waitForTerminal(accepted.id);
+  expect(done.state).toBe("TASK_STATE_COMPLETED");
   ```
+
+  The turn runs on the agent's own alarm after the accept returns, so a spec waits for
+  its effect: `waitForState` and `waitForTerminal` watch the callbacks. Give each spec
+  its own `identity` and it gets its own Durable Object.
 
   It exists because the pieces above were never the hard part. The audience is the
   **endpoint**, not the origin; the tenant claim has to match the tenant in the
@@ -572,28 +479,25 @@ await withDb("accepts a turn once", async (db) => {
 
 ## What core deliberately does _not_ contain
 
-- **Prompt copy of any kind.** Not a soul, not a round contract, not a user-facing
-  failure message. `@dynamicagents/core/round` ships the whole delegating loop but takes
-  every word it says from a [`RoundPolicy`](#the-round-policy) you write, because a
-  run must never execute under an identity nobody chose.
-- **A loop you cannot replace.** `/round` is opt-in and its own subpath. An agent
-  whose turn is a single inference extends `DynamicAgent` directly, writes its own
-  loop, and carries none of the delegation machinery in its bundle.
-- The main agent's soul. Core ships no prompt copy.
-- Config _values_ — model ids, budgets, limits. Core ships the shapes and safe
-  defaults, and `resolveConfig` validates your overrides.
-- Vectorize recall, browser tools, shell. All optional → plugins. Core contains no
-  embedding code at all: it ships the `onMessagesDisplaced` hook and nothing about what
-  a listener does with the messages — no embedding model, no index, no dimension.
+- **Prompt copy of any kind.** Not a soul, not a user-facing failure message: the
+  `copy` an `A2AAgent` needs is abstract, because a run must never execute under an
+  identity nobody chose.
+- **A loop.** Think runs the turn. Core adds the A2A task around it.
+- **Numbers.** Model ids, compaction thresholds, output ceilings are the agent's.
+  There are no budgets: the gatekeeper cancels a task that has not settled within the
+  hour.
+- **A model fallback.** A transient failure is retried by the AI SDK and an
+  interrupted turn is continued by Think's recovery.
+- Browser tools, shell, a workspace backend. All optional → plugins.
 
 ---
 
 ## Requirements
 
 - **Node** ≥ 24 (for build and test only — the package itself runs on workerd)
-- **Bindings:** `AI`, one Durable Object, one Workflow
+- **Bindings:** `AI`, one Durable Object per agent, `ARTIFACTS`
 - **Secrets:** `A2A_SIGNING_KEY`, `GATEKEEPER_ORIGINS`
-- **Peers, never bundled:** `agents`, `ai`, `workers-ai-provider`
+- **Peers, never bundled:** `@cloudflare/think`, `agents`, `ai`, `workers-ai-provider`
 
 That last point is not stylistic: two copies of `agents` in one Worker breaks the
 `Session` / `SessionMessage` types and every `instanceof`. For local development

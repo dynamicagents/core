@@ -1,10 +1,9 @@
 /**
  * Cancellation for work whose own API has no `AbortSignal`.
  *
- * Core already stops *waiting* on a plugin tool whose call is over — see
- * {@link file://./platform.ts MAX_TOOL_CALL_MS}. Stopping the *work* is the tool's
- * job, and a tool backed by an API that takes a signal does it by passing the
- * signal straight through. This is for the other case: a container exec bounded
+ * A tool is handed an `abortSignal` that fires when its turn is canceled.
+ * Stopping the *work* is the tool's job, and a tool backed by an API that takes
+ * a signal does it by passing the signal straight through. This is for the other case: a container exec bounded
  * only by its own `timeoutMs`, a poll loop, an RPC with no signal on any method.
  * There the caller can stop waiting, and separately ask the remote side to stop,
  * and those are two different things.
@@ -88,7 +87,7 @@ async function raceAbort<T>(
   } finally {
     // `once` removes it on an abort, but the ordinary path never fires and would
     // otherwise hold the callback — and with it the promise's scope — for as long
-    // as the signal lives, which for a round is every tool call in it.
+    // as the signal lives, which for a turn is every tool call in it.
     if (listener) signal.removeEventListener("abort", listener);
   }
 }

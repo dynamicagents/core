@@ -7,12 +7,7 @@ import {
   MAX_MESSAGE_TEXT_BYTES,
   type HitlRequestData
 } from "@dynamicagents/g2a-protocol";
-import {
-  buildInputRequiredTask,
-  humanEventType,
-  humanRequestId,
-  readHumanReply
-} from "./hitl.js";
+import { buildInputRequiredTask, readHumanReply } from "./hitl.js";
 
 /**
  * Core's half of asking a person something: the question it posts, and what it
@@ -82,46 +77,12 @@ describe("the question an agent posts", () => {
   });
 
   it("posts a retry under the same message id", () => {
-    // The step that posts it retries on a non-2xx, and a fresh id per attempt
+    // The delivery queue retries on a non-2xx, and a fresh id per attempt
     // would reach the gatekeeper as a second question.
     const first = buildInputRequiredTask("t1", "ctx-1", question);
     const again = buildInputRequiredTask("t1", "ctx-1", question);
     expect(first.status?.message?.messageId).toBe(
       again.status?.message?.messageId
-    );
-  });
-
-  it("derives a question's id from its Task and round", () => {
-    expect(humanRequestId("t1", 2)).toBe(humanRequestId("t1", 2));
-    expect(humanRequestId("t1", 2)).not.toBe(humanRequestId("t1", 3));
-    expect(humanRequestId("t1", 2)).not.toBe(humanRequestId("t2", 2));
-  });
-});
-
-describe("what wakes the run", () => {
-  it("wakes each question's wait with its own event", () => {
-    // A stale wake for one question must not satisfy the wait on the next.
-    expect(humanEventType(humanRequestId("t1", 0))).not.toBe(
-      humanEventType(humanRequestId("t1", 1))
-    );
-  });
-
-  it("stays inside what Workflows accepts as an event type", () => {
-    for (const id of [
-      humanRequestId(crypto.randomUUID(), 12),
-      humanRequestId("x.y:z/".repeat(40), 3)
-    ]) {
-      const type = humanEventType(id);
-      expect(type).toMatch(/^[A-Za-z0-9_-]+$/);
-      expect(type.length).toBeLessThanOrEqual(100);
-      expect(humanEventType(id)).toBe(type);
-    }
-  });
-
-  it("keeps two long ids apart after shortening them", () => {
-    const long = "a".repeat(120);
-    expect(humanEventType(`${long}-one`)).not.toBe(
-      humanEventType(`${long}-two`)
     );
   });
 });
@@ -196,7 +157,7 @@ describe("reading a reply", () => {
   });
 
   it("refuses an answer longer than a turn may be", () => {
-    // It goes into the Session and every later round reads it, so it is held
+    // It goes into the session and every later turn reads it, so it is held
     // to the bound a turn's own text is.
     expect(
       readHumanReply(

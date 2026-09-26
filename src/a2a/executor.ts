@@ -8,28 +8,8 @@ import type { Task } from "@a2a-js/sdk";
 import type { GatekeeperIdentity } from "./verify.js";
 import type { AgentResolver } from "./agent-stub.js";
 import { textOf } from "./parts.js";
-import type { TurnWake } from "./hitl.js";
 
-/**
- * Derive a deterministic workflow instance id for a turn. Keyed on the gatekeeper's
- * `messageId` (stable across dispatch retries), so re-creating it is a no-op —
- * the turn runs exactly once. Sanitized to the id charset.
- */
-export function workflowIdForMessage(
-  messageId: string,
-  prefix = "turn"
-): string {
-  return `${prefix}-${messageId.replace(/[^A-Za-z0-9_-]/g, "-")}`;
-}
-
-/**
- * Everything the executor knows about an accepted turn, handed to the
- * consumer's {@link TurnStarter}.
- *
- * Core stops here deliberately: which workflow runs the turn, what else its
- * params carry, and which binding it is created on are all the agent's, so core
- * describes the turn and the agent starts it.
- */
+/** Everything the executor knows about an accepted turn. */
 export interface AcceptedTurn {
   /** The gatekeeper's message id — the idempotency key for the whole turn. */
   messageId: string;
@@ -46,71 +26,24 @@ export interface AcceptedTurn {
   jku: string;
 }
 
-/**
- * Start the durable turn. **Must be idempotent**: a dispatch retry calls it
- * again with the same {@link AcceptedTurn.messageId}, and the conventional
- * implementation swallows the workflow's "instance already exists" race — see
- * {@link workflowIdForMessage} and {@link ignoreAlreadyExists}.
- */
-export type TurnStarter = (turn: AcceptedTurn) => Promise<void>;
-
-/**
- * Wake the run a Task is parked in, once its question has an answer or can no
- * longer get one.
- *
- * **Must tolerate a wake nobody needed** — a retried answer, a question already
- * closed — because the run reads what happened from the Durable Object, never
- * from the event.
- */
-export type TurnResumer = (wake: TurnWake) => Promise<void>;
-
 export interface ExecutorConfig {
   identity: GatekeeperIdentity;
   /** This agent's card-signing JWKS URL — the callback JWT `jku`. */
   jku: string;
   resolveAgent: AgentResolver;
-  startTurn: TurnStarter;
-}
-
-/**
- * Run `create` and swallow the "instance already exists" retry race, so a
- * {@link TurnStarter} is idempotent in the one way that actually happens.
- *
- * ```ts
- * startTurn: (turn) =>
- *   ignoreAlreadyExists(() =>
- *     env.HANDLE_TASK_WORKFLOW.create({
- *       id: workflowIdForMessage(turn.messageId),
- *       params: { ...turn }
- *     })
- *   )
- * ```
- */
-export async function ignoreAlreadyExists(
-  create: () => Promise<unknown>
-): Promise<void> {
-  try {
-    await create();
-  } catch (err) {
-    if (err instanceof Error && /already exists|exist/i.test(err.message)) {
-      return;
-    }
-    throw err;
-  }
 }
 
 /**
  * A2A executor for the **async accept + notify** contract. On `SendMessage` it
- * does not block on generation: it records a `submitted` task in the caller's DO
- * (idempotent on `messageId`), hands the turn to a durable workflow, and
- * publishes the accepted task immediately as the response. The workflow
- * generates the reply and POSTs it to the gatekeeper's push-notification webhook
- * out of band.
+ * does not block on generation: one `acceptTask` call records the `submitted`
+ * task in the caller's object and submits its turn durably, both idempotent on
+ * `messageId`, and the accepted task is published at once as the response. The
+ * reply is POSTed to the gatekeeper's push webhook out of band.
  *
  * The verified caller identity comes from the config — the outer Worker builds
  * one executor per verified request. The push config comes from the request
  * itself: v1.0 hands the executor the whole `SendMessageRequest` via
- * {@link RequestContext.request}, so nothing has to be threaded around it.
+ * {@link RequestContext.request}.
  */
 export class A2AExecutor implements AgentExecutor {
   constructor(private readonly config: ExecutorConfig) {}
@@ -129,47 +62,34 @@ export class A2AExecutor implements AgentExecutor {
     }
 
     // A message naming a Task that exists is a reply to a question the Task
-    // asked. The Worker refuses any other kind, records the reply and wakes the
-    // run, all outside this — a throw here fails the Task the person was
-    // answering — so what is left is to answer with the Task as the handler
-    // loaded it, after the reply. It must never begin a second one.
+    // asked. The Worker records it before the handler runs — a throw here
+    // fails the Task the person was answering — so what is left is to answer
+    // with the Task as the handler loaded it. It must never begin a second one.
     if (requestContext.task) {
       eventBus.publish(AgentEvent.task(requestContext.task));
       eventBus.finished();
       return;
     }
 
-    const text = textOf(requestContext.userMessage);
-    const messageId = requestContext.userMessage.messageId;
-    const contextId = requestContext.contextId;
-
     // `identity.key` is guaranteed non-null: the Worker rejects a keyless
     // identity (400) before constructing this executor.
-    const stub = this.config.resolveAgent(this.config.identity);
-
-    // Record (or reuse) the submitted task, then start the durable turn. Both
-    // are idempotent, so a dispatch retry heals a crash between the two.
-    const accepted = await stub.beginTask({
-      messageId,
-      taskId: requestContext.taskId,
-      contextId
-    });
+    const accepted = await this.config
+      .resolveAgent(this.config.identity)
+      .acceptTask({
+        messageId: requestContext.userMessage.messageId,
+        taskId: requestContext.taskId,
+        contextId: requestContext.contextId,
+        text: textOf(requestContext.userMessage),
+        identity: this.config.identity,
+        pushUrl: pushConfig.url,
+        pushToken: pushConfig.token,
+        jku: this.config.jku
+      });
     // Widened in one explicit step: DO-stub returns come back through
     // Cloudflare's RPC type mapping, and letting that mapped type flow into a
-    // generic SDK call site instead exceeds TypeScript's instantiation depth on
-    // the v1.0 (proto-generated) model.
+    // generic SDK call site exceeds TypeScript's instantiation depth on the
+    // v1.0 (proto-generated) model.
     const task: Task = accepted;
-
-    await this.config.startTurn({
-      messageId,
-      taskId: accepted.id,
-      contextId,
-      text,
-      identity: this.config.identity,
-      pushUrl: pushConfig.url,
-      pushToken: pushConfig.token,
-      jku: this.config.jku
-    });
 
     // The accept ack: a `submitted` task, not a Message. Returned synchronously.
     eventBus.publish(AgentEvent.task(task));
@@ -177,8 +97,8 @@ export class A2AExecutor implements AgentExecutor {
   };
 
   /**
-   * `CancelTask`: best-effort mark the task canceled in the DO and publish the
-   * canceled task. The in-flight workflow's `notify` step skips a canceled task.
+   * `CancelTask`: mark the task canceled in the object, which stops its work,
+   * and publish the canceled task.
    */
   cancelTask = async (
     taskId: string,

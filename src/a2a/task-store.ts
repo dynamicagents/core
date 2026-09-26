@@ -16,10 +16,10 @@ import type { AgentResolver } from "./agent-stub.js";
  *
  * Task state must survive the accept → async callback gap (and answer
  * `GetTask`/`CancelTask`/`ListTasks` across requests), so it lives in the same
- * per-caller DO that owns the Session — keyed by the verified `identity.key`,
- * exactly like {@link file://./executor.ts A2AExecutor}. A workflow updates the
- * same rows through its own DO RPC calls, so this store and the workflow share
- * one source of truth.
+ * per-caller DO that runs the task's turns — keyed by the verified
+ * `identity.key`, exactly like {@link file://./executor.ts A2AExecutor}. The
+ * agent settles the same rows, so this store and the turns share one source of
+ * truth.
  *
  * v1.0 passes a `ServerCallContext` to every method so a shared store can scope
  * rows by tenant/owner. This store needs none of that: the DO instance it routes

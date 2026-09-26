@@ -69,8 +69,8 @@ ref while it is still unreleased: `dist/` is not committed, and npm runs `prepar
 when installing a git dependency. `husky || true` because husky exits non-zero
 outside a git checkout, which is exactly the consumer-install case.
 
-The package has no root barrel; every area is its own subpath export. Four rules
-follow from that, and all four have already been violated once:
+The root carries only the plugin contract; every other area is its own subpath
+export. Four rules follow from that, and all four have already been violated once:
 
 - **Always write `.js` on relative imports.** `moduleResolution: "Bundler"`
   typechecks extensionless specifiers, but `tsc` emits them verbatim and Node ESM
@@ -98,14 +98,19 @@ follow from that, and all four have already been violated once:
   copy) and `@typescript-eslint/utils` into `/eslint` (through
   `typescript-eslint`). Both were fixed, and between them they show the two
   remedies available. Prefer the re-export from a package already declared —
-  `APICallError` comes from `ai` now, which is why `@ai-sdk/provider` is not a
-  dependency here at all any more — and where the import is genuinely needed,
-  declare it as an **optional peer**, as `/eslint` does. `verify:exports` fails
-  on this.
+  `/testing` takes the mock model from `ai/test` rather than `@ai-sdk/provider`
+  — and where the import is genuinely needed, declare it as an **optional
+  peer**, as `/eslint` does. `verify:exports` fails on this.
 
 Adding an export subpath means adding it to `package.json`'s `exports` **and**
 confirming it emits: a subpath that resolves to a missing file is invisible until
 someone imports it.
+
+**A subpath names a domain a consumer builds with, never a package it is built
+on.** Every agent runs on Think, so a `/think` would distinguish nothing, grow into
+a bucket, and turn an upstream rename into a breaking one here. What a plugin
+exports as data — `SubAgentSpec` — is contract, at the root, so a plugin never
+imports the runtime that hosts it.
 
 ---
 
@@ -125,138 +130,47 @@ publish train (core → plugins → starter), so one repo is always briefly behi
 > structural-type error several frames from its cause; until one exists, there is
 > nothing for it to protect. Check the registry, not `main`, before deciding.
 
-`FINGERPRINT_VERSION` in `src/subagent/fingerprint.ts` works the same way and is
-even sharper: bumping it invalidates every cached subagent result and every
-in-flight run's checkpoint. Note that recipe limits are hashed **as declared, not
-as merged** — that is deliberate, so moving a baseline default in a patch release
-cannot strand in-flight runs.
-
-### The migration journal
-
-`src/db/schema.ts` holds core's tables and **only** core's — the journal is
-a flat integer sequence over one shared `__drizzle_migrations` table, and two
-independently-versioned packages writing to it will collide. Anything else that
-keeps tables in a Durable Object's SQLite writes idempotent DDL by hand and never
-imports the migrator — `AgentDB` in `src/db/db.ts` has the reasoning.
-
-Changing the schema means `npm run db:generate`, which runs `drizzle-kit generate`
-and then rebuilds `src/db/migrations/index.ts` from the `.sql` files. That index is
-generated — never hand-edit it. Rename the generated `.sql` to say what it does and
-fix its `tag` in `meta/_journal.json` before rebuilding, so the journal reads as
-intent rather than as drizzle's word generator.
-
----
-
-## The platform bounds
-
-`src/platform.ts` holds time and step limits, and the one thing to know before
-touching it is that **`STEP_TIMEOUT_MS` is not a platform fact.** Ten minutes is
-Workflows' _default_ step timeout, not its ceiling; core passes its own on every
-step that can hold a model call or a container command. Both sites are in
-`round/workflow.ts`: `CHUNK_STEP` carries `STEP_TIMEOUT_MS` for the chunk steps,
-and `turnStep(config)` widens it to `max(mainAgentLimits.maxWallMs,
-STEP_TIMEOUT_MS)` for a round — a round has no soft deadline, so what bounds it
-is its turn count, not a chunk boundary. Wall-clock per step is effectively
-unlimited — a step is bounded by CPU, and the chunk steps use milliseconds of
-it — so the value is a ceiling we choose, to turn a hung container into a retry
-rather than a task that never ends.
-
-`CHUNK_SOFT_MS` is sized against it, and the sizing is the part that bit us. The
-soft deadline is checked **between turns**, so a turn already in flight when it
-trips still runs to completion, and a turn is a model call plus a tool call. The
-headroom therefore has to cover a whole turn — `MAX_TOOL_CALL_MS` plus room for
-the model — not a nominal minute. `platform.spec.ts` asserts that relationship;
-raise the step timeout before raising the chunk deadline.
-
-`MAX_TOOL_CALL_MS` is enforced by core for every plugin tool. Each `generateText`
-fires the call's signal `TOOL_CALL_GRACE_MS` early through the SDK's
-`timeout.toolMs`, and `src/runtime/bound-tools.ts` wraps every plugin tool where core
-assembles it, so a call still running at the bound is abandoned and the loop moves on
-whether or not the tool listened. What core cannot stop is the tool's _work_ — the
-SDK aborts a signal, it does not cancel a promise — so a tool whose work must not
-outlive its call (a container command, a write that must not start late) still reads
-its signal and stops it. The detail is on the constants in `platform.ts`.
-
 ---
 
 ## The line core does not cross
 
-The old rule was "core ships no loop." That was the right instinct at the wrong
-granularity, and 0.4.0 sharpens it: **core ships no prompt copy and no policy.**
+**Core owns the A2A↔Think lifecycle, and ships no prompt copy and no numbers.**
 
-`@dynamicagents/core/round` now ships the whole delegating loop — concurrent subtask
-execution, chunked subagent runs, cancellation ordering, the
-primary→fallback→repair ladder. Keeping that out of core did not make agents more
-expressive; it made every consumer fork ~2,700 lines of durable-execution logic
-they could not receive fixes for. The starter's own two agents, written against a
-documented invariant by people who knew it, still drifted apart: the second copy
-discarded `markWorking`'s cancellation verdict and probed with `getTask` before
-writing a terminal Task, so a canceled task burned a model call and could still
-produce a `completed` callback.
+Think runs the turn — the loop, recovery, compaction, agent tools, actions.
+Core wraps it in the A2A task: the guarded ledger (`src/agent/tasks.ts`), the mapping
+from a turn's outcome to a task state, the durable delivery outbox, cancellation
+fan-out, and a task that outlives its turn through open work. Every one of those
+is an ordering an agent cannot vary and still be correct: a cancel decided by a probe
+instead of the guarded write's verdict is a canceled task that still calls back
+`completed`.
 
-What is genuinely per-agent is now explicit and mandatory:
+What is genuinely per-agent is explicit and mandatory:
 
-- **`RoundPolicy`** — the round contract, a note per reason a round can be forced
-  to answer, and the user-facing strings. Nothing has a default. A lent-out
-  round contract is exactly the house prompt copy `validateRecipe` already refuses
-  for a subagent soul.
-- **The loop itself, if you want a different one.** `/round` is opt-in and its own
-  subpath. An agent whose turn is a single inference extends `DynamicAgent` from
-  `/host`, writes its own loop, and carries none of the delegation machinery.
+- **The words.** `A2AAgent.copy` (the failed, empty and expired messages), the soul,
+  every block the model reads. Nothing has a default.
+- **The numbers.** The model, compaction thresholds, an output ceiling. Core sets no
+  budget at all: the gatekeeper cancels a task that has not settled within the hour,
+  so a ceiling below that is arbitrary, and one above it is never reached.
 
-So when adding to `/round` or `/host`, the test is not "does an agent vary here"
-but "**could an agent vary here and still be correct**". A cancellation ordering
-cannot. A sentence the model reads always can.
+So when adding to `/agent` or `/subagent`, the test is not "does an agent vary here" but "**could an
+agent vary here and still be correct**". A cancellation ordering cannot. A sentence
+the model reads always can.
 
-Two consequences for exports:
-
-- `/round` must **never** be re-exported from the root barrel, or a non-delegating
-  agent pays for a delegating loop it never runs.
-- `/host` is separate from `/agent` for the same reason: `/agent` is loop
-  primitives, and a loop module should not drag a Durable Object base class and
-  drizzle into its graph.
+**Build on Think's primitives in a shape Think could absorb.** Where core is ahead of
+Think — a task spanning turns, the A2A edge — it is written on Think's own hooks
+(`onSubmissionStatus`, `runAgentTool`'s `onFinish`, `schedule`, `queue`) rather than
+around them, and named the way Think names things, so the day Think grows the same
+feature the port is a deletion.
 
 ### Model providers
 
-A provider is a **sibling directory under `src/agent/`** exporting one
-`ModelRuntimeFactory`. `src/agent/model.ts` is the contract and holds no
-implementation — the Workers AI factory used to live in it, and a contract that
-ships one implementation inline reads as _the_ runtime with an escape hatch
-rather than as one of N. `src/agent/errors.ts` is its neutral companion: a
-rejected credential is a fact about the path to a model, not about any vendor.
+A provider is a function returning one `LanguageModel` for `getModel()`.
+`workersAIModel` in `src/model/` is the one core ships. There is no fallback model:
+a transient failure is retried by the AI SDK (`maxRetries`, which `beforeTurn` can
+tune) and an interrupted turn is continued by Think's chat recovery.
 
-The rules that follow are what keep a third provider cheap:
-
-- **Nothing neutral may import a provider directory.** `inference.ts` classifies
-  a dead credential by `CredentialRejectedError`, which is structurally matched,
-  so a provider written _outside_ core raises one and gets the same
-  fallback-skipping treatment with nothing in core to change.
-- **A provider supplies two models; which one answers a given step is core's.**
-  `withFallback` in `src/agent/fallback.ts` wraps the pair into one model, so a
-  call the primary cannot take is taken by the second at the step rather than by
-  re-running the round. A runtime that builds its own fallback inside a single
-  model hides that decision from the loops, and from the budget that pays for it.
-- **A subpath only when the peer is optional.** `workers-ai` has none because
-  `workers-ai-provider` is a required peer and every consumer's graph holds it
-  already. A provider behind an _optional_ peer gets its own subpath instead, so
-  an agent never calling it does not pay for it — and **no runtime subpath may
-  import such a subpath.** `/anthropic` was the one worked example until 0.8.0,
-  when it was removed with the only deployment that used it.
-- **`DynamicAgent.modelRuntime` and `RecipeSubagentHost.modelRuntime` are
-  overridden together.** They take identical arguments so one factory can serve
-  both. A facet left on the default while its parent runs elsewhere executes
-  every delegated subtask on a different model than the round that delegated it,
-  and does so silently, because both satisfy `ModelRuntime`. Overriding neither
-  is the cheapest way to satisfy this, and what an agent on the default does.
-
-Everything deployment-specific stays out, as everywhere else here: which AI
-Gateway path, which credential, and how to classify a `401` are the agent's to
-supply, from its own `ModelRuntime`. Core recognised one particular
-intermediary's error body once; that is the shape of mistake this section exists
-to prevent. Two things went in 0.8.0 for the same reason, once the deployment
-that needed them was gone: `ModelConfig.aiGatewayProvider`, which core never
-read, and the `"proxy"` arm of `CredentialRejectedBy`, which no provider core
-ships could raise.
+Everything deployment-specific stays out: which AI Gateway, which credential, how to
+classify an error beyond the context-overflow classifier. Those are the agent's.
 
 ---
 
@@ -294,10 +208,10 @@ release the range admits that nothing here has ever run.
 
 **Bound a peer ceiling only where the package has actually been breaking.** Open
 is the default — the vitest plugin peer under _The VCR harness_ is the worked
-example, and it says why. `agents` has a ceiling because it has broken across
-most of its recent minors and core is coupled to it about as deeply as a
-consumer can be — `Agent`, `Session`, `SessionMessage`, and the experimental
-subpaths. That ceiling is not a number anyone has to remember to revisit:
+example, and it says why. `agents` and `@cloudflare/think` have ceilings because both
+have broken across most of their recent minors and core is coupled to them about
+as deeply as a consumer can be — Think's base class and hooks, `Agent`, `Session`,
+and the experimental subpaths. That ceiling is not a number anyone has to remember to revisit:
 `--latest` reports when a release lands outside it, so widening it becomes a
 deliberate act after a green suite rather than a guess made in advance.
 
@@ -320,10 +234,11 @@ installed workerd, and `scripts/verify-runtime-types.mjs` fails when it was
 regenerated without `--include-env=false` and so carries a global `Env`.
 
 Specs live next to the code they test (`src/**/*.spec.ts`) and run inside
-workerd, because `AgentDB` drives `ctx.storage.sql` and the Agents SDK `Session`
-has no Node-side stand-in. `wrangler.jsonc` and `test/worker.ts` exist only to
-give the plugin something to bind — they are dev-only and excluded from the
-published tarball.
+workerd, because a Think agent drives `ctx.storage.sql`, alarms and facets, none
+of which have a Node-side stand-in. `wrangler.jsonc` and `test/worker.ts` exist
+only to give the pool something to bind — they are dev-only and excluded from the
+published tarball. `src/agent/agent.spec.ts` drives every lifecycle scenario
+through the real A2A edge and asserts on the push callbacks.
 
 Two things `npm test` alone will not catch, so run `npm run check` before
 pushing: vitest transpiles specs without typechecking them, and formatting and

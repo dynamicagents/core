@@ -1,5 +1,4 @@
 import type { Task } from "@a2a-js/sdk";
-import type { OnContent } from "../agent/inference.js";
 import { parsePrivateJwk } from "./card.js";
 import {
   CALLBACK_TOKEN_TTL_SECONDS,
@@ -23,8 +22,8 @@ import {
 /**
  * Everything needed to call a gatekeeper back about one task.
  *
- * RPC-serializable by construction: it crosses the Workflow → Durable Object
- * boundary on every turn, so it holds only strings.
+ * Serializable by construction: it is stored on the task's row and read back
+ * by every post, so it holds only strings.
  */
 export interface TurnPushContext {
   /** The accepted task id (echoed on every callback of this turn). */
@@ -52,24 +51,14 @@ export interface PushChannel {
    * the contract working with them, not against them.
    *
    * The key is what lets the gatekeeper dedupe a re-posted event on replay, so
-   * it must be derived from position (`r2:step:3`), never from content or a
+   * it must be derived from position (`step:3`), never from content or a
    * clock.
    */
   working(text: string, key: string): Promise<boolean>;
   /**
-   * An {@link OnContent} sink that posts each intermediate message as a
-   * `working` snapshot, reusing one signed JWT for as long as it has more than
-   * a minute to live.
-   *
-   * `key` maps a 0-based step ordinal to its notification key. An agent running
-   * one turn per task can use the bare index; an agent with rounds **must**
-   * include the round, or two rounds of one task collide on the gatekeeper.
-   */
-  stream(key: (stepIndex: number) => string): OnContent;
-  /**
-   * POST the terminal Task. **Throws on a non-2xx** so the calling Workflow step
-   * retries — the opposite of {@link working}, because this is the delivery the
-   * whole turn exists for.
+   * POST a settled Task. **Throws on a non-2xx** so the delivery queue retries
+   * — the opposite of {@link working}, because this is the delivery the whole
+   * turn exists for.
    */
   deliver(task: Task): Promise<void>;
 }
@@ -91,8 +80,8 @@ export function createPushChannel(
 ): PushChannel {
   // Signed lazily and reused: one turn can post many progress snapshots, and
   // re-signing per message costs a key import each time for no benefit. Reused
-  // only until a minute before it expires, because a round or a facet chunk
-  // outlives the token and the gatekeeper refuses a post that carries a dead one.
+  // only until a minute before it expires, because a task outlives the token
+  // and the gatekeeper refuses a post that carries a dead one.
   let signed: { jwt: Promise<string>; at: number } | undefined;
   const sign = (): Promise<string> => {
     const now = Date.now();
@@ -138,14 +127,6 @@ export function createPushChannel(
 
   return {
     working,
-
-    stream(key) {
-      // `OnContent` answers nothing, and a stream of model output has nobody to
-      // report a dropped snapshot to anyway.
-      return async (text, stepIndex) => {
-        await working(text, key(stepIndex));
-      };
-    },
 
     async deliver(task) {
       const res = await post(task);

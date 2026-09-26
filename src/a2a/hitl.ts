@@ -18,10 +18,9 @@ import { dataPart, textPart } from "./parts.js";
  * is core's half of it — building the question, and reading an answer back out of
  * a message that has to be treated as untrusted until it parses.
  *
- * **Every gatekeeper takes part.** Putting a question or an approval in front of a
- * person, and sending back their answer or a timeout, is the gatekeeper's side of
- * the contract, not an option an agent checks for. So any round may ask, and a call
- * a plugin holds for approval always waits for the person's answer.
+ * **Every gatekeeper takes part.** Putting a question in front of a person, and
+ * sending back their answer or a timeout, is the gatekeeper's side of the
+ * contract, not an option an agent checks for. So any turn may ask.
  */
 
 /** Distributive, so the "an option, a text, or both" union survives the `Omit`. */
@@ -37,52 +36,6 @@ export type HumanReply =
   | { kind: "answer"; requestId: string; answer: HumanAnswer }
   /** Nobody answered before the gatekeeper gave up on the question. */
   | { kind: "timeout"; requestId: string };
-
-/**
- * The id a round's question goes out under, and the id its answer names.
- *
- * Derived, like every other id a round writes. The round's step can re-run, and
- * a second id for the same question would put a second question to the person.
- */
-export function humanRequestId(taskId: string, round: number): string {
-  return `task_${taskId}_round_${round}_ask`;
-}
-
-/** Characters a Workflow event type may not contain. */
-const NOT_EVENT_TYPE = /[^A-Za-z0-9_-]/g;
-
-/** The longest event type Workflows accepts. */
-const MAX_EVENT_TYPE_LENGTH = 100;
-
-/**
- * The Workflow event that wakes a run parked on `requestId`.
- *
- * One type per question rather than one for every answer. Workflows buffers an
- * event sent before its wait begins, and one question's run can be woken more
- * than once — every reply recorded against it wakes the run, even one that
- * changed nothing — so a shared type would let a stale wake satisfy the wait on
- * a later question.
- *
- * An event goes to one Task's instance, so the type only has to tell that Task's
- * questions apart. An id past the length Workflows accepts is cut to a prefix and a
- * digest of the whole, which keeps it distinct and the same on every derivation.
- */
-export function humanEventType(requestId: string): string {
-  const type = `hitl-${requestId.replace(NOT_EVENT_TYPE, "-")}`;
-  if (type.length <= MAX_EVENT_TYPE_LENGTH) return type;
-  const digest = fnv1a(requestId);
-  return `${type.slice(0, MAX_EVENT_TYPE_LENGTH - digest.length - 1)}-${digest}`;
-}
-
-/** 32-bit FNV-1a as hex: short, stable, and nothing to import or await. */
-function fnv1a(text: string): string {
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < text.length; i++) {
-    hash ^= text.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return (hash >>> 0).toString(16).padStart(8, "0");
-}
 
 /**
  * The `input-required` Task that asks: the question as text, for a client that
@@ -136,7 +89,7 @@ const answerSchema = z
     message: "an answer carries an optionId, a text, or both"
   })
   // The same bound a turn's own text is held to, for the same reason: this text
-  // is appended to the Session and read by every round after it. Measured on the
+  // is appended to the session and read by every turn after it. Measured on the
   // field rather than on the message, because this is what is kept — the text
   // part beside it is the gatekeeper's rendering of the same answer, and the
   // Worker holds the message as a whole to the same bound.
@@ -173,18 +126,4 @@ export function readHumanReply(message: Message): HumanReply | null {
       return { kind: "timeout", requestId: timeout.data.requestId };
   }
   return null;
-}
-
-/**
- * What wakes a run parked on a question: which run, and which event.
- *
- * The run is named by the message its Task was accepted on — see
- * {@link file://./executor.ts workflowIdForMessage} — which the Durable Object
- * recorded at accept, so an answer does not have to carry it.
- */
-export interface TurnWake {
-  /** The gatekeeper message the Task was accepted on. */
-  messageId: string;
-  /** See {@link humanEventType}. */
-  eventType: string;
 }

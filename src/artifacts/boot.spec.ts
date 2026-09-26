@@ -10,13 +10,10 @@ import { ArtifactsNotBoundError } from "./binding.js";
  *
  * `ARTIFACTS` is required, and the cost of requiring it is deciding *where* a
  * deployment that forgot finds out. The two answers are a writer part-way
- * through a round — which surfaces as a failed subtask naming a Durable Object
- * nobody wired — and DO start, which surfaces as the object refusing to start
- * and saying which lines are missing. This pins the second.
- *
- * Both seams, because they are two Durable Objects: a facet posts its own notes
- * on a path that never passes through its parent, so a check on the parent
- * alone leaves the object that does most of the writing unguarded.
+ * through a task — which surfaces as notes lost from a run — and DO start,
+ * which surfaces as the object refusing to start and saying which lines are
+ * missing. This pins the second. A sub-agent's notes are filed by its parent,
+ * so the parent is the one seam.
  */
 
 // Cast, as every spec here does: `worker-configuration.d.ts` is generated with
@@ -74,11 +71,10 @@ async function bootWithout(binding: string, name: string): Promise<Boot> {
 }
 
 describe("the artifacts binding at DO start", () => {
-  it.each([
-    ["DynamicAgent", "SETTLE_AGENT"],
-    ["RecipeSubagentBase", "TEST_SUBAGENT"]
-  ])("fails %s's onStart when nothing is bound", async (name, binding) => {
-    expect(await bootWithout(binding, name)).toMatchObject({ named: true });
+  it("fails an agent's onStart when nothing is bound", async () => {
+    expect(await bootWithout("TEST_AGENT", "unbound")).toMatchObject({
+      named: true
+    });
   });
 
   it("names every line the wiring needs, the route delegation included", async () => {
@@ -86,7 +82,7 @@ describe("the artifacts binding at DO start", () => {
     // start. The only useful thing to say then is which lines are missing and
     // which files they go in — all of them, because a message that stops at the
     // binding and the export buys an object that starts and links that 404.
-    const { message } = await bootWithout("SETTLE_AGENT", "message");
+    const { message } = await bootWithout("TEST_AGENT", "message");
     expect(message).toMatch(/ARTIFACTS is not bound/);
     expect(message).toMatch(/durable_objects\.bindings/);
     expect(message).toMatch(/new_sqlite_classes/);
@@ -94,18 +90,16 @@ describe("the artifacts binding at DO start", () => {
     expect(message).toMatch(/handleArtifactRoute\(request, env\)/);
   });
 
-  it.each([
-    ["DynamicAgent", "SETTLE_AGENT"],
-    ["RecipeSubagentBase", "TEST_SUBAGENT"]
-  ])("lets %s start on an env that has it", async (_name, binding) => {
+  it("lets an agent start on an env that has it", async () => {
     // The other half of the check: an assertion that fires on the wired case
-    // too would be indistinguishable from one that is simply broken.
-    const ns = namespaces[binding]!;
+    // too would be indistinguishable from one that is simply broken. Any RPC
+    // starts the lifecycle, and with it `onStart`.
+    const ns = namespaces.TEST_AGENT as DurableObjectNamespace<
+      {
+        getTask(id: string): Promise<unknown>;
+      } & Rpc.DurableObjectBranded
+    >;
     const stub = ns.get(ns.idFromName(`boot:ok:${crypto.randomUUID()}`));
-    await runInDurableObject(stub, async (raw) => {
-      await expect(
-        (raw as unknown as Bootable).onStart()
-      ).resolves.toBeUndefined();
-    });
+    await expect(stub.getTask("none")).resolves.toBeNull();
   });
 });

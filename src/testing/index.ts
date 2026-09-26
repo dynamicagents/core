@@ -16,8 +16,8 @@
  *
  * - **VCR (spec side)** — `setupRecording()`, which names a cassette per test and
  *   talks to the Node-side recorder over the in-band control channel.
- * - **Fakes** — a `SessionLike` reference implementation and a scripted
- *   `LanguageModel`, so a loop can be driven with no model call at all.
+ * - **Fakes** — scripted streaming `LanguageModel`s, so a Think turn runs with no
+ *   model call at all.
  * - **Fixtures** — Ed25519 keypairs and a gatekeeper-JWT signer, so the zero-trust
  *   path can be exercised end to end without a real gatekeeper.
  */
@@ -34,20 +34,18 @@ export {
   type VcrReleaseResult
 } from "./vcr-shared.js";
 
-export { FakeSession } from "./fake-session.js";
-// `throwingModel`, `countingModel` and `rateLimitedModel` were reachable only
-// through a deep `dist/` path until now, which meant a consumer could not assert
-// the one thing they exist for: that a rate limit is waited out on the *same*
-// model rather than falling through to the fallback slot.
 export {
-  mockModel,
-  finalReply,
-  throwingModel,
-  countingModel,
+  askUser,
+  call,
   inspectingModel,
+  mockModel,
+  reply,
+  scriptedModel,
+  throwingModel,
+  type MockStep,
   type ModelCall,
-  rateLimitedModel,
-  type MockStep
+  type ModelPrompt,
+  type ModelTurnView
 } from "./mock-model.js";
 
 export { makeGatekeeperToken, type GatekeeperTokenOptions } from "./auth.js";
@@ -56,7 +54,6 @@ export {
   GATEKEEPER_ORIGIN,
   TEST_AGENT_PRIVATE_JWK,
   TEST_GATEKEEPER_PRIVATE_JWK,
-  TEST_MODELS,
   gatekeeperPublicJwks,
   testAgentMessage,
   testStatus,
@@ -66,6 +63,7 @@ export {
 export { doStorage, makeDoHelpers, type DoTestHelpers } from "./do.js";
 
 export {
+  TERMINAL_CALLBACK_STATES,
   createAgentHarness,
   type AgentHarness,
   type AgentHarnessOptions,

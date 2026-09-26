@@ -8,32 +8,22 @@
 export {
   PLUGIN_CONTRACT_VERSION,
   definePlugin,
+  restrictTools,
   type AgentPlugin,
-  type EmitProgress,
-  type MainAgentToolApproval,
-  type MainAgentToolApprovalRule,
-  type MainAgentToolContext,
+  type PluginContext,
+  type PluginContextBlock,
   type PluginRequirements,
-  type RecipeToolSet,
-  type ResolveRuntimeContext,
-  type ToolFamilyBuilder,
-  type ToolFamilyContext
+  type RestrictToolsOptions
 } from "./plugin.js";
 
 export type {
-  DelegationNames,
-  RecipeLimits,
-  ResolvedRecipe,
-  SubtaskParams,
-  SubtaskParamsSchema,
-  SubtaskParamsShape,
-  SubtaskTypeSpec,
-  ValidatedRecipe
-} from "./recipe.js";
+  SubAgentPrepareContext,
+  SubAgentSettleContext,
+  SubAgentSpec
+} from "./subagent.js";
 
 export {
-  RecipeValidationError,
-  resolveLimits,
-  validateRecipe,
-  type RecipePolicy
-} from "./validation.js";
+  PluginSetupError,
+  assemblePlugins,
+  type AssembledPlugins
+} from "./assemble.js";

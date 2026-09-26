@@ -12,8 +12,8 @@
 
 /**
  * How long an artifact is kept. The same clock the rest of a Task's durable
- * state ages out on — see `cleanupOldTasks` in
- * {@link file://../host/agent.ts DynamicAgent}.
+ * state ages out on — see `TASK_RETENTION_MS` in
+ * {@link file://../agent/tasks.ts A2ATasks}.
  */
 export const ARTIFACT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -98,7 +98,7 @@ export interface ArtifactEntryInput {
    * Both emission sites already hold one — the notification key, which the
    * gatekeeper dedupes replayed progress on and which is therefore derived from
    * position rather than from content or a clock. Reusing it here is what lets a
-   * Workflow step retry its post loop and leave the log as it found it: a note
+   * finished run replay its notes and leave the log as it found it: a note
    * recorded once, on the sequence it already had, rather than a second copy
    * beside it. See {@link file://../a2a/push.ts PushChannel.working}.
    */
@@ -106,25 +106,12 @@ export interface ArtifactEntryInput {
 }
 
 /**
- * ## Why this schema is hand-written, and outside core's migration journal
+ * ## Why this schema carries a version
  *
- * {@link file://./do.ts Artifacts} is core's first table owner that is not an
- * `Agent` subclass, and it is addressed by a well-known name — one instance per
- * deployment — so its SQLite is a different *database* from every agent DO's,
- * holding none of core's tables and read by none of its models. That is what
- * keeps it out of the drizzle journal, for a mechanical reason rather than a
- * stylistic one: `drizzle.config.ts` names one schema and one output directory,
- * and `migrate()` applies whatever that one journal holds — so enrolling this
- * object would create core's agent tables inside it.
- *
- * The **query** half was never under a rule either. The rule lives on
- * {@link file://../db/db.ts AgentDB} and is narrow — *never import the
- * migrator* — and raw SQL on both halves is already what the subagent facet
- * does. A second drizzle schema module and a second handle, for tables nothing
- * outside this file reads, would buy nothing here.
- *
- * What a hand-written schema does owe is its own bookkeeping — see
- * {@link CURRENT_SCHEMA_VERSION}.
+ * {@link file://./do.ts Artifacts} is addressed by a well-known name — one
+ * instance per deployment — and, unlike an agent object, it survives a
+ * deployment's fresh start. So its hand-written schema owes its own
+ * bookkeeping — see {@link CURRENT_SCHEMA_VERSION}.
  */
 const DDL = [
   `CREATE TABLE IF NOT EXISTS schema_meta (
@@ -219,9 +206,8 @@ export function ensureArtifactSchema(
       .exec<{ version: number }>("SELECT version FROM schema_meta WHERE id = 1")
       .toArray()[0]?.version ?? 0;
   if (from === target) return from;
-  // The same refusal `AgentDB` makes for a plugin store: an older build writing
-  // its own number over a newer one would then re-run the steps between them,
-  // against tables that already have what they add.
+  // An older build writing its own number over a newer one would then re-run
+  // the steps between them, against tables that already have what they add.
   if (from > target)
     throw new Error(
       `artifacts store is at schema version ${from} on disk but this build ` +
