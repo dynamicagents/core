@@ -32,9 +32,8 @@
     // `interface Env {}` that `wrangler types` augments in the consumer, and the
     // Agents SDK constrains its own base class to it
     // (`class Agent<Env extends Cloudflare.Env = Cloudflare.Env>`). So
-    // `RecipeSubagentBase` in `src/subagent/index.ts` must mirror that
-    // constraint — dropping it fails with "Type 'TEnv' does not satisfy the
-    // constraint 'Env'". Bare `Env` stays forbidden; `Cloudflare.Env` is a
+    // `A2AAgent` and `SubAgent` in `src/think/` must mirror that constraint —
+    // dropping it fails with "Type 'Env' does not satisfy the constraint". Bare `Env` stays forbidden; `Cloudflare.Env` is a
     // declaration-merging seam, not a binding of this repo's.
     //
     // A path rather than a package name, which `types` accepts: this is a file in

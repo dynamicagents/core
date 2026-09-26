@@ -4,17 +4,16 @@
  *
  * ## The problem it solves
  *
- * A delegating round posts a labelled note every time a subagent has something
- * to say, and every one of them lands in the thread the person is reading, in
+ * An agent posts a labelled note every time a sub-agent has something to say,
+ * and every one of them lands in the thread the person is reading, in
  * the same voice as the answer they are waiting for. A long run can produce
  * dozens. The notes are worth keeping — they are the only account of what the
  * run actually did — but a thread is the wrong place to keep them.
  *
  * So they go somewhere with a link, and the thread gets the link. A labelled
  * note is posted as that link until one such post **lands**; every note after
- * that is recorded and not posted at all. Main-agent progress — a round's
- * acknowledgement, its step text — is untouched: it is the conversation, not an
- * account of one.
+ * that is recorded and not posted at all. The agent's own progress — its step
+ * text — is untouched: it is the conversation, not an account of one.
  *
  * ## Why delivery, and not the sequence, is what ends the posting
  *
@@ -39,16 +38,16 @@
  * should cost the person the note, so both post it verbatim.
  *
  * An ingest that *fails* is not one of them, and does not fall back to posting
- * the note either. Both emission sites run inside durable steps, so the useful
- * answer to a store that did not take the write is to let the step retry — the
- * artifact dedupes on {@link SubagentNote.key}, so the replay records the note
- * once and finds the link still unannounced. Swallowing the failure here is what
- * would lose the note: it would be filed by an attempt that then failed, or
- * posted verbatim beside a transcript that already had it.
+ * the note either. Every note is persisted by the run that wrote it and
+ * replayed when the run finishes, so the useful answer to a store that did not
+ * take the write is the replay — the artifact dedupes on
+ * {@link SubagentNote.key}, so it records the note once and finds the link
+ * still unannounced. Swallowing the failure here is what would lose the note:
+ * it would be posted verbatim beside a transcript that already had it.
  */
 
 import { TaskState } from "@a2a-js/sdk";
-import { labelSubagentNote, subagentNoteLabel } from "../subtasks/progress.js";
+import { labelSubagentNote, subagentNoteLabel } from "./label.js";
 import type { ArtifactsEnv } from "../env.js";
 import { assertArtifactsBound, requireArtifactsStub } from "./binding.js";
 import { artifactViewerUrl } from "./path.js";
@@ -120,8 +119,8 @@ export async function transcribeNote(
   // The link first, the fact that it arrived second — in that order, because the
   // failure that lands between them costs a duplicate link and the other order
   // costs the only one. `announce` is unguarded for the reason the ingest above
-  // is: inside a durable step, a store that would not take the write is worth a
-  // retry, and the retry finds the note recorded and the link still to announce.
+  // is: the run's replay retries it, and finds the note recorded and the link
+  // still to announce.
   if (await post(artifactViewerUrl(note.origin, token))) {
     await stub.announce(token);
   }
@@ -135,8 +134,8 @@ export async function transcribeNote(
  *
  * The RPC is best-effort where {@link transcribeNote}'s is not, and the
  * difference is what the caller can still do about it. This runs from
- * `DynamicAgent`'s settle path, *after* the terminal row is durable and with no
- * step left to retry — so a store that will not take the settle must not turn a
+ * `A2AAgent`'s settle path, *after* the terminal row is durable and with
+ * nothing left to retry — so a store that will not take the settle must not turn a
  * task that finished into a call that failed. The binding itself is checked
  * outside that, because an unbound namespace is a wiring fault rather than an
  * outage and has a fix worth raising.

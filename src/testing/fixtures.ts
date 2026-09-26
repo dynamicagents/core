@@ -22,24 +22,6 @@
 import { type JWK } from "jose";
 import { Role, type Message, type Task, type TaskState } from "@a2a-js/sdk";
 
-/**
- * A model pair for specs, and the only place one should be spelled.
- *
- * Core ships no model default — {@link ModelConfig.chatModelId} explains why —
- * so every `resolveConfig` call needs one, including in tests. Without a shared
- * fixture each spec invents its own id, and a suite full of invented ids is a
- * suite that cannot tell "the config requires a model" from "this spec forgot
- * one".
- *
- * The ids are deliberately obvious placeholders rather than real Workers AI
- * models: nothing here reaches a binding, and a real id in a fixture is an
- * invitation to copy it into an agent without deciding anything.
- */
-export const TEST_MODELS = {
-  chatModelId: "test:primary",
-  fallbackChatModelId: "test:fallback"
-} as const;
-
 /** The gatekeeper origin used in all tests. Must match vitest.config.ts and the MockAgent setup. */
 export const GATEKEEPER_ORIGIN = "https://gatekeeper.test";
 

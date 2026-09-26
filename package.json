@@ -1,7 +1,7 @@
 {
   "name": "@dynamicagents/core",
   "version": "0.12.0",
-  "description": "Shared, mandatory foundation for Dynamic Agents on Cloudflare Workers: zero-trust A2A, durable task lifecycle, delegation and subagent runtime, test harness.",
+  "description": "Shared, mandatory foundation for Dynamic Agents on Cloudflare Workers: zero-trust A2A, and the durable A2A task lifecycle on @cloudflare/think.",
   "keywords": [
     "a2a",
     "agent2agent",
@@ -12,7 +12,7 @@
     "zero-trust",
     "jwks",
     "eddsa",
-    "workflows"
+    "think"
   ],
   "license": "Apache-2.0",
   "author": "Dynamic Agents",
@@ -49,41 +49,17 @@
       "types": "./dist/worker/index.d.ts",
       "import": "./dist/worker/index.js"
     },
-    "./agent": {
-      "types": "./dist/agent/index.d.ts",
-      "import": "./dist/agent/index.js"
+    "./think": {
+      "types": "./dist/think/index.d.ts",
+      "import": "./dist/think/index.js"
     },
-    "./host": {
-      "types": "./dist/host/index.d.ts",
-      "import": "./dist/host/index.js"
-    },
-    "./alarm": {
-      "types": "./dist/alarm/index.d.ts",
-      "import": "./dist/alarm/index.js"
+    "./model": {
+      "types": "./dist/model/index.d.ts",
+      "import": "./dist/model/index.js"
     },
     "./artifacts": {
       "types": "./dist/artifacts/index.d.ts",
       "import": "./dist/artifacts/index.js"
-    },
-    "./job": {
-      "types": "./dist/job/index.d.ts",
-      "import": "./dist/job/index.js"
-    },
-    "./round": {
-      "types": "./dist/round/index.d.ts",
-      "import": "./dist/round/index.js"
-    },
-    "./subtasks": {
-      "types": "./dist/subtasks/index.d.ts",
-      "import": "./dist/subtasks/index.js"
-    },
-    "./subagent": {
-      "types": "./dist/subagent/index.d.ts",
-      "import": "./dist/subagent/index.js"
-    },
-    "./db": {
-      "types": "./dist/db/index.d.ts",
-      "import": "./dist/db/index.js"
     },
     "./testing": {
       "types": "./dist/testing/index.d.ts",
@@ -106,7 +82,6 @@
   },
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
-    "db:generate": "drizzle-kit generate && node scripts/build-migrations.mjs",
     "keys": "node scripts/generate-keys.mjs",
     "types": "wrangler types --include-env=false",
     "types:check": "wrangler types --include-env=false --check && node scripts/verify-runtime-types.mjs",
@@ -124,11 +99,11 @@
   "dependencies": {
     "@a2a-js/sdk": "^1.2.0",
     "@dynamicagents/g2a-protocol": "^0.4.1",
-    "drizzle-orm": "^0.45.2",
     "jose": "^6.2.12",
     "zod": "^4.6.5"
   },
   "peerDependencies": {
+    "@cloudflare/think": ">=0.19.0 <0.20.0",
     "@cloudflare/vitest-plugin": ">=1",
     "@typescript-eslint/utils": ">=8",
     "agents": ">=0.24.0 <0.25.0",
@@ -148,11 +123,11 @@
     }
   },
   "devDependencies": {
+    "@cloudflare/think": "^0.19.0",
     "@cloudflare/vitest-plugin": "^1.1.9",
     "@types/node": "^26.5.1",
     "agents": "^0.24.0",
     "ai": "^7.0.101",
-    "drizzle-kit": "^0.31.10",
     "eslint": "^10.10.0",
     "husky": "^9.1.7",
     "prettier": "^3.9.6",
@@ -179,6 +154,7 @@
     "fsevents": false,
     "sharp": false,
     "workerd": false,
-    "core-js-pure": false
+    "core-js-pure": false,
+    "@mongodb-js/zstd": false
   }
 }

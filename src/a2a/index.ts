@@ -41,12 +41,9 @@ export {
 
 export {
   buildInputRequiredTask,
-  humanEventType,
-  humanRequestId,
   readHumanReply,
   type HumanAnswer,
-  type HumanReply,
-  type TurnWake
+  type HumanReply
 } from "./hitl.js";
 
 export {
@@ -82,14 +79,6 @@ export {
   signCallbackJwt,
   postNotification
 } from "./notify.js";
-
-export {
-  deliverTerminalTask,
-  deliverAbandonedTask,
-  TaskAlreadyTerminalError,
-  type DeliverTerminalOptions,
-  type AbandonedTaskOptions
-} from "./deliver.js";
 
 export { signCallerToken, type CallerTokenOptions } from "./caller-token.js";
 
@@ -129,17 +118,12 @@ export { DurableTaskStore } from "./task-store.js";
 
 export {
   A2AExecutor,
-  workflowIdForMessage,
-  ignoreAlreadyExists,
   type AcceptedTurn,
-  type ExecutorConfig,
-  type TurnResumer,
-  type TurnStarter
+  type ExecutorConfig
 } from "./executor.js";
 
 export type {
   AgentResolver,
-  AnsweredTask,
   TaskAgent,
   TaskListPage,
   TaskListQuery

@@ -3,7 +3,7 @@
  *
  * **The binding is required**, and that is the property to preserve when
  * editing anything below. A deployment that has not declared `ARTIFACTS` is
- * misconfigured, not configured differently: every delegating round files its
+ * misconfigured, not configured differently: every sub-agent run files its
  * notes here, so the alternative to "the binding is there" is not a second
  * behaviour worth having — it is a thread full of the notes the link exists to
  * replace, chosen by nobody, reached by forgetting a line of `wrangler.jsonc`.
@@ -66,9 +66,8 @@ export class ArtifactsNotBoundError extends Error {
 /**
  * The binding, or {@link ArtifactsNotBoundError}.
  *
- * Called at DO start — see `DynamicAgent.onStart` and
- * `RecipeSubagentBase.onStart` — so a deployment that forgot the binding fails
- * where `db.ensureReady()` fails, before any request reaches a writer. The
+ * Called at DO start — see `A2AAgent.onStart` — so a deployment that forgot
+ * the binding fails before any request reaches a writer. The
  * runtime check survives the required type because `ArtifactsEnv` describes
  * what a consumer *declared*, and a `wrangler.jsonc` that never grew the
  * binding still typechecks against an `Env` that claims it.

@@ -1,1 +1,0 @@
-ALTER TABLE `subtasks` DROP COLUMN `depends_on_json`;

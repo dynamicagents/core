@@ -19,7 +19,7 @@ import {
  * Drive one A2A turn against a Worker the way a gatekeeper does.
  *
  * Core already shipped every *piece* of this — a token signer, Ed25519 fixtures,
- * a fake session, a scripted model — and no assembly, so every consumer wrote the
+ * a scripted model — and no assembly, so every consumer wrote the
  * assembly themselves and got the same four things wrong first: the token's
  * audience is the **endpoint** and not the origin, the tenant claim has to match
  * the tenant in the body, `SendMessage` is refused without a push config, and the
@@ -37,11 +37,10 @@ import {
  * expect(accepted.status.state).toBe(TaskState.TASK_STATE_SUBMITTED);
  * ```
  *
- * What it covers is the **synchronous accept**: everything from the gatekeeper's
- * bearer token to the `submitted` Task the Worker returns. The turn itself runs
- * in a Workflow the test runtime does not start, so assert on the callbacks with
- * {@link AgentHarness.callbacks} while driving the workflow body directly with a
- * fake `step`.
+ * The accept is synchronous; the turn runs afterwards on the agent's own alarm,
+ * so there is nothing to await. Watch for its effect instead: every callback the
+ * agent posts lands in {@link AgentHarness.callbacks}, and
+ * {@link AgentHarness.waitForTerminal} waits for the one that settles a task.
  */
 
 /** The minimum of an `ExportedHandler` this harness calls. */
@@ -60,6 +59,17 @@ export interface AgentHarnessOptions<TEnv> {
   rpcPath?: string;
   /** The origin the Worker is addressed on. Defaults to the test fixture's. */
   origin?: string;
+  /**
+   * The gatekeeper identity every token carries. Its `key` names the agent's
+   * Durable Object, so two harnesses with different keys drive two objects —
+   * which is how specs stay apart when an object runs its turns one at a time.
+   */
+  identity?: {
+    key: string;
+    name?: string;
+    kind?: string;
+    workspaceId?: number;
+  };
 }
 
 /** One push notification the agent POSTed back, already decoded. */
@@ -130,6 +140,46 @@ export interface AgentHarness {
   interceptGatekeeper(): Disposable;
   /** Callbacks captured since {@link interceptGatekeeper}, in arrival order. */
   readonly callbacks: CapturedCallback[];
+  /**
+   * Wait for a callback about `taskId` in `state` (e.g. `TASK_STATE_WORKING`),
+   * and return every such callback so far. Throws after `timeoutMs`.
+   */
+  waitForState(
+    taskId: string,
+    state: string,
+    options?: { timeoutMs?: number }
+  ): Promise<CapturedCallback[]>;
+  /**
+   * Wait for the callback that settles `taskId` — completed, failed, canceled
+   * or rejected — and return it. Throws after `timeoutMs`.
+   */
+  waitForTerminal(
+    taskId: string,
+    options?: { timeoutMs?: number }
+  ): Promise<CapturedCallback>;
+}
+
+/** The states a task never leaves, as a callback spells them. */
+export const TERMINAL_CALLBACK_STATES: ReadonlySet<string> = new Set([
+  "TASK_STATE_COMPLETED",
+  "TASK_STATE_FAILED",
+  "TASK_STATE_CANCELED",
+  "TASK_STATE_REJECTED"
+]);
+
+/** Poll until `read` yields something, or throw naming what never came. */
+async function until<T>(
+  what: string,
+  read: () => T | undefined,
+  timeoutMs: number
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = read();
+    if (value !== undefined) return value;
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
 }
 
 /**
@@ -181,7 +231,8 @@ export function createAgentHarness<TEnv>(
   const token = (overrides: { tenant?: string } = {}) =>
     makeGatekeeperToken({
       audience: endpoint,
-      tenant: overrides.tenant ?? tenant
+      tenant: overrides.tenant ?? tenant,
+      ...(options.identity ? { identity: { ...options.identity } } : {})
     });
 
   const rpc = async (
@@ -259,6 +310,30 @@ export function createAgentHarness<TEnv>(
     callbacks,
     token,
     rpc,
+
+    waitForState(taskId, state, waitOptions = {}) {
+      return until(
+        `a ${state} callback for task ${taskId}`,
+        () => {
+          const found = callbacks.filter(
+            (c) => c.taskId === taskId && c.state === state
+          );
+          return found.length > 0 ? found : undefined;
+        },
+        waitOptions.timeoutMs ?? 30_000
+      );
+    },
+
+    waitForTerminal(taskId, waitOptions = {}) {
+      return until(
+        `a terminal callback for task ${taskId}`,
+        () =>
+          callbacks.find(
+            (c) => c.taskId === taskId && TERMINAL_CALLBACK_STATES.has(c.state)
+          ),
+        waitOptions.timeoutMs ?? 30_000
+      );
+    },
 
     send(text, sendOptions = {}) {
       return sendMessage({

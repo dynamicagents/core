@@ -22,8 +22,8 @@
  *
  * Core already sends the origin into the Durable Object on every turn, one field
  * short of this use. `A2AExecutor` computes `jku` as `${origin}${jwksPath}` and
- * it rides {@link file://./push.ts TurnPushContext} through the Workflow into
- * `runTaskTurn` and `executeSubtaskChunk`.
+ * it rides {@link file://./push.ts TurnPushContext} into the agent on every
+ * accepted turn.
  *
  * That is the same origin `signCallerToken` needs, and not by coincidence: a
  * caller token's `jku` **must** be the JWKS the verifier fetches, and `iss` must
@@ -37,10 +37,9 @@
  * The first origin an isolate is told wins, and later ones are ignored. That is
  * not laziness about staleness — it is what makes the value safe to *read*.
  *
- * A Durable Object's input gate stays open across a non-storage await, and this
- * package runs concurrent RPCs into one object by design (`round/workflow.ts`
- * runs a round's branches under `Promise.all`). Mutable instance state can
- * therefore change while a turn is awaiting a model call, and the credential
+ * A Durable Object's input gate stays open across a non-storage await, and
+ * one object serves RPCs, queue items and its own turn concurrently. Mutable
+ * instance state can therefore change while a turn is awaiting a model call, and the credential
  * thunks that read this are lazy — they run several frames below the turn, when
  * the client is built. Pinned, the field is immutable after its first write, so
  * every concurrent reader in the isolate gets the same string and no turn can
@@ -105,7 +104,7 @@ export class SelfOrigin {
       throw new Error(
         "this deployment's own origin is not known on this instance yet: it is " +
           "learned from the `jku` that arrives with every turn, so it is " +
-          "available inside a turn or a subtask chunk — not from onStart, a " +
+          "available once a turn has been accepted — not from onStart, a " +
           "constructor or a scheduled callback"
       );
     }

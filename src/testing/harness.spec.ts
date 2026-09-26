@@ -69,8 +69,13 @@ const handler = createA2AWorker<TestEnv>({
       manifest,
       resolveAgent: () =>
         ({
-          async beginTask(input: { taskId: string; contextId: string }) {
-            return buildSubmittedTask(input.taskId, input.contextId);
+          async acceptTask(turn: {
+            taskId: string;
+            contextId: string;
+            text: string;
+          }) {
+            accepted.push({ taskId: turn.taskId, text: turn.text });
+            return buildSubmittedTask(turn.taskId, turn.contextId);
           },
           async getTask() {
             return null;
@@ -80,11 +85,11 @@ const handler = createA2AWorker<TestEnv>({
           },
           async cancelTask() {
             return null;
+          },
+          async answerTask() {
+            return null;
           }
-        }) as never,
-      startTurn: async (turn) => {
-        accepted.push({ taskId: turn.taskId, text: turn.text });
-      }
+        }) as never
     }
   }
 });
@@ -194,7 +199,7 @@ describe("createAgentHarness", () => {
     // *said* impossible to write.
     //
     // The terminal Task is built with core's own `buildCompletedTask` — the
-    // exact producer the round workflow uses. Hand-rolling the shape here would
+    // exact producer the agent uses. Hand-rolling the shape here would
     // test the harness against a message no agent actually sends.
     const harness = createAgentHarness({ worker, env, tenant: TEST_TENANT });
     using _ = harness.interceptGatekeeper();
@@ -213,12 +218,9 @@ describe("createAgentHarness", () => {
       terminal as unknown as Task
     );
 
-    // Two callbacks, and the count is the assertion: the *edge* posts the
-    // `submitted` accept before any turn runs, so a spec that expected only its
-    // own terminal callback would be asserting the accept-and-notify contract
-    // does not happen.
+    // One callback, and the count is the assertion: the edge posts nothing of
+    // its own. The accept is the response; every callback is the agent's.
     expect(harness.callbacks.map((c) => c.state)).toEqual([
-      "TASK_STATE_SUBMITTED",
       "TASK_STATE_COMPLETED"
     ]);
 
@@ -261,7 +263,7 @@ describe("replying to a question through the harness", () => {
         manifest,
         resolveAgent: () =>
           ({
-            async beginTask(): Promise<never> {
+            async acceptTask(): Promise<never> {
               throw new Error("a reply must never begin a task");
             },
             async getTask(taskId: string) {
@@ -275,16 +277,9 @@ describe("replying to a question through the harness", () => {
             },
             async answerTask(input: { taskId: string }) {
               replies.push(input);
-              return {
-                task: buildSubmittedTask(input.taskId, "ctx-1"),
-                wake: null
-              };
+              return buildSubmittedTask(input.taskId, "ctx-1");
             }
-          }) as never,
-        startTurn: async () => {
-          throw new Error("a reply must never start a turn");
-        },
-        resumeTurn: async () => {}
+          }) as never
       }
     }
   });

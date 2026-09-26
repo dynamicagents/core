@@ -110,18 +110,15 @@ function buildTaskUpdate(
 
 /**
  * A non-terminal `working` Task snapshot carrying an intermediate content message.
- * Streamed live from the DO as the tool loop emits content before the final reply.
+ * Posted from the object as the model says something before a tool call.
  *
- * `messageId` is derived from `${taskId}:${key}` — stable across re-runs (see
- * {@link agentTextMessage}) so the gatekeeper dedupes correctly on workflow replay.
+ * `messageId` is derived from `${taskId}:${key}` — stable across a re-post (see
+ * {@link agentTextMessage}) so the gatekeeper dedupes a redelivery.
  *
- * `key` is a **semantic** string, not a step counter, and the distinction is
- * load-bearing: an agent that runs several rounds per task emits progress from
- * each, so a bare index makes round 0's third step and round 1's third step the
- * same message to the gatekeeper — it dedupes the second away and the user watches
- * a task go quiet. A caller that genuinely has one flat sequence can pass
- * `String(i)`; one with rounds should key on both (`r1:step:3`), and milestones
- * on what they are (`ack:1`).
+ * `key` must be distinct for every post of a task: a task spans several turns,
+ * so a per-turn step index makes one turn's third step and the next turn's the
+ * same message to the gatekeeper — it dedupes the second away and the user
+ * watches a task go quiet. The agent keys on a durable per-task counter.
  */
 export function buildWorkingTask(
   taskId: string,
@@ -140,9 +137,9 @@ export function buildWorkingTask(
 
 /**
  * The terminal `completed` Task POSTed to the gatekeeper callback. The `messageId` is
- * deterministic (`${taskId}:final`, not a fresh UUID) because this is built in the
- * workflow body, which re-runs on replay: a random id would change on a notify-step
- * retry and the gatekeeper would dedupe the final message as a new one and double-post.
+ * deterministic (`${taskId}:final`, not a fresh UUID) because a delivery is
+ * retried: a random id would change on a retry and the gatekeeper would take the
+ * final message as a new one and double-post.
  */
 export function buildCompletedTask(
   taskId: string,
@@ -210,7 +207,7 @@ export async function signCallbackJwt(
 /**
  * POST a Task snapshot to the gatekeeper's push-notification webhook, wrapped in the
  * v1.0 `StreamResponse` envelope. Returns the raw `Response` so the caller (the
- * workflow's `notify` step) can decide whether a non-2xx warrants a retry.
+ * delivery queue) can decide whether a non-2xx warrants a retry.
  */
 export async function postNotification(
   url: string,

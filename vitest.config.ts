@@ -2,15 +2,19 @@ import { defineConfig } from "vitest/config";
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import path from "node:path";
 import { createVcr, recordFromEnv } from "./src/testing/node.js";
+import {
+  GATEKEEPER_ORIGIN,
+  TEST_AGENT_PRIVATE_JWK
+} from "./src/testing/fixtures.js";
 
 /**
  * Two projects, because the harness has two realms and both need covering.
  *
  * **`workers`** — almost everything. Specs run inside workerd, not Node: that is
- * not a preference, `AgentDB` drives `ctx.storage.sql` and the Agents SDK's
- * `Session` has no Node-side stand-in. The pool boots the real runtime with the
- * Durable Objects declared in `wrangler.jsonc`, and `test/worker.ts` is the host
- * that owns them.
+ * not a preference, a Think agent drives `ctx.storage.sql`, alarms and facets,
+ * none of which have a Node-side stand-in. The pool boots the real runtime with
+ * the Durable Objects declared in `wrangler.jsonc`, and `test/worker.ts` is the
+ * host that owns them.
  *
  * **`node`** — `*.node.spec.ts`, the Node-realm half of the VCR harness (the
  * cassette store reaches `node:fs`, which workerd does not have). Before this
@@ -44,7 +48,27 @@ export default defineConfig({
             // is ignored rather than rejected, which is how the previous wiring
             // failed silently. Every outbound fetch with no active cassette is
             // blocked, so a spec cannot reach the network by accident either.
-            miniflare: { outboundService: vcr.outboundService }
+            miniflare: {
+              outboundService: vcr.outboundService,
+              bindings: {
+                A2A_SIGNING_KEY: JSON.stringify(TEST_AGENT_PRIVATE_JWK),
+                GATEKEEPER_ORIGINS: JSON.stringify([GATEKEEPER_ORIGIN])
+              },
+              // Test-only bindings for the sub-agent facets. A deployment needs
+              // none — facet storage is created beneath the bound parent — but
+              // the pool only marks *bound* classes as Durable Object classes,
+              // so without these `runAgentTool` cannot create a child.
+              durableObjects: {
+                TEST_CHILD: { className: "TestChild", useSQLite: true },
+                TEST_BACKGROUND: {
+                  className: "TestBackground",
+                  useSQLite: true
+                }
+              }
+            },
+            // Workers AI has no local mode, and left unset the pool opens a
+            // remote connection per test file. Every model here is scripted.
+            remoteBindings: false
           })
         ],
         test: {
@@ -58,7 +82,11 @@ export default defineConfig({
           ],
           // Node realm. Last chance to flush a cassette; each one is already
           // written when its test releases it, so this is only a safety net.
-          globalSetup: ["./src/testing/vcr-global-setup.ts"]
+          globalSetup: ["./src/testing/vcr-global-setup.ts"],
+          // A lifecycle spec waits on real alarms: a detached child sleeps for
+          // seconds, and a `check_back` wake is at least ten.
+          testTimeout: 60_000,
+          hookTimeout: 60_000
         }
       },
       {

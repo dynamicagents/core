@@ -294,7 +294,7 @@ describe("transcribeNote", () => {
     );
     expect(lost.posted).toEqual([]);
 
-    // What the Workflow step does next, against the store that took the write.
+    // What the run's replay does next, against the store that took the write.
     const retried = poster();
     await transcribeNote(wired, committed, retried.post);
     expect(retried.posted[0]).toMatch(LINK);

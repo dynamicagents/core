@@ -2,70 +2,25 @@
  * `@dynamicagents/core` — the mandatory foundation for a Dynamic Agent.
  *
  * This root entry carries only what nearly every consumer touches: the plugin
- * contract, the config shape, the runtime factory, and the platform facts.
- * Everything else lives behind a subpath (`/a2a`, `/agent`, `/db`, `/subtasks`,
- * `/subagent`, `/worker`, `/testing`), so importing the delegation layer does not
- * pull in the A2A adapter and importing the test harness never reaches a
- * production bundle.
+ * contract and the env slices. Everything else lives behind a subpath
+ * (`/think`, `/model`, `/a2a`, `/worker`, `/artifacts`, `/testing`), so
+ * importing the contract does not pull in Think, and importing the test harness
+ * never reaches a production bundle.
  */
 
 export {
-  createAgentRuntime,
-  RuntimeSetupError,
-  buildRecipeTools,
-  collectToolFamilies,
-  type AgentRuntime,
-  type CreateAgentRuntimeOptions
-} from "./runtime/index.js";
-
-export {
   PLUGIN_CONTRACT_VERSION,
+  PluginSetupError,
+  assemblePlugins,
   definePlugin,
-  restrictMainAgentTools,
-  withoutToolApproval,
+  restrictTools,
   type AgentPlugin,
-  type RestrictMainAgentToolsOptions,
-  type WithoutToolApprovalOptions,
-  type EmitProgress,
-  type MainAgentToolApproval,
-  type MainAgentToolApprovalRule,
-  type MainAgentToolContext,
+  type AssembledPlugins,
+  type PluginContext,
+  type PluginContextBlock,
   type PluginRequirements,
-  type RecipeToolSet,
-  type ResolveRuntimeContext,
-  type ToolFamilyBuilder,
-  type ToolFamilyContext
-} from "./contract/plugin.js";
-
-export type {
-  DelegationNames,
-  RecipeLimits,
-  ResolvedRecipe,
-  SubtaskParams,
-  SubtaskParamsSchema,
-  SubtaskParamsShape,
-  SubtaskTypeSpec,
-  ValidatedRecipe
-} from "./contract/recipe.js";
-
-export {
-  RecipeValidationError,
-  resolveLimits,
-  validateRecipe,
-  type RecipePolicy
-} from "./contract/validation.js";
-
-export {
-  ConfigError,
-  DEFAULT_CORE_CONFIG,
-  resolveConfig,
-  type AgentLimits,
-  type CoreConfig,
-  type CoreConfigOverrides,
-  type MainAgentLimits,
-  type ModelConfig,
-  type SessionConfig
-} from "./config.js";
+  type RestrictToolsOptions
+} from "./contract/index.js";
 
 export {
   parseGatekeeperOrigins,
@@ -76,24 +31,3 @@ export {
 } from "./env.js";
 
 export { withAbort } from "./abort.js";
-
-export {
-  CHUNK_SOFT_MS,
-  CHUNK_STEP,
-  MAX_CHUNKS_PER_BRANCH,
-  MAX_TOOL_CALL_MS,
-  STEP_TIMEOUT_MS,
-  STEPS_PER_INSTANCE,
-  TOOL_CALL_GRACE_MS
-} from "./platform.js";
-
-export {
-  makeWorkspaceHandle,
-  memoryWorkspaceBacking,
-  WorkspaceLimitError,
-  WORKSPACE_MAX_FILES,
-  WORKSPACE_MAX_FILE_BYTES,
-  type WorkspaceBacking,
-  type WorkspaceEntry,
-  type WorkspaceHandle
-} from "./subagent/workspace.js";

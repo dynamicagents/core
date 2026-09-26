@@ -57,7 +57,7 @@ export interface A2ASecretsEnv {
 /**
  * The artifacts object, holding what a run had to say.
  *
- * **Required**, because every delegating round writes to it: a labelled note
+ * **Required**, because every sub-agent run writes to it: a labelled note
  * goes on the Task's transcript and the thread gets a link, and there is no
  * per-deployment switch that turns that back into a thread full of notes. The
  * binding is therefore a structural assumption of core, checked once where a

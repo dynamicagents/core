@@ -69,7 +69,7 @@ export function textOf(message: Message): string {
 
 const encoder = new TextEncoder();
 
-/** Invalid inbound content that must not cross the A2A-to-workflow boundary. */
+/** Invalid inbound content that must not cross the A2A-to-agent boundary. */
 export class InboundPartError extends Error {
   constructor(message: string) {
     super(message);
@@ -124,7 +124,7 @@ export function inboundText(message: Message): string {
  * An `agent`-role message carrying one text part, with the proto-required
  * fields this agent never sets filled in. `messageId` is the gatekeeper's dedupe
  * key, so callers pass a **stable** id (never a fresh random per attempt) — a
- * callback the workflow/DO re-runs must reuse the same id or the gatekeeper
+ * callback that is retried must reuse the same id or the gatekeeper
  * treats the replay as a new message and double-posts.
  */
 export function agentTextMessage(input: {
