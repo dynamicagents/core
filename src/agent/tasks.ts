@@ -19,7 +19,8 @@ import { taskStateLabel, type PlainTask } from "../a2a/task.js";
  *    not the model — whether the task is finished.
  *
  * Every side effect a transition owes — the callback, the settle hooks, a
- * follow-up turn — is recorded **in the same statement** as the transition, and
+ * follow-up turn, an answer's turn — is recorded **in the same statement** as
+ * the transition, and
  * cleared once it has happened. An object evicted in between finds the record
  * at its next start and finishes the job; see `A2AAgent.onStart`.
  *
@@ -91,6 +92,8 @@ export interface TaskRow {
   deliveryKey: string | null;
   /** Whether the settle hooks are still owed. */
   hooksPending: boolean;
+  /** An answer the task resumed on, whose turn is not yet submitted. */
+  answer: FollowUp | null;
 }
 
 /** What {@link A2ATasks.list} is asked for — the `ListTasks` filters. */
@@ -122,6 +125,7 @@ interface StoredTask {
   request_json: string | null;
   delivery_key: string | null;
   hooks_pending: number;
+  answer_json: string | null;
 }
 
 interface StoredWork {
@@ -159,6 +163,7 @@ export class A2ATasks {
       request_json TEXT,
       delivery_key TEXT,
       hooks_pending INTEGER NOT NULL DEFAULT 0,
+      answer_json TEXT,
       push_seq INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
@@ -234,6 +239,15 @@ export class A2ATasks {
       taskId: r.task_id,
       key: r.delivery_key
     }));
+  }
+
+  /** Tasks owing an answer's turn. */
+  pendingAnswers(): string[] {
+    this.#ensure();
+    return this.sql<{ task_id: string }>`
+      SELECT task_id FROM da_a2a_tasks WHERE answer_json IS NOT NULL`.map(
+      (r) => r.task_id
+    );
   }
 
   /** Tasks whose settle hooks are owed. */
@@ -375,8 +389,8 @@ export class A2ATasks {
     const rows = this.sql<{ task_id: string }>`
       UPDATE da_a2a_tasks
       SET state = 'canceled', task_json = ${serialize(canceled)},
-          request_json = NULL, delivery_key = NULL, hooks_pending = 1,
-          updated_at = ${Date.now()}
+          request_json = NULL, delivery_key = NULL, answer_json = NULL,
+          hooks_pending = 1, updated_at = ${Date.now()}
       WHERE task_id = ${taskId}
         AND state IN ('submitted', 'working', 'input-required')
       RETURNING task_id`;
@@ -402,10 +416,16 @@ export class A2ATasks {
   }
 
   /**
-   * Take a parked task back to `working` and return it — or `null` when it is
-   * not parked, which is what a retried answer finds after the first resumed it.
+   * Take a parked task back to `working` on `answer`, and return it — or
+   * `null` when it is not parked, which is what a retried answer finds after
+   * the first resumed it.
+   *
+   * Owes the answer's turn in the same statement, so a submit that fails or an
+   * eviction before it leaves the turn to be sent rather than a task `working`
+   * with no question left to answer. Drops the question's callback too: once
+   * answered, a retry still queued would post it again.
    */
-  resume(taskId: string): PlainTask | null {
+  resume(taskId: string, answer: FollowUp): PlainTask | null {
     const row = this.#stored(taskId);
     if (!row || row.state !== "input-required") return null;
     const task = parse(row.task_json);
@@ -414,13 +434,27 @@ export class A2ATasks {
       message: undefined,
       timestamp: new Date().toISOString()
     };
+    const request = row.request_json
+      ? (JSON.parse(row.request_json) as HitlRequestData)
+      : null;
+    const asked = request ? questionKey(request.requestId) : "";
     const rows = this.sql<{ task_id: string }>`
       UPDATE da_a2a_tasks
       SET state = 'working', task_json = ${serialize(task)},
-          request_json = NULL, updated_at = ${Date.now()}
+          request_json = NULL, answer_json = ${JSON.stringify(answer)},
+          delivery_key = CASE WHEN delivery_key = ${asked}
+                         THEN NULL ELSE delivery_key END,
+          updated_at = ${Date.now()}
       WHERE task_id = ${taskId} AND state = 'input-required'
       RETURNING task_id`;
     return rows.length > 0 ? task : null;
+  }
+
+  /** The answer's turn was submitted. */
+  answered(taskId: string, id: string): void {
+    this.#ensure();
+    this.sql`UPDATE da_a2a_tasks SET answer_json = NULL
+      WHERE task_id = ${taskId} AND json_extract(answer_json, '$.id') = ${id}`;
   }
 
   /**
@@ -435,7 +469,7 @@ export class A2ATasks {
       UPDATE da_a2a_tasks
       SET state = ${state}, task_json = ${serialize(task)},
           delivery_key = ${state}, hooks_pending = 1, request_json = NULL,
-          updated_at = ${Date.now()}
+          answer_json = NULL, updated_at = ${Date.now()}
       WHERE task_id = ${task.id}
         AND state IN ('submitted', 'working', 'input-required')
       RETURNING task_id`;
@@ -653,7 +687,8 @@ function project(row: StoredTask): TaskRow {
       ? (JSON.parse(row.request_json) as HitlRequestData)
       : null,
     deliveryKey: row.delivery_key,
-    hooksPending: row.hooks_pending === 1
+    hooksPending: row.hooks_pending === 1,
+    answer: row.answer_json ? (JSON.parse(row.answer_json) as FollowUp) : null
   };
 }
 

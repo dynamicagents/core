@@ -24,6 +24,12 @@ export interface AssembledPlugins<Env> {
   tools(ctx: PluginContext<Env>): ToolSet;
   actions(ctx: PluginContext<Env>): Record<string, Action>;
   context(): ContextConfig[];
+  /**
+   * Build every tool and action once, so two plugins offering one name fail
+   * the start rather than the first turn. The names are only known once built,
+   * which takes the installing agent's context; call it from `onStart`.
+   */
+  check(ctx: PluginContext<Env>): void;
 }
 
 /**
@@ -91,10 +97,19 @@ export function assemblePlugins<Env>(
     return merged;
   };
 
+  const tools = (ctx: PluginContext<Env>) =>
+    merge("tool", (p) => p.tools?.(ctx)) as ToolSet;
+  const actions = (ctx: PluginContext<Env>) =>
+    merge("action", (p) => p.actions?.(ctx));
+
   return {
     plugins,
-    tools: (ctx) => merge("tool", (p) => p.tools?.(ctx)) as ToolSet,
-    actions: (ctx) => merge("action", (p) => p.actions?.(ctx)),
+    tools,
+    actions,
+    check: (ctx) => {
+      tools(ctx);
+      actions(ctx);
+    },
     context: () =>
       plugins.flatMap((plugin) =>
         (plugin.context ?? []).map(({ label, ...block }) => ({

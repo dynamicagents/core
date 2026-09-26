@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { tool } from "ai";
 import { z } from "zod";
+import type { Action } from "@cloudflare/think";
 import { PluginSetupError, assemblePlugins } from "./assemble.js";
 import {
   PLUGIN_CONTRACT_VERSION,
@@ -51,7 +52,7 @@ describe("assembling an agent's plugins", () => {
     ).toThrow(/TOKEN \(required by "b"\), BROWSER \(required by "b"\)/);
   });
 
-  it("refuses two plugins offering one tool", () => {
+  it("refuses two plugins offering one tool, at the start check", () => {
     const plugins = assemblePlugins(
       [
         definePlugin({ name: "a", tools: () => ({ read: noop }) }),
@@ -59,8 +60,21 @@ describe("assembling an agent's plugins", () => {
       ],
       {}
     );
-    expect(() => plugins.tools(ctx)).toThrow(
+    expect(() => plugins.check(ctx)).toThrow(
       /"a" and "b" both offer the tool "read"/
+    );
+  });
+
+  it("refuses two plugins offering one action, at the start check", () => {
+    const plugins = assemblePlugins(
+      [
+        definePlugin({ name: "a", actions: () => ({ post: {} as Action }) }),
+        definePlugin({ name: "b", actions: () => ({ post: {} as Action }) })
+      ],
+      {}
+    );
+    expect(() => plugins.check(ctx)).toThrow(
+      /"a" and "b" both offer the action "post"/
     );
   });
 

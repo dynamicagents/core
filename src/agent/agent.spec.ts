@@ -2,13 +2,17 @@ import { describe, it, expect } from "vitest";
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { TaskState } from "@a2a-js/sdk";
-import type { HitlRequestData } from "@dynamicagents/g2a-protocol";
+import {
+  HITL_REQUEST_TYPE,
+  type HitlRequestData
+} from "@dynamicagents/g2a-protocol";
 import {
   createAgentHarness,
   TERMINAL_CALLBACK_STATES,
   type AgentHarness,
   type CapturedCallback
 } from "../testing/harness.js";
+import { buildInputRequiredTask } from "../a2a/hitl.js";
 import { buildCompletedTask } from "../a2a/notify.js";
 import { requireArtifactsStub } from "../artifacts/binding.js";
 import { SESSION_TRANSCRIPT_KIND } from "../artifacts/transcript.js";
@@ -244,6 +248,24 @@ describe("asking the caller", () => {
     );
     await harness.answer(accepted.id, questionOf(parked).requestId, {
       optionId: "option_9"
+    });
+    await pause(500);
+
+    expect((await debug(accepted.id)).row?.state).toBe("input-required");
+    expect(terminals(harness, accepted.id)).toHaveLength(0);
+  });
+
+  it("ignores a typed reply to a question that takes only its options", async () => {
+    const { harness, debug } = harnessFor("typed");
+    using _ = harness.interceptGatekeeper();
+
+    const accepted = await harness.send("ask:which one?");
+    const [parked] = await harness.waitForState(
+      accepted.id,
+      "TASK_STATE_INPUT_REQUIRED"
+    );
+    await harness.answer(accepted.id, questionOf(parked).requestId, {
+      text: "maybe"
     });
     await pause(500);
 
@@ -505,6 +527,48 @@ describe("recovering what an eviction cut short", () => {
 
     const done = await harness.waitForTerminal(taskId);
     expect(done.text).toBe("recovered");
+    await pause(500);
+    expect(terminals(harness, taskId)).toHaveLength(1);
+  });
+
+  it("submits the answer a resumed task still owes, once", async () => {
+    const { harness, agent } = harnessFor("answer");
+    using _ = harness.interceptGatekeeper();
+    const taskId = crypto.randomUUID();
+    const request: HitlRequestData = {
+      type: HITL_REQUEST_TYPE,
+      requestId: `${taskId}:call-1`,
+      requestKind: "choice",
+      prompt: "Which one?",
+      allowFreeform: true
+    };
+
+    await runInDurableObject(agent, async (instance: TestAgent) => {
+      seed(instance, harness, taskId);
+      instance.ledger.park(
+        buildInputRequiredTask(taskId, "c1", request),
+        request
+      );
+      // Resumed, and the object gone before the submit.
+      instance.ledger.resume(taskId, {
+        id: "answer:cut",
+        text: "echo:answered"
+      });
+      // The gatekeeper's retry, then what the start-up sweep queues.
+      await instance.answerTask({
+        taskId,
+        messageId: "m-retry",
+        reply: {
+          kind: "answer",
+          requestId: request.requestId,
+          answer: { answeredBy: "spec", text: "again" }
+        }
+      });
+      await instance.submitAnswer({ taskId });
+    });
+
+    const done = await harness.waitForTerminal(taskId);
+    expect(done.text).toBe("answered");
     await pause(500);
     expect(terminals(harness, taskId)).toHaveLength(1);
   });

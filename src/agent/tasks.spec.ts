@@ -217,6 +217,7 @@ describe("a task parked on a question", () => {
     prompt: "Which one?",
     allowFreeform: true
   };
+  const answer = { id: "answer:m2", text: "the first" };
 
   it("parks a working task, and resumes it once", async () => {
     await withLedger((ledger) => {
@@ -228,9 +229,36 @@ describe("a task parked on a question", () => {
       expect(ledger.row("t1")?.deliveryKey).toBe(
         `input-required:${request.requestId}`
       );
-      expect(ledger.resume("t1")).not.toBeNull();
-      expect(ledger.resume("t1")).toBeNull();
+      expect(ledger.resume("t1", answer)).not.toBeNull();
+      expect(ledger.resume("t1", answer)).toBeNull();
       expect(ledger.row("t1")?.request).toBeNull();
+    });
+  });
+
+  it("owes the answer's turn and drops the question's callback, in the resume's write", async () => {
+    await withLedger((ledger) => {
+      accept(ledger);
+      ledger.markWorking("t1");
+      ledger.park(buildInputRequiredTask("t1", "c1", request), request);
+      ledger.resume("t1", answer);
+      expect(ledger.row("t1")?.deliveryKey).toBeNull();
+      expect(ledger.pendingAnswers()).toEqual(["t1"]);
+
+      ledger.answered("t1", "answer:another");
+      expect(ledger.row("t1")?.answer).toEqual(answer);
+      ledger.answered("t1", answer.id);
+      expect(ledger.pendingAnswers()).toEqual([]);
+    });
+  });
+
+  it("owes no answer once the task is canceled", async () => {
+    await withLedger((ledger) => {
+      accept(ledger);
+      ledger.markWorking("t1");
+      ledger.park(buildInputRequiredTask("t1", "c1", request), request);
+      ledger.resume("t1", answer);
+      ledger.cancel("t1");
+      expect(ledger.pendingAnswers()).toEqual([]);
     });
   });
 
@@ -240,7 +268,7 @@ describe("a task parked on a question", () => {
       ledger.markWorking("t1");
       ledger.park(buildInputRequiredTask("t1", "c1", request), request);
       const first = ledger.row("t1")!.deliveryKey!;
-      ledger.resume("t1");
+      ledger.resume("t1", answer);
       const second = { ...request, requestId: "t1:call-2" };
       ledger.park(buildInputRequiredTask("t1", "c1", second), second);
 

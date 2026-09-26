@@ -185,7 +185,7 @@ export abstract class A2AAgent<
     // transcript, so the binding is required, and this is the cheap place to
     // say so. The plugins are checked here for the same reason.
     assertArtifactsBound(this.env);
-    void this.plugins;
+    this.plugins.check(this.pluginContext());
     await super.onStart();
     // Every side effect a transition owes is recorded with it, so an object
     // evicted between the two finds the debt here. Queued rather than run:
@@ -203,6 +203,9 @@ export abstract class A2AAgent<
         { workId },
         { id: `follow-up:${workId}` }
       );
+    }
+    for (const taskId of this.ledger.pendingAnswers()) {
+      await this.queue("submitAnswer", { taskId }, { id: `answer:${taskId}` });
     }
   }
 
@@ -443,10 +446,14 @@ export abstract class A2AAgent<
    * task's next turn. Nothing is woken: Think's first-in-first-out turn queue
    * orders the answer behind anything still running.
    *
-   * A reply naming no question of this task, or an option the question never
-   * offered, changes nothing. A timeout is settled from the queue, not here:
-   * the request handler loads the task before it takes the message, and a task
-   * failed inline would make it refuse the very message reporting the expiry.
+   * A reply naming no question of this task, an option the question never
+   * offered, or a typed answer to a question that takes only its options,
+   * changes nothing. A timeout is settled from the queue, not here: the request
+   * handler loads the task before it takes the message, and a task failed
+   * inline would make it refuse the very message reporting the expiry.
+   *
+   * The resume owes the answer's turn, so a retry — or the start-up sweep —
+   * submits one a failed or evicted call left owed.
    */
   async answerTask(input: {
     taskId: string;
@@ -457,6 +464,8 @@ export abstract class A2AAgent<
     const { taskId, messageId, reply } = input;
     const row = this.ledger.row(taskId);
     if (!row) return null;
+    // An answer an earlier call resumed on and never submitted goes first.
+    if (row.answer) await this.submitAnswer({ taskId });
     const request = row.request;
     if (!request || request.requestId !== reply.requestId) {
       console.warn("[agent] a reply names no question of this task", {
@@ -482,19 +491,45 @@ export abstract class A2AAgent<
       );
       return this.ledger.get(taskId);
     }
-    if (this.ledger.resume(taskId) === null) return this.ledger.get(taskId);
+    if (!option && request.options && !request.allowFreeform) {
+      console.warn(
+        "[agent] a typed reply to a question that takes only its options",
+        { taskId, requestId: reply.requestId }
+      );
+      return this.ledger.get(taskId);
+    }
 
-    const picked = option?.label;
-    const text = [picked, reply.answer.text]
+    const text = [option?.label, reply.answer.text]
       .filter((part): part is string => Boolean(part))
       .join("\n\n");
-    await this.runTurn({
-      mode: "submit",
-      input: userMessage(`answer:${messageId}`, text, taskId, row.contextId),
-      idempotencyKey: `answer:${messageId}`,
-      metadata: { taskId }
-    });
+    if (this.ledger.resume(taskId, { id: `answer:${messageId}`, text })) {
+      await this.submitAnswer({ taskId });
+    }
     return this.ledger.get(taskId);
+  }
+
+  /**
+   * Submit the answer's turn a resumed task owes, then clear it. A repeat
+   * submits again under the same idempotency key, or finds it cleared.
+   */
+  async submitAnswer(payload: { taskId: string }): Promise<void> {
+    await ensureStarted(this);
+    const row = this.ledger.row(payload.taskId);
+    if (!row?.answer) return;
+    if (!isTerminalState(row.state)) {
+      await this.runTurn({
+        mode: "submit",
+        input: userMessage(
+          row.answer.id,
+          row.answer.text,
+          payload.taskId,
+          row.contextId
+        ),
+        idempotencyKey: row.answer.id,
+        metadata: { taskId: payload.taskId }
+      });
+    }
+    this.ledger.answered(payload.taskId, row.answer.id);
   }
 
   /** A question nobody answered. Guarded, so an answer that won stays won. */

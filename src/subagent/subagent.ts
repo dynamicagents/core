@@ -86,6 +86,12 @@ export abstract class SubAgent<
     return (this.#plugins ??= assemblePlugins(this.getPlugins(), this.env));
   }
 
+  /** The plugins are checked here, so a wiring fault fails the dispatch. */
+  override async onStart(): Promise<void> {
+    this.plugins.check(this.pluginContext());
+    await super.onStart();
+  }
+
   override classifyChatError(error: unknown) {
     return defaultContextOverflowClassifier(error);
   }
