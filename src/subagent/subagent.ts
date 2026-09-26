@@ -19,6 +19,7 @@ import {
   type AssembledPlugins
 } from "../contract/assemble.js";
 import type { SubAgentSpec } from "../contract/subagent.js";
+import { readRunSummary } from "../agent/outcome.js";
 
 /**
  * A sub-agent: its own Durable Object facet with its own messages, recovery and
@@ -181,6 +182,16 @@ export abstract class SubAgent<
         }
       }
     };
+  }
+
+  /** The run's result, read across its whole turn: see {@link readRunSummary}. */
+  protected override getAgentToolSummary(
+    runId: string,
+    output: unknown
+  ): string {
+    return (
+      readRunSummary(this.messages) || super.getAgentToolSummary(runId, output)
+    );
   }
 
   /**

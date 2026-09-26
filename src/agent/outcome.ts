@@ -56,6 +56,25 @@ export function readTurn(messages: UIMessage[], taskId: string): TurnOutcome {
   };
 }
 
+/**
+ * A sub-agent run's result, as its parent receives it: Think's own summary
+ * rule — every text part, a line apart — read across the whole turn. Think
+ * stops at the first assistant message with text, which after a recovery is
+ * the partial, and drops the continuation that holds the answer.
+ */
+export function readRunSummary(messages: UIMessage[]): string {
+  let start = messages.length;
+  while (start > 0 && messages[start - 1].role !== "user") start--;
+  return messages
+    .slice(start)
+    .filter((message) => message.role === "assistant")
+    .flatMap((message) => message.parts)
+    .filter((part) => part.type === "text")
+    .map((part) => (part as { text: string }).text)
+    .filter((text) => text.length > 0)
+    .join("\n");
+}
+
 /** The task a message was submitted for, from its `turnMetadata`. */
 export function taskIdOf(message: UIMessage): string | undefined {
   const metadata = message.metadata as
