@@ -25,11 +25,14 @@ export interface AssembledPlugins<Env> {
   actions(ctx: PluginContext<Env>): Record<string, Action>;
   context(): ContextConfig[];
   /**
-   * Build every tool and action once, so two plugins offering one name fail
-   * the start rather than the first turn. The names are only known once built,
-   * which takes the installing agent's context; call it from `onStart`.
+   * Build every tool and action once, so a name offered twice fails the start
+   * rather than the first turn. The names are only known once built, which
+   * takes the installing agent's context; call it from `onStart`.
+   *
+   * Tools and actions share the model's one namespace, and `reserved` names
+   * the rest of it — what the agent sets besides its plugins, by owner.
    */
-  check(ctx: PluginContext<Env>): void;
+  check(ctx: PluginContext<Env>, reserved?: ReadonlyMap<string, string>): void;
 }
 
 /**
@@ -106,9 +109,26 @@ export function assemblePlugins<Env>(
     plugins,
     tools,
     actions,
-    check: (ctx) => {
-      tools(ctx);
-      actions(ctx);
+    check: (ctx, reserved = new Map()) => {
+      const owners = new Map(reserved);
+      for (const plugin of plugins) {
+        const names = [
+          ...Object.keys(plugin.tools?.(ctx) ?? {}),
+          // An action reaches the model under its own `name`, if it sets one.
+          ...Object.entries(plugin.actions?.(ctx) ?? {}).map(
+            ([key, action]) => action.config.name ?? key
+          )
+        ];
+        for (const name of names) {
+          const other = owners.get(name);
+          if (other) {
+            throw new PluginSetupError(
+              `${other} and plugin "${plugin.name}" both offer the tool "${name}"`
+            );
+          }
+          owners.set(name, `plugin "${plugin.name}"`);
+        }
+      }
     },
     context: () =>
       plugins.flatMap((plugin) =>

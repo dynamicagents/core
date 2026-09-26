@@ -437,7 +437,7 @@ describe("a detached sub-agent", () => {
     expect(state.row?.state).toBe("canceled");
   });
 
-  it("does not leave the task open when the dispatch is refused", async () => {
+  it("does not leave the task open when the dispatch is refused, and releases what was prepared", async () => {
     const { harness, debug } = harnessFor("capped", "capped");
     using _ = harness.interceptGatekeeper();
 
@@ -446,7 +446,12 @@ describe("a detached sub-agent", () => {
     expect(done.state).toBe("TASK_STATE_COMPLETED");
 
     const state = await debug(accepted.id);
-    expect(state.work).toEqual([expect.objectContaining({ open: false })]);
+    expect(state.work).toEqual([
+      expect.objectContaining({ open: false, settled: true })
+    ]);
+    expect(state.released).toEqual([
+      expect.objectContaining({ status: "error" })
+    ]);
   });
 
   it("follows up once for a soft interruption and then a result", async () => {

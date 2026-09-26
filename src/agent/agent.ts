@@ -44,6 +44,7 @@ import type { GatekeeperIdentity } from "../a2a/verify.js";
 import { assertArtifactsBound } from "../artifacts/binding.js";
 import { settleTranscript, transcribeNote } from "../artifacts/transcript.js";
 import {
+  PluginSetupError,
   assemblePlugins,
   type AssembledPlugins
 } from "../contract/assemble.js";
@@ -65,8 +66,7 @@ import {
   A2ATasks,
   TASK_RETENTION_MS,
   isTerminalState,
-  questionKey,
-  type WorkRow
+  questionKey
 } from "./tasks.js";
 import {
   ASK_USER_TOOL_NAME,
@@ -102,6 +102,25 @@ interface DeliveryJob {
   /** The ledger's `deliveryKey` for the event this callback reports. */
   key: string;
   task: unknown;
+}
+
+/** How a queued job that must land is retried: the callback outbox's policy. */
+const DELIVERY_RETRY = {
+  maxAttempts: 8,
+  baseDelayMs: 2_000,
+  maxDelayMs: 300_000
+};
+
+/** Who wrote a note: the sub-agent class and its per-parent ordinal. */
+interface NoteSource {
+  type: string;
+  ordinal: number;
+}
+
+/** A note replay the queue retries. */
+interface NotesJob {
+  runId: string;
+  source: NoteSource;
 }
 
 /** Per-agent `getConfig()` shape. */
@@ -188,7 +207,7 @@ export abstract class A2AAgent<
     // transcript, so the binding is required, and this is the cheap place to
     // say so. The plugins are checked here for the same reason.
     assertArtifactsBound(this.env);
-    this.plugins.check(this.pluginContext());
+    this.plugins.check(this.pluginContext(), this.#reservedToolNames());
     await super.onStart();
     // Every side effect a transition owes is recorded with it, so an object
     // evicted between the two finds the debt here. Queued rather than run:
@@ -271,6 +290,30 @@ export abstract class A2AAgent<
 
   override getActions(): Record<string, Action> {
     return this.plugins.actions(this.pluginContext());
+  }
+
+  /**
+   * The names {@link getTools} sets over the plugins', by owner. A plugin
+   * offering one would be silently replaced, and two sub-agents sharing one
+   * would route to whichever came last, so the start check refuses both.
+   */
+  #reservedToolNames(): Map<string, string> {
+    const owners = new Map<string, string>();
+    const claim = (name: string, owner: string) => {
+      const other = owners.get(name);
+      if (other) {
+        throw new PluginSetupError(
+          `${other} and ${owner} both offer the tool "${name}"`
+        );
+      }
+      owners.set(name, owner);
+    };
+    for (const Cls of this.getSubAgents()) {
+      claim(Cls.spec.name, `sub-agent ${Cls.name}`);
+    }
+    claim(ASK_USER_TOOL_NAME, "core");
+    claim(SEARCH_HISTORY_TOOL_NAME, "core");
+    return owners;
   }
 
   /**
@@ -678,7 +721,7 @@ export abstract class A2AAgent<
       { taskId, key, task: Task.toJSON(task) },
       {
         id: `deliver:${taskId}:${key}`,
-        retry: { maxAttempts: 8, baseDelayMs: 2_000, maxDelayMs: 300_000 }
+        retry: DELIVERY_RETRY
       }
     );
   }
@@ -882,11 +925,9 @@ export abstract class A2AAgent<
           if (dispatch.status !== "running") {
             // A synchronous rejection wires no `onFinish`: nothing would ever
             // close this row, and the task would stay `working` for ever.
-            this.ledger.closeWork(runId);
-            return failure(
-              "error",
-              dispatch.error ?? "the background run did not start"
-            );
+            const error = dispatch.error ?? "the background run did not start";
+            await this.#settleRefused(spec, runId, taskId, runtime, error);
+            return failure("error", error);
           }
           // One landing during the dispatch found the run not yet registered,
           // and `cancelAgentTool` ignores a run it does not know.
@@ -900,6 +941,15 @@ export abstract class A2AAgent<
           parentToolCallId: toolCallId,
           signal: abortSignal
         });
+        if (result.status === "error") {
+          await this.#settleRefused(
+            spec,
+            runId,
+            taskId,
+            runtime,
+            result.error ?? "the run failed"
+          );
+        }
         if (result.status === "completed") return result.summary ?? "";
         if (result.status === "interrupted") {
           return failure(
@@ -932,7 +982,7 @@ export abstract class A2AAgent<
     if (result.status === "interrupted" && result.childStillRunning) return;
     const work = this.ledger.work(run.runId);
     if (!work) return;
-    await this.#replayNotes(run, work);
+    await this.#replayNotes(run);
     if (work.kind === "awaited") this.ledger.closeWork(run.runId);
     if (!this.ledger.claimSettle(run.runId)) return;
     await this.#release(
@@ -944,6 +994,29 @@ export abstract class A2AAgent<
         result
       }
     );
+  }
+
+  /**
+   * A run refused before it started — over `maxConcurrentAgentTools`, say —
+   * gets no `onAgentToolFinish`, so its work is closed and what `prepare`
+   * acquired is settled here. Claimed, so a run that did start and failed is
+   * settled once, whichever side gets there first.
+   */
+  async #settleRefused(
+    spec: SubAgentSpec<unknown, Env>,
+    runId: string,
+    taskId: string,
+    runtime: Record<string, unknown> | undefined,
+    error: string
+  ): Promise<void> {
+    this.ledger.closeWork(runId);
+    if (!this.ledger.claimSettle(runId)) return;
+    await this.#release(spec, {
+      runId,
+      taskId,
+      runtime,
+      result: { status: "error", error }
+    });
   }
 
   /** A spec's `settle`, best-effort: a release that fails is logged. */
@@ -1041,7 +1114,11 @@ export abstract class A2AAgent<
           "onCheckBack",
           { taskId, workId, seconds, why }
         );
-        this.ledger.setWorkSchedule(workId, schedule.id);
+        // A cancel while `schedule` ran closed the wait with no schedule to
+        // cancel: this wake is an orphan, so cancel it here.
+        if (!this.ledger.setWorkSchedule(workId, schedule.id)) {
+          await this.cancelSchedule(schedule.id);
+        }
         return { waiting: seconds };
       }
     });
@@ -1073,37 +1150,53 @@ export abstract class A2AAgent<
     if (progress.milestone !== NOTE_MILESTONE) return;
     const note = readNote(progress.data);
     const taskId = this.ledger.work(run.runId)?.taskId;
-    if (note && taskId) await this.#note(taskId, run, note);
+    if (note && taskId) await this.#note(taskId, sourceOf(run), note);
   }
 
   /**
-   * Every note the child persisted, delivered again. Safe because the
-   * transcript dedupes on the note's key: a note that landed is kept once.
+   * The finish hook's replay, inline so the notes land before the task can
+   * settle. The transcript relies on it as the retry of a live note, so one
+   * that fails is not dropped: it goes to the queue, which retries it.
    */
-  async #replayNotes(run: AgentToolRunInfo, work: WorkRow): Promise<void> {
-    const Cls = this.#subAgent(work.name);
-    if (!Cls) return;
+  async #replayNotes(run: AgentToolRunInfo): Promise<void> {
+    const job: NotesJob = { runId: run.runId, source: sourceOf(run) };
     try {
-      const child = await this.dynamicAgents.get(Cls, run.runId);
-      const inspection = (await child.inspectAgentToolRun(run.runId)) as {
-        milestones?: AgentToolMilestone[];
-      } | null;
-      for (const milestone of inspection?.milestones ?? []) {
-        if (milestone.name !== NOTE_MILESTONE) continue;
-        const note = readNote(milestone.data);
-        if (note) await this.#note(work.taskId, run, note);
-      }
+      await this.replayNotes(job);
     } catch (err) {
-      console.warn("[agent] notes not replayed", {
+      console.warn("[agent] notes not replayed; retrying from the queue", {
         runId: run.runId,
         err: String(err)
       });
+      await this.queue("replayNotes", job, {
+        id: `notes:${run.runId}`,
+        retry: DELIVERY_RETRY
+      });
+    }
+  }
+
+  /**
+   * Every note a run's child persisted, filed again. Safe to repeat: the
+   * transcript dedupes on the note's key. Throws, so the queue retries.
+   */
+  async replayNotes(job: NotesJob): Promise<void> {
+    await ensureStarted(this);
+    const work = this.ledger.work(job.runId);
+    const Cls = work && this.#subAgent(work.name);
+    if (!work || !Cls) return;
+    const child = await this.dynamicAgents.get(Cls, job.runId);
+    const inspection = (await child.inspectAgentToolRun(job.runId)) as {
+      milestones?: AgentToolMilestone[];
+    } | null;
+    for (const milestone of inspection?.milestones ?? []) {
+      if (milestone.name !== NOTE_MILESTONE) continue;
+      const note = readNote(milestone.data);
+      if (note) await this.#note(work.taskId, job.source, note);
     }
   }
 
   async #note(
     taskId: string,
-    run: AgentToolRunInfo,
+    source: NoteSource,
     note: NoteData
   ): Promise<void> {
     const channel = this.#channel(taskId);
@@ -1113,7 +1206,7 @@ export abstract class A2AAgent<
       {
         taskId,
         origin: this.#origin.peek(),
-        source: { type: run.agentType, ordinal: run.displayOrder },
+        source,
         text: note.text,
         key: note.key
       },
@@ -1229,6 +1322,10 @@ function failure(
   retryable = false
 ) {
   return { ok: false as const, status, error, retryable };
+}
+
+function sourceOf(run: AgentToolRunInfo): NoteSource {
+  return { type: run.agentType, ordinal: run.displayOrder };
 }
 
 function readNote(data: unknown): NoteData | null {

@@ -527,10 +527,14 @@ export class A2ATasks {
               ${Date.now()})`;
   }
 
-  setWorkSchedule(workId: string, scheduleId: string): void {
+  /** Attach a wait's schedule, answering whether the wait was still open. */
+  setWorkSchedule(workId: string, scheduleId: string): boolean {
     this.#ensure();
-    this.sql`UPDATE da_a2a_work SET schedule_id = ${scheduleId}
-      WHERE work_id = ${workId}`;
+    return (
+      this.sql<{ work_id: string }>`
+        UPDATE da_a2a_work SET schedule_id = ${scheduleId}
+        WHERE work_id = ${workId} AND open = 1 RETURNING work_id`.length > 0
+    );
   }
 
   /**

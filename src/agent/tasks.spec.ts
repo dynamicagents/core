@@ -412,6 +412,16 @@ describe("work", () => {
     });
   });
 
+  it("attaches a schedule only to a wait that is still open", async () => {
+    await withLedger((ledger) => {
+      ledger.addWork({ workId: "w", taskId: "t1", kind: "wait", name: "cb" });
+      expect(ledger.setWorkSchedule("w", "s1")).toBe(true);
+      ledger.closeWork("w");
+      expect(ledger.setWorkSchedule("w", "s2")).toBe(false);
+      expect(ledger.work("w")?.scheduleId).toBe("s1");
+    });
+  });
+
   it("maps a run back to its task", async () => {
     await withLedger((ledger) => {
       ledger.addWork({

@@ -61,20 +61,33 @@ describe("assembling an agent's plugins", () => {
       {}
     );
     expect(() => plugins.check(ctx)).toThrow(
-      /"a" and "b" both offer the tool "read"/
+      /plugin "a" and plugin "b" both offer the tool "read"/
     );
   });
 
-  it("refuses two plugins offering one action, at the start check", () => {
+  it("refuses a tool and an action sharing a name, as the model sees it", () => {
     const plugins = assemblePlugins(
       [
-        definePlugin({ name: "a", actions: () => ({ post: {} as Action }) }),
-        definePlugin({ name: "b", actions: () => ({ post: {} as Action }) })
+        definePlugin({ name: "a", tools: () => ({ post: noop }) }),
+        definePlugin({
+          name: "b",
+          actions: () => ({ anything: { config: { name: "post" } } as Action })
+        })
       ],
       {}
     );
     expect(() => plugins.check(ctx)).toThrow(
-      /"a" and "b" both offer the action "post"/
+      /plugin "a" and plugin "b" both offer the tool "post"/
+    );
+  });
+
+  it("refuses a plugin tool that would shadow a name the agent sets", () => {
+    const plugins = assemblePlugins(
+      [definePlugin({ name: "a", tools: () => ({ ask_user: noop }) })],
+      {}
+    );
+    expect(() => plugins.check(ctx, new Map([["ask_user", "core"]]))).toThrow(
+      /core and plugin "a" both offer the tool "ask_user"/
     );
   });
 
