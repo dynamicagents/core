@@ -1,3 +1,5 @@
+import { DurableObject } from "cloudflare:workers";
+import { installScheduler } from "../src/alarm/index.js";
 import type { TaskState } from "@a2a-js/sdk";
 import type { ThinkModel } from "@cloudflare/think";
 import { tool, type ToolSet } from "ai";
@@ -362,6 +364,50 @@ const a2a = createA2AWorker<TestEnv>({
   manifest,
   agents: [testAgent, cappedAgent]
 });
+
+/**
+ * {@link PlainScheduled} and {@link DelegatingScheduled}, plain Durable Objects
+ * for the `/alarm` specs — and the difference between them is the test.
+ *
+ * A lifecycle installs its runtime handlers only where the host does not
+ * already have one, silently — so "the host defines its own `alarm()`" and "the
+ * host does not" are two different installations of the same code, and only one
+ * of them can be checked by reading it. {@link PlainScheduled} is the first,
+ * {@link DelegatingScheduled} the second.
+ */
+export class PlainScheduled extends DurableObject<Cloudflare.Env> {
+  /** In-memory, so a spec can see *that* a callback ran, not only its effect. */
+  readonly marks: string[] = [];
+
+  readonly wake = installScheduler(this, {
+    callbacks: {
+      mark: (payload: { at: string }) => {
+        this.marks.push(payload.at);
+      }
+    }
+  });
+}
+
+/** The shape the workspace object has: its own `alarm()`, delegating. */
+export class DelegatingScheduled extends DurableObject<Cloudflare.Env> {
+  readonly marks: string[] = [];
+  /** Proves the host's own handler still runs after the lifecycle takes over. */
+  ownAlarms = 0;
+
+  readonly wake = installScheduler(this, {
+    callbacks: {
+      mark: (payload: { at: string }) => {
+        this.marks.push(payload.at);
+      }
+    },
+    hostOwns: ["alarm"]
+  });
+
+  override async alarm(): Promise<void> {
+    this.ownAlarms += 1;
+    await this.wake.alarm();
+  }
+}
 
 export default {
   async fetch(request: Request, env: TestEnv): Promise<Response> {
