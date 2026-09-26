@@ -140,6 +140,20 @@ export class JobLifecycle<
   /** The watchdog's one movable deadline, over {@link watchIdKey}. */
   readonly #watch: Deadline;
 
+  /**
+   * The tail {@link arm} and {@link reserve} queue on. Per instance, because an
+   * object keeps one lifecycle per job: the queue is what makes each one's read,
+   * check and write a single step even when a caller awaits something that is
+   * not storage in between, or two calls share one event.
+   */
+  #tail: Promise<unknown> = Promise.resolve();
+
+  #exclusive<T>(run: () => Promise<T>): Promise<T> {
+    const next = this.#tail.then(run, run);
+    this.#tail = next.catch(() => undefined);
+    return next;
+  }
+
   constructor(options: JobLifecycleOptions<H>) {
     /**
      * An id is a storage key, so a bad one is not a bad name — it is a write
@@ -208,7 +222,13 @@ export class JobLifecycle<
    * underneath it mid-command. An alarm invocation belongs to the object rather
    * than to any request, so nothing it awaits can be cut short.
    */
-  async arm(
+  arm(
+    placeholder: Omit<RunningJob<TExtra>, "state" | "startedAt">
+  ): Promise<number | undefined> {
+    return this.#exclusive(() => this.#arm(placeholder));
+  }
+
+  async #arm(
     placeholder: Omit<RunningJob<TExtra>, "state" | "startedAt">
   ): Promise<number | undefined> {
     const state = await this.read();
@@ -269,7 +289,42 @@ export class JobLifecycle<
   // --- the single-flight guard ------------------------------------------------
 
   /**
-   * Decide whether a new run may start.
+   * Take the job's one running slot, or learn who holds it.
+   *
+   * The {@link claim} check and the `running` write are one step, queued with
+   * every other `reserve` and {@link arm} on this job. A check that returned
+   * before its write would leave a window — the caller resolving a command,
+   * hashing a lockfile — in which a second caller passes the same check, and
+   * both spawn: the displacement the check exists to refuse.
+   *
+   * A caller spawns only after this succeeds, and before it returns it replaces
+   * the placeholder with its own record or puts `previous` back.
+   */
+  reserve(
+    placeholder: Omit<RunningJob<TExtra>, "state" | "startedAt">,
+    timeoutMs: number,
+    takeOverArmedAt?: number
+  ): Promise<
+    | { ok: true; previous: JobState<TExtra> }
+    | { ok: false; current: RunningJob<TExtra> }
+  > {
+    return this.#exclusive(async () => {
+      const previous = await this.read();
+      const checked = this.claim(previous, timeoutMs, takeOverArmedAt);
+      if (!checked.ok) return checked;
+      await this.write({
+        ...placeholder,
+        state: "running",
+        startedAt: Date.now()
+      } as JobState<TExtra>);
+      return { ok: true, previous };
+    });
+  }
+
+  /**
+   * Decide whether a new run may start — the check {@link reserve} makes. It
+   * writes nothing, so a caller that means to run reserves rather than
+   * following this with a write of its own.
    *
    * `takeOverArmedAt` is the one exemption and it is narrow on purpose. The
    * alarm's placeholder *is* a `running` record for a job that has not started,

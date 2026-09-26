@@ -255,6 +255,78 @@ describe("claim", () => {
   });
 });
 
+/**
+ * The check and the `running` write as one step. A check that returns before
+ * its write lets a second caller pass the same check while the first is still
+ * resolving what to run — and both spawn.
+ */
+describe("reserve", () => {
+  const LIVE = 60 * 60_000;
+
+  it("gives the slot to one of two overlapping callers", async () => {
+    const { job } = lifecycle();
+    const [a, b] = await Promise.all([
+      job.reserve({ command: "npm ci" }, LIVE),
+      job.reserve({ command: "npm ci" }, LIVE)
+    ]);
+
+    expect([a.ok, b.ok].sort()).toEqual([false, true]);
+    expect((await job.read()).state).toBe("running");
+  });
+
+  it("hands back what it replaced, so a caller that does not run can put it back", async () => {
+    const { job } = lifecycle();
+    await job.write({ state: "skipped", reason: "no package.json" });
+
+    const reserved = await job.reserve({ command: "npm ci" }, LIVE);
+
+    expect(reserved).toEqual({
+      ok: true,
+      previous: { state: "skipped", reason: "no package.json" }
+    });
+  });
+
+  /** A finished run's record, from which the alarm may re-arm. */
+  const failed: JobState<Install> = {
+    state: "failed",
+    command: "npm ci",
+    finishedAt: 1,
+    error: "x"
+  };
+
+  it("lets the alarm take over its own placeholder, and no one else's", async () => {
+    const { job } = lifecycle();
+    await job.write(failed);
+    const armedAt = await job.arm({ command: "npm ci" });
+    expect(armedAt).toBeTypeOf("number");
+
+    expect((await job.reserve({ command: "npm ci" }, LIVE)).ok).toBe(false);
+    expect((await job.reserve({ command: "npm ci" }, LIVE, armedAt)).ok).toBe(
+      true
+    );
+  });
+
+  it("queues behind an arm, so a failed arm cannot undo a reservation", async () => {
+    // Overlapping, an arm whose schedule fails would restore the state it read
+    // over the reservation written in between. Queued, it reads the
+    // reservation and declines.
+    const { job, scheduler } = lifecycle();
+    scheduler.set = async () => {
+      throw new Error("scheduler unavailable");
+    };
+    await job.write(failed);
+
+    const [armed, reserved] = await Promise.all([
+      job.arm({ command: "npm ci" }).catch(() => "threw"),
+      job.reserve({ command: "npm ci" }, LIVE)
+    ]);
+
+    expect(armed).toBe("threw");
+    expect(reserved.ok).toBe(true);
+    expect((await job.read()).state).toBe("running");
+  });
+});
+
 describe("generation", () => {
   it("still mine while the context stamp matches", async () => {
     const { job } = lifecycle();
