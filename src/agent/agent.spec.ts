@@ -418,6 +418,25 @@ describe("a detached sub-agent", () => {
     expect(terminals(harness, accepted.id)).toHaveLength(0);
   });
 
+  it("starts nothing for a task canceled while it prepares, and releases what was prepared", async () => {
+    const { harness, debug } = harnessFor("bg-prepare");
+    using _ = harness.interceptGatekeeper();
+
+    const accepted = await harness.send("bgdelegate:slowprep");
+    // Pushed as the tool call starts, so `prepare` is running.
+    await harness.waitForState(accepted.id, "TASK_STATE_WORKING");
+    await cancel(harness, accepted.id);
+
+    const state = await until(
+      "the prepared run to be released",
+      () => debug(accepted.id),
+      (d) => d.released.length === 1
+    );
+    expect(state.released[0].status).toBe("aborted");
+    expect(state.work).toEqual([]);
+    expect(state.row?.state).toBe("canceled");
+  });
+
   it("does not leave the task open when the dispatch is refused", async () => {
     const { harness, debug } = harnessFor("capped", "capped");
     using _ = harness.interceptGatekeeper();
@@ -500,6 +519,35 @@ describe("recovering what an eviction cut short", () => {
     });
     instance.ledger.markWorking(taskId);
   }
+
+  it("settles on the last of two results that landed before either follow-up ran", async () => {
+    const { harness, agent } = harnessFor("follow-ups");
+    using _ = harness.interceptGatekeeper();
+    const taskId = crypto.randomUUID();
+
+    await runInDurableObject(agent, async (instance: TestAgent) => {
+      seed(instance, harness, taskId);
+      for (const [workId, text] of [
+        ["detached:one", "echo:first"],
+        ["detached:two", "echo:second"]
+      ]) {
+        instance.ledger.addWork({
+          workId,
+          taskId,
+          kind: "detached",
+          name: "TestBackground"
+        });
+        instance.ledger.beginFollowUp(workId, { id: `finish:${workId}`, text });
+      }
+      await instance.submitFollowUp({ workId: "detached:one" });
+      await instance.submitFollowUp({ workId: "detached:two" });
+    });
+
+    const done = await harness.waitForTerminal(taskId);
+    expect(done.text).toBe("second");
+    await pause(500);
+    expect(terminals(harness, taskId)).toHaveLength(1);
+  });
 
   it("sends the follow-up a closed work row still owes", async () => {
     const { harness, agent } = harnessFor("follow-up");

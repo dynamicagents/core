@@ -183,6 +183,25 @@ describe("the task store's writes", () => {
     });
   });
 
+  it("refuses a working snapshot over a task parked on its next question", async () => {
+    await withLedger((ledger) => {
+      accept(ledger);
+      ledger.markWorking("t1");
+      const request: HitlRequestData = {
+        type: HITL_REQUEST_TYPE,
+        requestId: "t1:call-2",
+        requestKind: "choice",
+        prompt: "And now?",
+        allowFreeform: true
+      };
+      ledger.park(buildInputRequiredTask("t1", "c1", request), request);
+      const stale = buildInputRequiredTask("t1", "c1", request);
+      stale.status = { ...stale.status!, state: TaskState.TASK_STATE_WORKING };
+      expect(ledger.save(stale)).toBe(false);
+      expect(ledger.row("t1")?.state).toBe("input-required");
+    });
+  });
+
   it("refuses the accepted snapshot over a task that moved past it", async () => {
     // The request handler re-saves the task it published, and a fast turn is
     // already running by then.
@@ -370,7 +389,7 @@ describe("work", () => {
     });
   });
 
-  it("closes a row and owes its follow-up in one write, and keeps owing it until sent", async () => {
+  it("closes a row and owes its follow-up in one write, holding the task until that turn has run", async () => {
     await withLedger((ledger) => {
       ledger.addWork({
         workId: "d",
@@ -380,7 +399,7 @@ describe("work", () => {
       });
       const followUp = { id: "finish:d", text: "done" };
       expect(ledger.beginFollowUp("d", followUp)).toBe(true);
-      expect(ledger.openWork("t1")).toBe(0);
+      expect(ledger.openWork("t1")).toBe(1);
       // A redelivery neither reopens nor re-records it.
       expect(ledger.beginFollowUp("d", { id: "x", text: "y" })).toBe(false);
       expect(ledger.followUp("d")).toEqual(followUp);
@@ -389,6 +408,7 @@ describe("work", () => {
       ledger.endFollowUp("d");
       expect(ledger.followUp("d")).toBeNull();
       expect(ledger.pendingFollowUps()).toEqual([]);
+      expect(ledger.openWork("t1")).toBe(0);
     });
   });
 

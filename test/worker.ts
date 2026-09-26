@@ -161,8 +161,22 @@ const CHILD_SPEC: SubAgentSpec<{ task: string }, TestEnv> = {
   inputSchema: taskInput,
   soul: "You are the test sub-agent.",
   formatInput: (input) => input.task,
-  prepare: async ({ runId }) => ({ lease: `lease:${runId}` }),
-  settle: async () => {}
+  prepare: async ({ runId, input }) => {
+    // Long enough for a spec to cancel the task while it prepares.
+    if (input.task === "slowprep") await sleep(2_000);
+    return { lease: `lease:${runId}` };
+  },
+  /** Durable, like `onTaskSettled`: a spec reads every release. */
+  settle: async ({ runId, result, parent }) => {
+    parent.storage.sql.exec(
+      "CREATE TABLE IF NOT EXISTS test_released (run_id TEXT, status TEXT)"
+    );
+    parent.storage.sql.exec(
+      "INSERT INTO test_released VALUES (?, ?)",
+      runId,
+      result.status
+    );
+  }
 };
 
 const BACKGROUND_SPEC: SubAgentSpec<{ task: string }, TestEnv> = {
@@ -211,6 +225,8 @@ export interface TaskDebug {
   runs: { runId: string; status: string }[];
   /** Every state `onTaskSettled` fired with, for this task. */
   settledHooks: number[];
+  /** Every run a spec's `settle` released, on this object. */
+  released: { runId: string; status: string }[];
 }
 
 export class TestAgent extends A2AAgent<TestEnv> {
@@ -286,9 +302,20 @@ export class TestAgent extends A2AAgent<TestEnv> {
         settled: w.settled
       })),
       runs,
-      settledHooks: this.#settledHooks(taskId)
+      settledHooks: this.#settledHooks(taskId),
+      released: this.#released()
     };
     return JSON.stringify(debug);
+  }
+
+  #released(): TaskDebug["released"] {
+    this
+      .sql`CREATE TABLE IF NOT EXISTS test_released (run_id TEXT, status TEXT)`;
+    return this.sql<{ run_id: string; status: string }>`
+      SELECT run_id, status FROM test_released`.map((r) => ({
+      runId: r.run_id,
+      status: r.status
+    }));
   }
 
   #settledHooks(taskId: string): number[] {

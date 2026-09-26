@@ -65,7 +65,7 @@ export interface WorkRow {
   settled: boolean;
 }
 
-/** A follow-up turn a closed work row still owes its task. */
+/** A follow-up turn a closed work row owes its task, until that turn has run. */
 export interface FollowUp {
   /** The user message's id, and the submission's idempotency key. */
   id: string;
@@ -322,7 +322,10 @@ export class A2ATasks {
    *    as a failure;
    *  - `canceled` over a task that already finished;
    *  - `submitted` over a task that moved past it. The request handler re-saves
-   *    the accepted task it published, and by then the turn may be running.
+   *    the accepted task it published, and by then the turn may be running;
+   *  - `working` over a task parked on a question. The handler loads a task an
+   *    answer just resumed, and the answer's turn can park on the next question
+   *    before the handler saves; only `resume` leaves a question.
    */
   save(task: Task): boolean {
     this.#ensure();
@@ -339,6 +342,7 @@ export class A2ATasks {
     const current = existing.state;
     if (TERMINAL.has(current) && incoming !== current) return false;
     if (incoming === "submitted" && current !== "submitted") return false;
+    if (incoming === "working" && current === "input-required") return false;
     this.#write(task.id, incoming, task);
     return true;
   }
@@ -559,10 +563,13 @@ export class A2ATasks {
 
   /**
    * Close a work row and owe its task the follow-up turn, in one statement,
-   * answering whether **this** call closed it. Closed first and submitted
-   * second, so the follow-up turn never finds its own work still open; owed in
-   * the same write, so a crash between the two leaves the follow-up to be sent
-   * rather than a task `working` with nothing left to answer it.
+   * answering whether **this** call closed it. Owed in the same write, so a
+   * crash before the submit leaves the follow-up to be sent rather than a task
+   * `working` with nothing left to answer it.
+   *
+   * The row still holds its task open until {@link endFollowUp}: two results
+   * that land before the first follow-up turn has run must not let that turn
+   * settle the task, or the second arrives to a closed one.
    */
   beginFollowUp(workId: string, followUp: FollowUp): boolean {
     this.#ensure();
@@ -582,14 +589,17 @@ export class A2ATasks {
     return json ? (JSON.parse(json) as FollowUp) : null;
   }
 
-  /** The follow-up was submitted. */
+  /** The follow-up's turn has run, or its task closed without it. */
   endFollowUp(workId: string): void {
     this.#ensure();
     this.sql`UPDATE da_a2a_work SET follow_up_json = NULL
       WHERE work_id = ${workId}`;
   }
 
-  /** Work rows whose follow-up is still owed. */
+  /**
+   * Work rows whose follow-up turn has not run. Submitting one again is safe:
+   * the submission is idempotent on the follow-up's id.
+   */
   pendingFollowUps(): string[] {
     this.#ensure();
     return this.sql<{ work_id: string }>`
@@ -598,14 +608,17 @@ export class A2ATasks {
     );
   }
 
-  /** How much open work holds a task `working`. The settlement check. */
+  /**
+   * How much work holds a task `working`: a run or wait still going, or one
+   * whose follow-up turn has not run. The settlement check.
+   */
   openWork(taskId: string): number {
     this.#ensure();
     return (
       this.sql<{ n: number }>`
         SELECT COUNT(*) AS n FROM da_a2a_work
-        WHERE task_id = ${taskId} AND open = 1
-          AND kind IN ('detached', 'wait')`[0]?.n ?? 0
+        WHERE task_id = ${taskId} AND kind IN ('detached', 'wait')
+          AND (open = 1 OR follow_up_json IS NOT NULL)`[0]?.n ?? 0
     );
   }
 

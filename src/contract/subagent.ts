@@ -10,12 +10,16 @@ export interface SubAgentPrepareContext<I, Env> {
   parent: PluginContext<Env>;
 }
 
-/** What `settle` is handed on the parent, once a run reached its terminal. */
-export interface SubAgentSettleContext {
+/**
+ * What `settle` is handed on the parent, once a run reached its terminal — or
+ * once its task closed before the run could start.
+ */
+export interface SubAgentSettleContext<Env = Cloudflare.Env> {
   runId: string;
   taskId: string;
   runtime: Record<string, unknown> | undefined;
   result: AgentToolLifecycleResult;
+  parent: PluginContext<Env>;
 }
 
 /**
@@ -52,5 +56,5 @@ export interface SubAgentSpec<I = unknown, Env = Cloudflare.Env> {
    * Release what `prepare` acquired. Runs on the parent once per run, on every
    * terminal: completed, failed and canceled alike. Best-effort.
    */
-  settle?(context: SubAgentSettleContext): Promise<void>;
+  settle?(context: SubAgentSettleContext<Env>): Promise<void>;
 }

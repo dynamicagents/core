@@ -51,7 +51,10 @@ import type { AgentPlugin, PluginContext } from "../contract/plugin.js";
 import type { CoreEnv } from "../env.js";
 import { ensureStarted } from "./lifecycle.js";
 import { latestTaskId, readTurn } from "./outcome.js";
-import type { SubAgentSpec } from "../contract/subagent.js";
+import type {
+  SubAgentSettleContext,
+  SubAgentSpec
+} from "../contract/subagent.js";
 import {
   NOTE_MILESTONE,
   type NoteData,
@@ -557,6 +560,15 @@ export abstract class A2AAgent<
   ): Promise<void> {
     const taskId = submission.metadata?.taskId;
     if (typeof taskId !== "string") return;
+    // A follow-up's turn has ended, so its work no longer holds the task open.
+    const workId = submission.metadata?.workId;
+    if (
+      typeof workId === "string" &&
+      submission.status !== "pending" &&
+      submission.status !== "running"
+    ) {
+      this.ledger.endFollowUp(workId);
+    }
     switch (submission.status) {
       case "running":
         if (this.ledger.markWorking(taskId) === "canceled") {
@@ -835,6 +847,17 @@ export abstract class A2AAgent<
           runId,
           parent: this.pluginContext()
         });
+        // A cancel landing while `prepare` ran found no work to stop. Checked
+        // and recorded with no await between, so none lands in the gap.
+        if (this.#closed(taskId)) {
+          await this.#release(spec, {
+            runId,
+            taskId,
+            runtime,
+            result: { status: "aborted", error: TASK_CANCELED }
+          });
+          return failure("aborted", TASK_CANCELED);
+        }
         this.ledger.addWork({
           workId: runId,
           taskId,
@@ -865,6 +888,9 @@ export abstract class A2AAgent<
               dispatch.error ?? "the background run did not start"
             );
           }
+          // One landing during the dispatch found the run not yet registered,
+          // and `cancelAgentTool` ignores a run it does not know.
+          if (this.#closed(taskId)) await this.cancelAgentTool(runId);
           return { started: runId };
         }
 
@@ -909,21 +935,36 @@ export abstract class A2AAgent<
     await this.#replayNotes(run, work);
     if (work.kind === "awaited") this.ledger.closeWork(run.runId);
     if (!this.ledger.claimSettle(run.runId)) return;
-    const spec = this.#subAgent(work.name)?.spec as
-      SubAgentSpec<unknown, Env> | undefined;
-    try {
-      await spec?.settle?.({
+    await this.#release(
+      this.#subAgent(work.name)?.spec as SubAgentSpec<unknown, Env> | undefined,
+      {
         runId: run.runId,
         taskId: work.taskId,
         runtime: work.runtime,
         result
-      });
+      }
+    );
+  }
+
+  /** A spec's `settle`, best-effort: a release that fails is logged. */
+  async #release(
+    spec: SubAgentSpec<unknown, Env> | undefined,
+    context: Omit<SubAgentSettleContext<Env>, "parent">
+  ): Promise<void> {
+    try {
+      await spec?.settle?.({ ...context, parent: this.pluginContext() });
     } catch (err) {
       console.warn("[agent] sub-agent settle failed", {
-        runId: run.runId,
+        runId: context.runId,
         err: String(err)
       });
     }
+  }
+
+  /** Whether a task is gone or settled — past starting anything for. */
+  #closed(taskId: string): boolean {
+    const row = this.ledger.row(taskId);
+    return !row || isTerminalState(row.state);
   }
 
   /**
@@ -949,9 +990,10 @@ export abstract class A2AAgent<
   }
 
   /**
-   * Submit the follow-up a closed work row owes, then clear it. A repeat — a
-   * redelivered finish, the start-up sweep — finds it owed and submits again
-   * under the same idempotency key, or finds it cleared and does nothing.
+   * Submit the follow-up a closed work row owes. It stays owed until its turn
+   * ends (see {@link onSubmissionStatus}), so a repeat — a redelivered finish,
+   * the start-up sweep — submits again under the same idempotency key, which
+   * is a no-op. A task that closed meanwhile owes it nothing.
    */
   async submitFollowUp(payload: { workId: string }): Promise<void> {
     await ensureStarted(this);
@@ -959,20 +1001,21 @@ export abstract class A2AAgent<
     const followUp = this.ledger.followUp(payload.workId);
     if (!work || !followUp) return;
     const row = this.ledger.row(work.taskId);
-    if (row && !isTerminalState(row.state)) {
-      await this.runTurn({
-        mode: "submit",
-        input: userMessage(
-          followUp.id,
-          followUp.text,
-          work.taskId,
-          row.contextId
-        ),
-        idempotencyKey: followUp.id,
-        metadata: { taskId: work.taskId }
-      });
+    if (!row || isTerminalState(row.state)) {
+      this.ledger.endFollowUp(payload.workId);
+      return;
     }
-    this.ledger.endFollowUp(payload.workId);
+    await this.runTurn({
+      mode: "submit",
+      input: userMessage(
+        followUp.id,
+        followUp.text,
+        work.taskId,
+        row.contextId
+      ),
+      idempotencyKey: followUp.id,
+      metadata: { taskId: work.taskId, workId: payload.workId }
+    });
   }
 
   /**
@@ -1178,6 +1221,8 @@ function userMessage(
 }
 
 /** The envelope `agentTool` returns for a run that did not complete. */
+const TASK_CANCELED = "the task was canceled";
+
 function failure(
   status: "error" | "aborted" | "interrupted",
   error: string,
