@@ -22,7 +22,11 @@
     "bindings": [
       { "name": "TEST_AGENT", "class_name": "TestAgent" },
       { "name": "CAPPED_AGENT", "class_name": "CappedAgent" },
-      { "name": "ARTIFACTS", "class_name": "Artifacts" }
+      { "name": "ARTIFACTS", "class_name": "Artifacts" },
+      // The `/alarm` specs' hosts, `PlainScheduled` and `DelegatingScheduled` —
+      // see `test/worker.ts`.
+      { "name": "PLAIN_SCHEDULED", "class_name": "PlainScheduled" },
+      { "name": "DELEGATING_SCHEDULED", "class_name": "DelegatingScheduled" }
     ]
   },
 
@@ -33,6 +37,10 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["TestAgent", "CappedAgent", "Artifacts"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["PlainScheduled", "DelegatingScheduled"]
     }
   ]
 }

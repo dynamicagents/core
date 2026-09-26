@@ -310,6 +310,8 @@ test harness cannot reach a production bundle.
 | `@dynamicagents/core/model`        | `workersAIModel`, `gatewayLogFields`                                                           |
 | `@dynamicagents/core/a2a`          | card signing, JWKS, gatekeeper-JWT verify, push notify, task store, executor                   |
 | `@dynamicagents/core/worker`       | `createA2AWorker()`, `defineAgent()` — the whole zero-trust edge                               |
+| `@dynamicagents/core/alarm`        | many deadlines over one Durable Object alarm, for a plain `DurableObject`                      |
+| `@dynamicagents/core/job`          | a long job a Durable Object drives through its alarm                                           |
 | `@dynamicagents/core/artifacts`    | the `Artifacts` object, its routes and viewer, the transcript emission                         |
 | `@dynamicagents/core/testing`      | VCR, scripted models, the A2A harness, DO helpers, fixtures — _workerd realm_                  |
 | `@dynamicagents/core/testing/node` | the VCR recorder + cassette store — _Node realm, never import from a spec_                     |
