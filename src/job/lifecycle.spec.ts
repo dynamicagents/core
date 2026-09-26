@@ -20,8 +20,11 @@ function fakeStorage(): DurableObjectStorage {
   return {
     get: async <T>(key: string): Promise<T | undefined> =>
       rows.get(key) as T | undefined,
-    put: async (key: string, value: unknown): Promise<void> => {
-      rows.set(key, structuredClone(value));
+    // Both of storage's forms: a key and a value, or an object of entries.
+    put: async (key: string | Record<string, unknown>, value?: unknown) => {
+      const entries = typeof key === "string" ? { [key]: value } : key;
+      for (const [k, v] of Object.entries(entries))
+        rows.set(k, structuredClone(v));
     },
     delete: async (key: string): Promise<boolean> => rows.delete(key),
     getAlarm: async (): Promise<number | null> => alarm,
@@ -282,7 +285,8 @@ describe("reserve", () => {
 
     expect(reserved).toEqual({
       ok: true,
-      previous: { state: "skipped", reason: "no package.json" }
+      previous: { state: "skipped", reason: "no package.json" },
+      startedAt: expect.any(Number)
     });
   });
 
@@ -328,50 +332,151 @@ describe("reserve", () => {
 });
 
 describe("generation", () => {
-  it("still mine while the context stamp matches", async () => {
-    const { job } = lifecycle();
-    await job.putContext({ startedAt: 500 });
-    const gen = job.generation(500);
+  const LIVE = 60 * 60_000;
+  const done: JobState<Install> = {
+    state: "done",
+    command: "npm ci",
+    exitCode: 0,
+    finishedAt: 1,
+    ms: 1,
+    tail: ""
+  };
+  const failed: JobState<Install> = {
+    state: "failed",
+    command: "npm ci",
+    finishedAt: 1,
+    error: "x"
+  };
+
+  /** A run that holds the record, as a caller that reserved it has one. */
+  async function owned() {
+    const setup = lifecycle();
+    const r = await setup.job.reserve({ command: "npm ci" }, LIVE);
+    if (!r.ok) throw new Error("expected a reservation");
+    return {
+      ...setup,
+      startedAt: r.startedAt,
+      gen: setup.job.generation(r.startedAt)
+    };
+  }
+
+  it("writes while its running record stands", async () => {
+    const { job, gen } = await owned();
     expect(await gen.stillMine()).toBe(true);
-    expect(gen.superseded()).toBe(false);
+    expect(await gen.write(done)).toBe(true);
+    expect(await job.read()).toEqual(done);
   });
 
-  it("latches superseded once the stamp moves on", async () => {
+  it("is superseded by a reservation, before the new run writes anything else", async () => {
     // A drain can outlive the job it watched: `ctx.waitUntil` keeps running
-    // after the RPC returns, and a late verdict written over a live record is
-    // silent corruption.
-    const { job } = lifecycle();
-    await job.putContext({ startedAt: 500 });
-    const gen = job.generation(500);
-    await job.putContext({ startedAt: 900 });
+    // after the RPC returns. The reservation is the handoff, so it is what
+    // moves the generation — not a record the new owner writes later.
+    const { job, gen } = await owned();
+    await job.write(failed); // a staleness repair, say
+    const next = await job.reserve({ command: "npm ci" }, LIVE);
+    expect(next.ok).toBe(true);
 
-    expect(await gen.stillMine()).toBe(false);
-    // Latched, so the drain can ask afterwards whether it may touch the
-    // watchdog — which belongs to whichever run owns the record now.
-    expect(gen.superseded()).toBe(true);
+    expect(await gen.write(done)).toBe(false);
+    expect((await job.read()).state).toBe("running");
+  });
+
+  it("is superseded by an arm", async () => {
+    const { job, gen } = await owned();
+    await job.write(failed);
+    const armedAt = await job.arm({ command: "npm ci" });
+
+    expect(await gen.write(done)).toBe(false);
+    expect(await job.read()).toMatchObject({ startedAt: armedAt });
+  });
+
+  it("checks and writes in one step, so a reservation cannot land between", async () => {
+    // A stale record, which a reservation may take. The drain's read is held
+    // with the value it read, as any await between a check and a write would
+    // hold it: unqueued, the reservation lands in that window and the drain's
+    // verdict then lands over it.
+    const { job, storage, startedAt } = await owned();
+    const gen = job.generation(startedAt);
+    const get = storage.get.bind(storage);
+    let hold = true;
+    storage.get = (async (key: string) => {
+      const value = await get(key);
+      if (hold && key === "install") {
+        hold = false;
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      return value;
+    }) as typeof storage.get;
+
+    const [wrote, reserved] = await Promise.all([
+      gen.write(done),
+      job.reserve({ command: "npm ci" }, -TIMINGS.staleMs - 1)
+    ]);
+
+    expect(wrote).toBe(true);
+    expect(reserved.ok).toBe(true);
+    expect((await job.read()).state).toBe("running");
+  });
+
+  it("clears the watchdog with a verdict, and leaves a newer run's alone", async () => {
+    const { job, live, gen } = await owned();
+    await job.armWatch();
+    expect(live.size).toBe(1);
+    expect(await gen.write(done)).toBe(true);
+    expect(live.size).toBe(0);
+
+    const next = await job.reserve({ command: "npm ci" }, LIVE);
+    if (!next.ok) throw new Error("expected a reservation");
+    await job.armWatch();
+    expect(await gen.write(failed)).toBe(false);
+    expect(live.size).toBe(1);
+  });
+
+  it("writes the keys a verdict vouches for only with the verdict", async () => {
+    const { job, storage, gen } = await owned();
+    expect(await gen.write(done, { tree: "a" })).toBe(true);
+    expect(await storage.get("tree")).toBe("a");
+
+    await job.reserve({ command: "npm ci" }, LIVE);
+    expect(await gen.write(done, { tree: "b" })).toBe(false);
+    expect(await storage.get("tree")).toBe("a");
+  });
+
+  it("refuses a running record under another stamp", async () => {
+    const { gen, startedAt } = await owned();
+    await expect(
+      gen.write({
+        state: "running",
+        command: "npm ci",
+        startedAt: startedAt + 1
+      })
+    ).rejects.toThrow(/keeps its generation/);
   });
 
   it("never hands ownership back once superseded", async () => {
-    // The latch must be checked *before* the read. A context that returns to the
+    // The latch is checked *before* the read. A record that returns to the
     // original stamp does not restore ownership — a drain regaining write
     // access here is exactly the corruption the marker exists to prevent.
     const { job } = lifecycle();
-    await job.putContext({ startedAt: 500 });
+    const running = (startedAt: number): JobState<Install> => ({
+      state: "running",
+      command: "npm ci",
+      startedAt
+    });
+    await job.write(running(500));
     const gen = job.generation(500);
     expect(await gen.stillMine()).toBe(true);
 
-    await job.putContext({ startedAt: 900 });
+    await job.write(running(900));
     expect(await gen.stillMine()).toBe(false);
 
-    await job.putContext({ startedAt: 500 });
+    await job.write(running(500));
     expect(await gen.stillMine()).toBe(false);
-    expect(gen.superseded()).toBe(true);
+    expect(await gen.write(done)).toBe(false);
   });
 
-  it("treats a missing context as superseded rather than owned", async () => {
+  it("owns nothing when nothing is running", async () => {
     const { job } = lifecycle();
-    const gen = job.generation(500);
-    expect(await gen.stillMine()).toBe(false);
+    expect(await job.generation(500).stillMine()).toBe(false);
   });
 });
 
@@ -438,6 +543,53 @@ describe("arm rollback", () => {
     // `running` until a full timeout elapses.
     expect(await job.read()).toEqual(before);
     expect(await job.armedAt()).toBeUndefined();
+  });
+
+  it("leaves the record as found when the placeholder cannot be written", async () => {
+    const { job, storage } = lifecycle();
+    await job.write({
+      state: "failed",
+      command: "npm ci",
+      finishedAt: 1,
+      error: "x"
+    });
+    const put = storage.put.bind(storage);
+    // The armed stamp is the write that fails, in whichever put carries it.
+    storage.put = (async (
+      key: string | Record<string, unknown>,
+      value?: unknown
+    ) => {
+      const keys = typeof key === "string" ? [key] : Object.keys(key);
+      if (keys.includes("install:armed"))
+        throw new Error("storage unavailable");
+      return typeof key === "string" ? put(key, value) : put(key);
+    }) as typeof storage.put;
+
+    await expect(job.arm({ command: "npm ci" })).rejects.toThrow(
+      "storage unavailable"
+    );
+    expect((await job.read()).state).toBe("failed");
+    expect(await job.armedAt()).toBeUndefined();
+  });
+
+  it("says so when the placeholder cannot be undone either", async () => {
+    const { job, storage, scheduler } = lifecycle();
+    scheduler.set = async () => {
+      throw new Error("scheduler unavailable");
+    };
+    await job.write({
+      state: "failed",
+      command: "npm ci",
+      finishedAt: 1,
+      error: "x"
+    });
+    storage.delete = async () => {
+      throw new Error("storage unavailable");
+    };
+
+    await expect(job.arm({ command: "npm ci" })).rejects.toThrow(
+      /could not be undone/
+    );
   });
 
   it("keeps the cooldown floor even when scheduling failed", async () => {

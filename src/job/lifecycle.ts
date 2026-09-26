@@ -22,8 +22,9 @@ import { isRearmable, type JobState, type RunningJob } from "./state.js";
  *    blocking every retry forever.
  * 3. **A drain can outlive the job it watched.** `ctx.waitUntil` keeps running
  *    after the RPC returns, and a late drain writing its verdict over a record
- *    describing a *live* job is silent corruption. {@link generation} is the
- *    marker that makes it harmless.
+ *    describing a *live* job is silent corruption. A `running` record's
+ *    `startedAt` is its generation, and every run's writes go through
+ *    {@link generation}, which compares and writes in one step.
  * 4. **Nobody may be draining at all.** A watch intent re-attaches to a job
  *    whose isolate went away mid-flight.
  *
@@ -56,17 +57,6 @@ export interface JobResult {
 export interface JobHandle {
   result(): Promise<JobResult>;
   [Symbol.dispose](): void;
-}
-
-/**
- * The per-job record naming what is running and *which* run it is.
- *
- * `startedAt` is the generation marker, so it is the one required field: a drain
- * compares the stamp it captured against the stamp on disk, and a mismatch means
- * it has been superseded and has nothing useful left to say.
- */
-export interface JobContext {
-  startedAt: number;
 }
 
 export interface JobLifecycleOptions<
@@ -124,7 +114,7 @@ export interface JobLifecycleOptions<
 
 export class JobLifecycle<
   TExtra extends object = Record<never, never>,
-  TContext extends JobContext = JobContext,
+  TContext extends object = Record<string, unknown>,
   H extends SchedulerHandlers = SchedulerCallbacks
 > {
   readonly #o: Required<Omit<JobLifecycleOptions<H>, "storage" | "scheduler">> &
@@ -136,7 +126,7 @@ export class JobLifecycle<
   readonly armedKey: string;
   /** `install:last-armed` — the cooldown floor. */
   readonly lastArmedKey: string;
-  /** `install:context` — where the generation marker lives. */
+  /** `install:context` — the owner's own record of the run. */
   readonly contextKey: string;
   /** `install:watch-id` — the schedule the watchdog must cancel to re-arm. */
   readonly watchIdKey: string;
@@ -145,12 +135,30 @@ export class JobLifecycle<
   readonly #watch: Deadline;
 
   /**
-   * The tail {@link arm} and {@link reserve} queue on. Per instance, because an
-   * object keeps one lifecycle per job: the queue is what makes each one's read,
-   * check and write a single step even when a caller awaits something that is
-   * not storage in between, or two calls share one event.
+   * The tail {@link arm}, {@link reserve} and a generation's `write` queue on.
+   * Per instance, because an object keeps one lifecycle per job: the queue is
+   * what makes each one's read, check and write a single step even when a
+   * caller awaits something that is not storage in between, or two calls share
+   * one event.
    */
   #tail: Promise<unknown> = Promise.resolve();
+
+  /**
+   * The last stamp this instance handed out.
+   *
+   * A generation must differ from every one a drain could still hold, and
+   * `Date.now()` alone does not: the runtime advances it only across I/O, so
+   * two reservations in one event read the same millisecond. A live drain holds
+   * a stamp this instance handed out, or — re-attached — the record's, so a
+   * stamp past both is new.
+   */
+  #stamped = 0;
+
+  #stamp(replacing: JobState<TExtra>): number {
+    const held = replacing.state === "running" ? replacing.startedAt : 0;
+    this.#stamped = Math.max(Date.now(), this.#stamped + 1, held + 1);
+    return this.#stamped;
+  }
 
   #exclusive<T>(run: () => Promise<T>): Promise<T> {
     const next = this.#tail.then(run, run);
@@ -199,6 +207,10 @@ export class JobLifecycle<
     );
   }
 
+  /**
+   * Unguarded. A run writes through {@link generation}; this is for a record no
+   * run holds.
+   */
   async write(state: JobState<TExtra>): Promise<void> {
     await this.#o.storage.put(this.stateKey, state);
   }
@@ -208,10 +220,9 @@ export class JobLifecycle<
   }
 
   /**
-   * Record which run this is, **before** spawning.
-   *
-   * The order is the whole point: a drain captures `startedAt` after the spawn,
-   * so a context written afterwards would let two runs share a generation.
+   * The owner's own record of the run — what it needs to run the job again,
+   * when the alarm re-runs it with no caller to ask. Namespaced under the job;
+   * nothing here reads it.
    */
   async putContext(context: TContext): Promise<void> {
     await this.#o.storage.put(this.contextKey, context);
@@ -250,17 +261,16 @@ export class JobLifecycle<
     )
       return undefined;
 
-    const armedAt = Date.now();
-    await this.write({
-      ...placeholder,
-      state: "running",
-      startedAt: armedAt
-    } as JobState<TExtra>);
-    await this.#o.storage.put(this.armedKey, armedAt);
-    // Kept even if the scheduling below fails, deliberately: a floor that only
-    // applied to *successful* arming would let a persistently failing schedule
-    // re-arm on every call into the object, which is what it exists to prevent.
+    const armedAt = this.#stamp(state);
+    // First, and kept whatever follows, deliberately: a floor that only applied
+    // to *successful* arming would let a persistently failing schedule re-arm on
+    // every call into the object, which is what it exists to prevent.
     await this.#o.storage.put(this.lastArmedKey, armedAt);
+    // One put, so the placeholder and its stamp land together or not at all.
+    await this.#o.storage.put({
+      [this.stateKey]: { ...placeholder, state: "running", startedAt: armedAt },
+      [this.armedKey]: armedAt
+    });
 
     /**
      * The placeholder and the schedule that owns it are two writes, and between
@@ -279,8 +289,18 @@ export class JobLifecycle<
       // this module is epoch ms, so every one of them crosses as a `Date`.
       await this.#o.scheduler.set(new Date(armedAt), this.#o.run);
     } catch (err) {
-      await this.write(state);
-      await this.#o.storage.delete(this.armedKey).catch(() => {});
+      try {
+        // Issued together, with no await between, so they commit as one.
+        await Promise.all([
+          this.#o.storage.put(this.stateKey, state),
+          this.#o.storage.delete(this.armedKey)
+        ]);
+      } catch (rollback) {
+        throw new AggregateError(
+          [err, rollback],
+          `job "${this.#o.id}": its run could not be scheduled, and its placeholder could not be undone`
+        );
+      }
       throw err;
     }
     return armedAt;
@@ -307,26 +327,29 @@ export class JobLifecycle<
    * both spawn: the displacement the check exists to refuse.
    *
    * A caller spawns only after this succeeds, and before it returns it replaces
-   * the placeholder with its own record or puts `previous` back.
+   * the placeholder with its own record or puts `previous` back — through
+   * {@link generation}, with the `startedAt` this returns, which is the run's
+   * generation.
    */
   reserve(
     placeholder: Omit<RunningJob<TExtra>, "state" | "startedAt">,
     timeoutMs: number,
     takeOverArmedAt?: number
   ): Promise<
-    | { ok: true; previous: JobState<TExtra> }
+    | { ok: true; previous: JobState<TExtra>; startedAt: number }
     | { ok: false; current: RunningJob<TExtra> }
   > {
     return this.#exclusive(async () => {
       const previous = await this.read();
       const checked = this.claim(previous, timeoutMs, takeOverArmedAt);
       if (!checked.ok) return checked;
+      const startedAt = this.#stamp(previous);
       await this.write({
         ...placeholder,
         state: "running",
-        startedAt: Date.now()
+        startedAt
       } as JobState<TExtra>);
-      return { ok: true, previous };
+      return { ok: true, previous, startedAt };
     });
   }
 
@@ -394,9 +417,10 @@ export class JobLifecycle<
   /**
    * Disarm the watchdog.
    *
-   * Never call this from a superseded drain: the watchdog belongs to whichever
-   * run owns the record *now*, and clearing it there disarms the one recovery
-   * path the live run has.
+   * A run settling through {@link generation} does this in the same step. From
+   * anywhere else, only for a record no run holds: the watchdog belongs to
+   * whichever run owns the record *now*, and clearing it from a superseded one
+   * disarms the one recovery path the live run has.
    */
   async clearWatch(): Promise<void> {
     await this.#watch.clear().catch(() => {});
@@ -405,32 +429,55 @@ export class JobLifecycle<
   // --- generation --------------------------------------------------------------
 
   /**
-   * A predicate a drain calls before every write, to ask whether it still owns
-   * the record.
+   * One run's hold on the record: the `running` record whose `startedAt` is
+   * this stamp. {@link reserve} and {@link arm} write a new one, so a run
+   * displaced by either is superseded the moment it is.
    *
-   * Captures the stamp once, at drain start, and compares it against disk each
-   * time. The closure also latches, so a drain can ask afterwards whether it was
-   * superseded — which is what decides if it may touch the watchdog.
+   * `write` is how a run touches the record — the owner's own record after a
+   * reservation, a verdict, a failure it could not start past. The check and
+   * the write are one step, queued with {@link reserve} and {@link arm}: a
+   * predicate followed by a write of the caller's own would leave a window in
+   * which a new run takes the record and the old verdict lands over it.
+   *
+   * A state that is not `running` settles the run, and the same step clears the
+   * watchdog: cleared afterwards, it could already be a newer run's. `also` are
+   * keys that hold only if the verdict does, written in the same put.
+   *
+   * A caller that did not start the run — a staleness repair, a re-attach that
+   * failed — holds it by the record's own `startedAt`.
+   *
+   * Ownership **latches**: once refused, a generation never writes again, even
+   * if a stamp that happens to match comes back.
    */
   generation(startedAt: number): {
     stillMine: () => Promise<boolean>;
-    superseded: () => boolean;
+    write: (
+      state: JobState<TExtra>,
+      also?: Record<string, unknown>
+    ) => Promise<boolean>;
   } {
     let superseded = false;
+    const owns = async (): Promise<boolean> => {
+      if (superseded) return false;
+      const now = await this.read();
+      if (now.state === "running" && now.startedAt === startedAt) return true;
+      superseded = true;
+      return false;
+    };
     return {
-      stillMine: async (): Promise<boolean> => {
-        // The latch is checked *before* the read, not after. Ownership is not
-        // recoverable: once another run has owned this record, a stamp that
-        // happens to match again does not hand it back, and a drain that
-        // regained write access here would be the corruption the marker exists
-        // to prevent.
-        if (superseded) return false;
-        const now = await this.context();
-        if (now?.startedAt === startedAt) return true;
-        superseded = true;
-        return false;
-      },
-      superseded: () => superseded
+      stillMine: owns,
+      write: (state, also = {}) =>
+        this.#exclusive(async () => {
+          if (state.state === "running" && state.startedAt !== startedAt) {
+            throw new Error(
+              `job "${this.#o.id}": a running record keeps its generation's startedAt`
+            );
+          }
+          if (!(await owns())) return false;
+          await this.#o.storage.put({ ...also, [this.stateKey]: state });
+          if (state.state !== "running") await this.clearWatch();
+          return true;
+        })
     };
   }
 }

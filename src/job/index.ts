@@ -32,7 +32,6 @@ export {
 
 export {
   JobLifecycle,
-  type JobContext,
   type JobHandle,
   type JobLifecycleOptions,
   type JobResult
