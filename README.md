@@ -252,8 +252,9 @@ What a job's `role` means, and what a retry should look at, are the agent's to s
 `formatStepJobInput(job)` briefs the model ahead of the input, and `turnStepJob()` gives
 `beforeTurn` the job, to shape the tools a role may call.
 
-**Wrangler.** Each tenant binds its host, its workflow and its step agents. The host's
-Durable Object binding is named as its class: a workflow's callbacks find the host by
+**Wrangler.** Each tenant binds its host, its workflow and its step agents. The host
+names its own binding in `hostBinding`, and a workflow's callbacks and steps reach it
+through that key; left unnamed, the SDK would look for a binding matching the class
 name.
 
 `Env` here is your generated one, and every class constrains it to `CoreEnv` — `AI`,

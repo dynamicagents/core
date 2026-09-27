@@ -129,9 +129,11 @@ describe("transitions", () => {
       expect(ledger.cancel("t1")).not.toBeNull();
       expect(ledger.row("t1")?.deliveryKey).toBeNull();
       expect(ledger.row("t1")?.stopPending).toBe(true);
+      expect(ledger.pendingStops()).toEqual(["t1"]);
       expect(ledger.pendingHooks()).toEqual(["t1"]);
       ledger.stopped("t1");
       expect(ledger.row("t1")?.stopPending).toBe(false);
+      expect(ledger.pendingStops()).toEqual([]);
       // A replay of the cancel is not a second transition.
       expect(ledger.cancel("t1")).toBeNull();
     });

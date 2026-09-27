@@ -94,8 +94,9 @@ export abstract class TaskHost<
   /** The env binding of the workflow that runs this tenant's tasks. */
   protected abstract readonly workflowBinding: string;
   /**
-   * This host's own env binding. Named rather than found: the SDK finds it by
-   * class name, and a binding named otherwise would leave callbacks nowhere.
+   * This host's own env binding: what a workflow's callbacks, and its steps,
+   * reach the host through. Named, not found — left to itself, the SDK looks for
+   * a binding matching the class name.
    */
   protected abstract readonly hostBinding: string;
 
@@ -124,6 +125,13 @@ export abstract class TaskHost<
         "resumeStart",
         { taskId },
         { id: `start:${taskId}`, retry: DELIVERY_RETRY }
+      );
+    }
+    for (const taskId of this.ledger.pendingStops()) {
+      await this.queue(
+        "finishStop",
+        { taskId },
+        { id: `stop:${taskId}`, retry: DELIVERY_RETRY }
       );
     }
     // A cron schedule is idempotent: every start arms the same one.
@@ -261,10 +269,13 @@ export abstract class TaskHost<
       ...(optionId !== undefined ? { optionId } : {}),
       ...(text !== undefined ? { text } : {})
     };
-    if (this.ledger.resume(taskId, owed)) {
+    // The resume and the guard against asking again commit together.
+    const resumed = this.ctx.storage.transactionSync(() => {
+      if (!this.ledger.resume(taskId, owed)) return false;
       this.runs.answered(taskId, request.requestId);
-      await this.deliverAnswer({ taskId });
-    }
+      return true;
+    });
+    if (resumed) await this.deliverAnswer({ taskId });
     return this.ledger.get(taskId);
   }
 
@@ -373,6 +384,8 @@ export abstract class TaskHost<
     const row = this.ledger.row(payload.taskId);
     if (!row?.answer) return;
     const { id, requestId, ...answer } = row.answer;
+    // Idempotent, and what a replayed park step reads: never ask it again.
+    this.runs.answered(payload.taskId, requestId);
     if (!isTerminalState(row.state)) {
       const relayed: StepAnswer = answer;
       await this.sendWorkflowEvent(this.workflowBinding, payload.taskId, {
@@ -550,21 +563,45 @@ export abstract class TaskHost<
   /**
    * Stop the task's instance, then every job its steps started. A stopped job
    * keeps its work: the agent that picks the task up again decides what
-   * becomes of it. Safe to repeat.
+   * becomes of it. The stop the ledger owes is cleared only once every part
+   * of it held; one that failed is retried from the queue. Safe to repeat.
    */
   async #stopRun(taskId: string): Promise<void> {
+    if (await this.#tryStopRun(taskId)) return;
+    await this.queue(
+      "finishStop",
+      { taskId },
+      { id: `stop:${taskId}`, retry: DELIVERY_RETRY }
+    );
+  }
+
+  /** A stop that failed, tried again. Throws, so the queue retries it. */
+  async finishStop(payload: { taskId: string }): Promise<void> {
+    await ensureStarted(this);
+    if (!this.ledger.row(payload.taskId)?.stopPending) return;
+    if (!(await this.#tryStopRun(payload.taskId))) {
+      throw new Error(`the run of task ${payload.taskId} is not stopped yet`);
+    }
+  }
+
+  async #tryStopRun(taskId: string): Promise<boolean> {
+    let stopped = true;
     try {
       await (await this.#workflow().get(taskId)).terminate();
     } catch (err) {
-      console.warn("[host] instance not terminated", {
-        taskId,
-        err: String(err)
-      });
+      if (!(await this.#instanceStopped(taskId))) {
+        stopped = false;
+        console.warn("[host] instance not terminated", {
+          taskId,
+          err: String(err)
+        });
+      }
     }
     for (const job of this.runs.jobs(taskId)) {
       try {
         await (await this.#stepAgent(job.binding)).cancelStepJob(job.stepJobId);
       } catch (err) {
+        stopped = false;
         console.warn("[host] step job not stopped", {
           taskId,
           stepJobId: job.stepJobId,
@@ -572,7 +609,23 @@ export abstract class TaskHost<
         });
       }
     }
-    this.ledger.stopped(taskId);
+    if (stopped) this.ledger.stopped(taskId);
+    return stopped;
+  }
+
+  /**
+   * Whether a terminate that threw found nothing left to stop: an instance
+   * already ended, or one never created. A start that creates it later stops
+   * it itself, finding the task canceled (see `#start`). A read that fails for
+   * another reason is taken the same way: the binding does not say which.
+   */
+  async #instanceStopped(taskId: string): Promise<boolean> {
+    try {
+      const { status } = await (await this.#workflow().get(taskId)).status();
+      return ["complete", "errored", "terminated"].includes(status);
+    } catch {
+      return true;
+    }
   }
 
   /**

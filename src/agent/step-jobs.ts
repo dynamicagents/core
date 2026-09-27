@@ -1,5 +1,5 @@
 import type { HitlRequestData } from "@dynamicagents/g2a-protocol";
-import { isTerminalState, type Sql } from "../ledger.js";
+import { isTerminalState, type Sql, type Transaction } from "../ledger.js";
 import type { StepJob, StepJobReport } from "../workflow/types.js";
 
 /**
@@ -13,10 +13,10 @@ import type { StepJob, StepJobReport } from "../workflow/types.js";
  *    decides, and the rows it wrote are the verdict. A caller that reads the
  *    state and then acts reopens the window in which a cancel lands and the
  *    workflow still hears `completed`.
- *  - **A transition and the report it owes are one write.** Both are written
- *    in one synchronous block, so a crash leaves either neither or both, and
- *    the start-up sweep sends what is unsent. Reports are numbered, because the
- *    workflow waits for report `n` under an event type of its own.
+ *  - **A transition and the report it owes are one write.** Both commit in one
+ *    transaction, so a failure leaves either neither or both, and the start-up
+ *    sweep sends what is unsent. Reports are numbered, because the workflow
+ *    waits for report `n` under an event type of its own.
  *  - **Open work keeps a job alive across turns.** A detached sub-agent run or
  *    a scheduled wake is a work row, and settlement asks this table — not the
  *    model — whether the job is finished.
@@ -98,7 +98,10 @@ interface StoredWork {
 export class StepJobs {
   #ensured = false;
 
-  constructor(private readonly sql: Sql) {}
+  constructor(
+    private readonly sql: Sql,
+    private readonly transaction: Transaction
+  ) {}
 
   /**
    * Run before the first statement rather than at construction: an agent builds
@@ -222,16 +225,18 @@ export class StepJobs {
    */
   cancel(stepJobId: string): boolean {
     this.#ensure();
-    const rows = this.sql<{ step_job_id: string }>`
-      UPDATE da_step_jobs
-      SET state = 'canceled', request_json = NULL, answer_json = NULL,
-          updated_at = ${Date.now()}
-      WHERE step_job_id = ${stepJobId}
-        AND state IN ('submitted', 'working', 'input-required')
-      RETURNING step_job_id`;
-    this.sql`UPDATE da_step_job_reports SET sent = 1
-      WHERE step_job_id = ${stepJobId}`;
-    return rows.length > 0;
+    return this.transaction(() => {
+      const rows = this.sql<{ step_job_id: string }>`
+        UPDATE da_step_jobs
+        SET state = 'canceled', request_json = NULL, answer_json = NULL,
+            updated_at = ${Date.now()}
+        WHERE step_job_id = ${stepJobId}
+          AND state IN ('submitted', 'working', 'input-required')
+        RETURNING step_job_id`;
+      this.sql`UPDATE da_step_job_reports SET sent = 1
+        WHERE step_job_id = ${stepJobId}`;
+      return rows.length > 0;
+    });
   }
 
   /**
@@ -241,14 +246,16 @@ export class StepJobs {
    */
   park(stepJobId: string, request: HitlRequestData): number | null {
     this.#ensure();
-    const rows = this.sql<{ step_job_id: string }>`
-      UPDATE da_step_jobs
-      SET state = 'input-required', request_json = ${JSON.stringify(request)},
-          updated_at = ${Date.now()}
-      WHERE step_job_id = ${stepJobId} AND state = 'working'
-      RETURNING step_job_id`;
-    if (rows.length === 0) return null;
-    return this.#addReport(stepJobId, { state: "input-required", request });
+    return this.transaction(() => {
+      const rows = this.sql<{ step_job_id: string }>`
+        UPDATE da_step_jobs
+        SET state = 'input-required', request_json = ${JSON.stringify(request)},
+            updated_at = ${Date.now()}
+        WHERE step_job_id = ${stepJobId} AND state = 'working'
+        RETURNING step_job_id`;
+      if (rows.length === 0) return null;
+      return this.#addReport(stepJobId, { state: "input-required", request });
+    });
   }
 
   /**
@@ -286,15 +293,17 @@ export class StepJobs {
     report: Extract<StepJobReport, { state: "completed" | "failed" }>
   ): number | null {
     this.#ensure();
-    const rows = this.sql<{ step_job_id: string }>`
-      UPDATE da_step_jobs
-      SET state = ${report.state}, request_json = NULL, answer_json = NULL,
-          updated_at = ${Date.now()}
-      WHERE step_job_id = ${stepJobId}
-        AND state IN ('submitted', 'working', 'input-required')
-      RETURNING step_job_id`;
-    if (rows.length === 0) return null;
-    return this.#addReport(stepJobId, report);
+    return this.transaction(() => {
+      const rows = this.sql<{ step_job_id: string }>`
+        UPDATE da_step_jobs
+        SET state = ${report.state}, request_json = NULL, answer_json = NULL,
+            updated_at = ${Date.now()}
+        WHERE step_job_id = ${stepJobId}
+          AND state IN ('submitted', 'working', 'input-required')
+        RETURNING step_job_id`;
+      if (rows.length === 0) return null;
+      return this.#addReport(stepJobId, report);
+    });
   }
 
   /**

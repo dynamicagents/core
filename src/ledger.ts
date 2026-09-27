@@ -10,6 +10,12 @@ export type Sql = <T = Record<string, string | number | boolean | null>>(
   ...values: (string | number | boolean | null)[]
 ) => T[];
 
+/**
+ * The object's `ctx.storage.transactionSync`: the writes a transition owes
+ * commit with it or not at all.
+ */
+export type Transaction = <T>(fn: () => T) => T;
+
 /** The states a task or a job never leaves. */
 const TERMINAL = new Set(["completed", "failed", "canceled", "rejected"]);
 

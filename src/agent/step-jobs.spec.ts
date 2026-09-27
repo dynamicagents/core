@@ -22,11 +22,16 @@ async function withLedger<R>(fn: (ledger: StepJobs) => R): Promise<R> {
   const stub = testEnv.TEST_AGENT.get(
     testEnv.TEST_AGENT.idFromName(`jobs:${crypto.randomUUID()}`)
   );
-  return runInDurableObject(stub, (instance) => {
+  return runInDurableObject(stub, (instance, state) => {
     const agent = instance as unknown as {
       sql: ConstructorParameters<typeof StepJobs>[0];
     };
-    return fn(new StepJobs((s, ...v) => agent.sql(s, ...v)));
+    return fn(
+      new StepJobs(
+        (s, ...v) => agent.sql(s, ...v),
+        (run) => state.storage.transactionSync(run)
+      )
+    );
   });
 }
 

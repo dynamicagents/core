@@ -161,8 +161,9 @@ export abstract class StepAgent<
    * The job ledger. Not `tasks`: every `Agent` already has `this.tasks`, the
    * agents SDK's durable task capability.
    */
-  readonly ledger = new StepJobs((strings, ...values) =>
-    this.sql(strings, ...values)
+  readonly ledger = new StepJobs(
+    (strings, ...values) => this.sql(strings, ...values),
+    (fn) => this.ctx.storage.transactionSync(fn)
   );
 
   abstract override getModel(): ThinkModel;
@@ -832,8 +833,33 @@ export abstract class StepAgent<
     await this.#stopWork(stepJobId);
   }
 
-  /** Stop a job's background runs and wakes, keeping what they did. */
+  /**
+   * Stop a job's background runs and wakes, keeping what they did. A row is
+   * closed only once its stop held: the job has ended, so nothing else would
+   * revisit it, and one that failed is retried from the queue.
+   */
   async #stopWork(stepJobId: string): Promise<void> {
+    if (await this.#tryStopWork(stepJobId)) return;
+    await this.queue(
+      "finishStopWork",
+      { stepJobId },
+      { id: `stop-work:${stepJobId}`, retry: DELIVERY_RETRY }
+    );
+  }
+
+  /** A stop of a job's work that failed, tried again. Throws, so it retries. */
+  async finishStopWork(payload: { stepJobId: string }): Promise<void> {
+    await ensureStarted(this);
+    if (!this.ledger.closed(payload.stepJobId)) return;
+    if (!(await this.#tryStopWork(payload.stepJobId))) {
+      throw new Error(
+        `the work of job ${payload.stepJobId} is not stopped yet`
+      );
+    }
+  }
+
+  async #tryStopWork(stepJobId: string): Promise<boolean> {
+    let stopped = true;
     for (const work of this.ledger.openWorkRows(stepJobId)) {
       try {
         if (work.kind === "detached") {
@@ -841,15 +867,17 @@ export abstract class StepAgent<
         } else if (work.kind === "wait" && work.scheduleId) {
           await this.cancelSchedule(work.scheduleId);
         }
+        this.ledger.closeWork(work.workId);
       } catch (err) {
+        stopped = false;
         console.warn("[agent] work not stopped", {
           stepJobId,
           workId: work.workId,
           err: String(err)
         });
       }
-      this.ledger.closeWork(work.workId);
     }
+    return stopped;
   }
 
   // --- delegation ------------------------------------------------------------

@@ -21,8 +21,8 @@
   "durable_objects": {
     "bindings": [
       // The task host the edge addresses, and the step agents its pipeline
-      // runs jobs on. A host's binding is named as its class: a workflow's
-      // callbacks find it by name.
+      // runs jobs on. The host's `hostBinding` names its key here: a
+      // workflow's callbacks and steps reach it through that, not its class.
       { "name": "TEST_HOST", "class_name": "TestHost" },
       { "name": "TEST_AGENT", "class_name": "TestAgent" },
       { "name": "TEST_STEP_B", "class_name": "TestStepB" },

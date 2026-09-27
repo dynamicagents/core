@@ -779,13 +779,14 @@ describe("the host's own bookkeeping", () => {
     const question = await lastQuestion(harness, task.id);
 
     await runInDurableObject(host, async (instance) => {
-      // Resumed, and the host gone before the relay.
+      // Resumed, and the host gone before the relay — and before the guard
+      // against asking again was written.
       instance.ledger.resume(task.id, {
         id: "answer:cut",
         requestId: question.requestId,
         optionId: "option_1"
       });
-      instance.runs.answered(task.id, question.requestId);
+      expect(instance.runs.wasAnswered(question.requestId)).toBe(false);
       // The gatekeeper's retry.
       await instance.answerTask({
         taskId: task.id,
@@ -802,6 +803,45 @@ describe("the host's own bookkeeping", () => {
     expect(done.text).toBe("Yes");
     await pause(300);
     expect(terminals(harness, task.id)).toHaveLength(1);
+    // The relay wrote the guard the eviction cut.
+    expect(
+      await runInDurableObject(host, (instance) =>
+        instance.runs.wasAnswered(question.requestId)
+      )
+    ).toBe(true);
+  });
+
+  it("owes a stop until every part of it has held", async () => {
+    const { harness, host } = setup("stop-kept");
+    using _ = harness.interceptGatekeeper();
+    const taskId = crypto.randomUUID();
+
+    await runInDurableObject(host, async (instance) => {
+      instance.ledger.accept({
+        messageId: `m-${taskId}`,
+        taskId,
+        contextId: "c1",
+        push: {
+          taskId,
+          contextId: "c1",
+          pushUrl: harness.pushUrl,
+          pushToken: "tok",
+          jku: "https://agent.test/.well-known/jwks.json"
+        },
+        identity: { key: "k" }
+      });
+      // A job on an agent the host cannot reach: its stop fails.
+      instance.runs.note(taskId, {
+        stepJobId: `${taskId}:main`,
+        binding: "NO_SUCH_AGENT"
+      });
+      instance.ledger.cancel(taskId);
+      await expect(instance.finishStop({ taskId })).rejects.toThrow(
+        "not stopped yet"
+      );
+      expect(instance.ledger.row(taskId)?.stopPending).toBe(true);
+      expect(instance.ledger.pendingStops()).toEqual([taskId]);
+    });
   });
 });
 

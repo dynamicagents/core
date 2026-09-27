@@ -198,6 +198,15 @@ export class A2ATasks {
     );
   }
 
+  /** Tasks whose run is still owed a stop. */
+  pendingStops(): string[] {
+    this.#ensure();
+    return this.sql<{ task_id: string }>`
+      SELECT task_id FROM da_a2a_tasks WHERE stop_pending = 1`.map(
+      (r) => r.task_id
+    );
+  }
+
   /** Tasks accepted and never bound: a start an eviction cut short. */
   unbound(): string[] {
     this.#ensure();

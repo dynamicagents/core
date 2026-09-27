@@ -670,6 +670,39 @@ describe("recovering what an eviction cut short", () => {
   });
 });
 
+describe("stopping a job's work", () => {
+  it("keeps a row open until its stop has held", async () => {
+    const { agent } = harnessFor("stop-work");
+    const ended = await endedInstance();
+
+    await runInDurableObject(agent, async (instance: TestAgent) => {
+      const job = seedJob(instance, ended);
+      instance.ledger.addWork({
+        workId: "wait:w1",
+        stepJobId: job.stepJobId,
+        kind: "wait",
+        name: "check_back",
+        scheduleId: "s1"
+      });
+      instance.ledger.settle(job.stepJobId, { state: "failed", error: "cut" });
+      const stub = instance as unknown as {
+        cancelSchedule(id: string): Promise<boolean>;
+      };
+      stub.cancelSchedule = async () => {
+        throw new Error("the schedule store is away");
+      };
+      await expect(
+        instance.finishStopWork({ stepJobId: job.stepJobId })
+      ).rejects.toThrow("not stopped yet");
+      expect(instance.ledger.openWorkRows(job.stepJobId)).toHaveLength(1);
+
+      stub.cancelSchedule = async () => true;
+      await instance.finishStopWork({ stepJobId: job.stepJobId });
+      expect(instance.ledger.openWorkRows(job.stepJobId)).toEqual([]);
+    });
+  });
+});
+
 describe("check_back", () => {
   it("ends the turn, keeps the job open, and settles after the wake", async () => {
     const { harness, debug } = harnessFor("checkback");
