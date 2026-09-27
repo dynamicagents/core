@@ -71,10 +71,12 @@ async function bootWithout(binding: string, name: string): Promise<Boot> {
 }
 
 describe("the artifacts binding at DO start", () => {
-  it("fails an agent's onStart when nothing is bound", async () => {
-    expect(await bootWithout("TEST_AGENT", "unbound")).toMatchObject({
-      named: true
-    });
+  it("fails a step agent's onStart, and a host's, when nothing is bound", async () => {
+    for (const binding of ["TEST_AGENT", "TEST_HOST"]) {
+      expect(await bootWithout(binding, "unbound")).toMatchObject({
+        named: true
+      });
+    }
   });
 
   it("names every line the wiring needs, the route delegation included", async () => {
@@ -90,16 +92,24 @@ describe("the artifacts binding at DO start", () => {
     expect(message).toMatch(/handleArtifactRoute\(request, env\)/);
   });
 
-  it("lets an agent start on an env that has it", async () => {
+  it("lets a step agent and a host start on an env that has it", async () => {
     // The other half of the check: an assertion that fires on the wired case
     // too would be indistinguishable from one that is simply broken. Any RPC
     // starts the lifecycle, and with it `onStart`.
-    const ns = namespaces.TEST_AGENT as DurableObjectNamespace<
+    const agents = namespaces.TEST_AGENT as DurableObjectNamespace<
       {
-        getTask(id: string): Promise<unknown>;
+        answerStepJob(id: string, answer: object): Promise<void>;
       } & Rpc.DurableObjectBranded
     >;
-    const stub = ns.get(ns.idFromName(`boot:ok:${crypto.randomUUID()}`));
-    await expect(stub.getTask("none")).resolves.toBeNull();
+    const agent = agents.get(
+      agents.idFromName(`boot:ok:${crypto.randomUUID()}`)
+    );
+    await expect(agent.answerStepJob("none", {})).resolves.toBeUndefined();
+
+    const hosts = namespaces.TEST_HOST as DurableObjectNamespace<
+      { getTask(id: string): Promise<unknown> } & Rpc.DurableObjectBranded
+    >;
+    const host = hosts.get(hosts.idFromName(`boot:ok:${crypto.randomUUID()}`));
+    await expect(host.getTask("none")).resolves.toBeNull();
   });
 });

@@ -1,12 +1,12 @@
 import { describe, it, expect } from "vitest";
 import type { UIMessage } from "ai";
-import { latestTaskId, readRunSummary, readTurn } from "./outcome.js";
+import { latestStepJobId, readRunSummary, readTurn } from "./outcome.js";
 
-const user = (id: string, taskId: string, text = "go"): UIMessage => ({
+const user = (id: string, stepJobId: string, text = "go"): UIMessage => ({
   id,
   role: "user",
   parts: [{ type: "text", text }],
-  metadata: { turnMetadata: { taskId, contextId: "c" } }
+  metadata: { turnMetadata: { taskId: "task", stepJobId, contextId: "c" } }
 });
 
 const assistant = (id: string, parts: UIMessage["parts"]): UIMessage => ({
@@ -121,9 +121,9 @@ describe("reading a turn", () => {
     expect(outcome.ask).toBeUndefined();
   });
 
-  it("names the task a recovery is about from the latest user message", () => {
-    expect(latestTaskId([user("u1", "t1"), assistant("a1", [])])).toBe("t1");
-    expect(latestTaskId([])).toBeUndefined();
+  it("names the job a recovery is about from the latest user message", () => {
+    expect(latestStepJobId([user("u1", "t1"), assistant("a1", [])])).toBe("t1");
+    expect(latestStepJobId([])).toBeUndefined();
   });
 });
 

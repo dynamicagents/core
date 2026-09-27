@@ -1,14 +1,16 @@
 /**
- * `@dynamicagents/core/agent` — the agent behind core's zero-trust edge.
+ * `@dynamicagents/core/agent` — the step agent.
  *
- * {@link A2AAgent} is the per-caller agent a starter subclasses: a Think agent
- * with the A2A task around its turns. Everything a turn does is Think's; what
- * is here is the part Think does not have — the task, its guarded ledger,
- * delivery, and a task that outlives its turn. The ledger and the turn reader
- * are internal: a subclass answers hooks, it does not write task state.
+ * {@link StepAgent} is the per-caller agent a starter subclasses: a Think agent
+ * that runs the jobs a task workflow (`/workflow`) starts, and reports each to
+ * it. Everything a turn does is Think's; what is here is the part Think does
+ * not have — the job, its guarded ledger, its reports, and a job that outlives
+ * its turn. It speaks no A2A: the task is its host's (`/task`). The ledger and
+ * the turn reader are internal: a subclass answers hooks, it does not write job
+ * state.
  */
 
-export { A2AAgent, type A2ACopy, type CheckBackWake } from "./agent.js";
+export { StepAgent, TURN_CEILING_MS, type CheckBackWake } from "./agent.js";
 
 export {
   ASK_USER_TOOL_NAME,

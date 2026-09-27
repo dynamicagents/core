@@ -134,33 +134,52 @@ publish train (core → plugins → starter), so one repo is always briefly behi
 
 ## The line core does not cross
 
-**Core owns the A2A↔Think lifecycle, and ships no prompt copy and no numbers.**
+**Core owns the task around Think, and ships no prompt copy and no numbers but
+`longestStepMs`.**
 
-Think runs the turn — the loop, recovery, compaction, agent tools, actions.
-Core wraps it in the A2A task: the guarded ledger (`src/agent/tasks.ts`), the mapping
-from a turn's outcome to a task state, the durable delivery outbox, cancellation
-fan-out, and a task that outlives its turn through open work. Every one of those
-is an ordering an agent cannot vary and still be correct: a cancel decided by a probe
-instead of the guarded write's verdict is a canceled task that still calls back
-`completed`.
+Think runs the turn — the loop, recovery, compaction, agent tools, actions. Core
+wraps it in a task, split across these roles, each the only owner of its state:
+
+| role                              | where           | owns                                                                                                                                                                                |
+| --------------------------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| task host (`TaskHost`)            | `src/task/`     | the A2A task: its guarded ledger (`src/task/tasks.ts`), the push channel, the delivery outbox, the cancel ordering, retention, the transcript's settle, the end-of-task notice      |
+| task workflow (`A2ATaskWorkflow`) | `src/workflow/` | the sequence of a task's steps and the state between them; the job ids and event types both sides derive (`src/workflow/keys.ts`)                                                   |
+| step agent (`StepAgent`)          | `src/agent/`    | a step job: its guarded ledger (`src/agent/step-jobs.ts`), the mapping from a turn's outcome to the job's report, a job that outlives its turn through open work, the turn deadline |
+
+Every one of those is an ordering an agent cannot vary and still be correct: a cancel
+decided by a probe instead of the guarded write's verdict is a canceled task that
+still calls back `completed`.
+
+**Where a change goes.**
+
+- Anything the gatekeeper hears, or how a task is accepted, canceled, answered or
+  settled → the host.
+- How a pipeline's steps start, wait, ask, retry and report → the workflow.
+- How a job's turns run, settle, delegate and stop → the step agent.
+- A tenant's steps — which agents, in what order, with what roles → the consumer's
+  pipeline, never core.
 
 What is genuinely per-agent is explicit and mandatory:
 
-- **The words.** `A2AAgent.copy` (the failed, empty and expired messages), the soul,
-  every block the model reads. Nothing has a default.
+- **The words.** `TaskHost.copy` (the failed, empty and expired messages), a step
+  agent's `formatContinuation`, the soul, every block the model reads. Nothing has a
+  default.
 - **The numbers.** The model, compaction thresholds, an output ceiling. Core sets no
-  budget at all: the gatekeeper cancels a task that has not settled within the hour,
-  so a ceiling below that is arbitrary, and one above it is never reached.
+  budget: the gatekeeper cancels a task that has not settled within the hour, so a
+  ceiling below that is arbitrary, and one above it is never reached. The exception
+  is `StepAgent.longestStepMs`, how long a single step may take. It is the
+  step half of the runtime's fifteen-minute turn ceiling, which core owns
+  (`TURN_CEILING_MS`), and it is a measurement an agent overrides for its own model.
 
-So when adding to `/agent` or `/subagent`, the test is not "does an agent vary here" but "**could an
-agent vary here and still be correct**". A cancellation ordering cannot. A sentence
-the model reads always can.
+So when adding to `/task`, `/workflow`, `/agent` or `/subagent`, the test is not
+"does an agent vary here" but "**could an agent vary here and still be correct**". A
+cancellation ordering cannot. A sentence the model reads always can.
 
 **Build on Think's primitives in a shape Think could absorb.** Where core is ahead of
-Think — a task spanning turns, the A2A edge — it is written on Think's own hooks
-(`onSubmissionStatus`, `runAgentTool`'s `onFinish`, `schedule`, `queue`) rather than
-around them, and named the way Think names things, so the day Think grows the same
-feature the port is a deletion.
+Think — a job spanning turns, the A2A edge — it is written on Think's own hooks
+(`onSubmissionStatus`, `beforeToolCall`, `runAgentTool`'s `onFinish`, `schedule`,
+`queue`) and on agents' `AgentWorkflow`, rather than around them, and named the way
+Think names things, so the day Think grows the same feature the port is a deletion.
 
 ### Model providers
 
@@ -237,8 +256,9 @@ Specs live next to the code they test (`src/**/*.spec.ts`) and run inside
 workerd, because a Think agent drives `ctx.storage.sql`, alarms and facets, none
 of which have a Node-side stand-in. `wrangler.jsonc` and `test/worker.ts` exist
 only to give the pool something to bind — they are dev-only and excluded from the
-published tarball. `src/agent/agent.spec.ts` drives every lifecycle scenario
-through the real A2A edge and asserts on the push callbacks.
+published tarball. `src/agent/agent.spec.ts` and `src/workflow/workflow.spec.ts`
+drive every lifecycle scenario through the real A2A edge — host, workflow, step
+agent — and assert on the push callbacks.
 
 Two things `npm test` alone will not catch, so run `npm run check` before
 pushing: vitest transpiles specs without typechecking them, and formatting and

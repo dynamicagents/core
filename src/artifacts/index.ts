@@ -14,7 +14,7 @@
  * - **The routes** — {@link handleArtifactRoute}, one delegation from a Worker's
  *   `fetch`, serving the viewer page and the event stream behind it.
  * - **The emission** — {@link transcribeNote} and {@link settleTranscript},
- *   which core's `A2AAgent` already calls.
+ *   which core's `TaskHost` and `StepAgent` already call.
  *
  * **The binding is required**, and a deployment that omits it fails at DO
  * start with the lines it is missing — see

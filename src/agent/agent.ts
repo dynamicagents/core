@@ -5,15 +5,19 @@ import {
   type ThinkScheduledTasks,
   type ThinkSession,
   type ThinkSubmissionInspection,
+  type ToolCallContext,
+  type ToolCallDecision,
   type TurnConfig,
   type TurnContext,
   type Action
 } from "@cloudflare/think";
-import type {
-  AgentToolLifecycleResult,
-  AgentToolMilestone,
-  AgentToolProgressSnapshot,
-  AgentToolRunInfo
+import {
+  getAgentByName,
+  type Agent,
+  type AgentToolLifecycleResult,
+  type AgentToolMilestone,
+  type AgentToolProgressSnapshot,
+  type AgentToolRunInfo
 } from "agents";
 import type { ContextConfig } from "agents/context";
 import { createCompactFunction } from "agents/sessions";
@@ -22,27 +26,19 @@ import {
   hasToolCall,
   tool,
   type LanguageModel,
+  type StopCondition,
   type Tool,
   type ToolSet,
   type UIMessage
 } from "ai";
-import { Task, TaskState } from "@a2a-js/sdk";
+import type { TaskState } from "@a2a-js/sdk";
 import {
   HITL_REQUEST_TYPE,
   type HitlRequestData
 } from "@dynamicagents/g2a-protocol";
-import type { AcceptedTurn } from "../a2a/executor.js";
-import type { TaskListPage, TaskListQuery } from "../a2a/agent-stub.js";
-import { callerContext } from "../a2a/caller.js";
-import type { HumanReply } from "../a2a/hitl.js";
-import { buildInputRequiredTask } from "../a2a/hitl.js";
-import { buildCompletedTask, buildFailedTask } from "../a2a/notify.js";
-import { createPushChannel, type PushChannel } from "../a2a/push.js";
 import { SelfOrigin } from "../a2a/self-origin.js";
-import { taskStateLabel, type PlainTask } from "../a2a/task.js";
-import type { GatekeeperIdentity } from "../a2a/verify.js";
 import { assertArtifactsBound } from "../artifacts/binding.js";
-import { settleTranscript, transcribeNote } from "../artifacts/transcript.js";
+import { transcribeNote } from "../artifacts/transcript.js";
 import {
   PluginSetupError,
   assemblePlugins,
@@ -50,8 +46,12 @@ import {
 } from "../contract/assemble.js";
 import type { AgentPlugin, PluginContext } from "../contract/plugin.js";
 import type { CoreEnv } from "../env.js";
+import { isTerminalState, TASK_RETENTION_MS } from "../ledger.js";
+import { reportEventType } from "../workflow/keys.js";
+import type { StepAnswer, StepJob } from "../workflow/types.js";
 import { ensureStarted } from "./lifecycle.js";
-import { latestTaskId, readTurn } from "./outcome.js";
+import { latestStepJobId, readTurn } from "./outcome.js";
+import { StepJobs, type JobRow } from "./step-jobs.js";
 import type {
   SubAgentSettleContext,
   SubAgentSpec
@@ -63,12 +63,6 @@ import {
   type SubAgentEnvelope
 } from "../subagent/subagent.js";
 import {
-  A2ATasks,
-  TASK_RETENTION_MS,
-  isTerminalState,
-  questionKey
-} from "./tasks.js";
-import {
   ASK_USER_TOOL_NAME,
   CHECK_BACK_DESCRIPTION,
   CHECK_BACK_TOOL_NAME,
@@ -78,38 +72,34 @@ import {
   SEARCH_HISTORY_TOOL_NAME
 } from "./tools.js";
 
-/** The user-facing strings core needs and never writes. */
-export interface A2ACopy {
-  /** A turn that errored. */
-  failed: string;
-  /** A turn that ended with nothing to say. */
-  emptyReply: string;
-  /** A question nobody answered before the gatekeeper gave up on it. */
-  questionExpired: string;
-}
-
 /** What `onCheckBack` is handed by the schedule `check_back` created. */
 export interface CheckBackWake {
-  taskId: string;
+  stepJobId: string;
   workId: string;
   seconds: number;
   why: string;
 }
 
-/** What the delivery outbox carries. Strings and JSON: it crosses a queue. */
-interface DeliveryJob {
-  taskId: string;
-  /** The ledger's `deliveryKey` for the event this callback reports. */
-  key: string;
-  task: unknown;
+/** What `onContinue` is handed by the schedule a turn's deadline created. */
+interface ContinueWake {
+  stepJobId: string;
+  workId: string;
 }
 
-/** How a queued job that must land is retried: the callback outbox's policy. */
+/** How a queued job that must land is retried. */
 const DELIVERY_RETRY = {
   maxAttempts: 8,
   baseDelayMs: 2_000,
   maxDelayMs: 300_000
 };
+
+/**
+ * A turn runs inside the object's alarm, and the platform stops an alarm
+ * invocation after fifteen minutes of wall-clock time. Think's
+ * `submissionRecoveryStaleMs` assumes the same: past it, a running submission
+ * is marked `error`.
+ */
+export const TURN_CEILING_MS = 15 * 60 * 1000;
 
 /** Who wrote a note: the sub-agent class and its per-parent ordinal. */
 interface NoteSource {
@@ -129,27 +119,31 @@ interface A2AConfig {
 }
 
 /**
- * The per-caller agent: a Think agent behind core's zero-trust A2A edge, one
- * Durable Object per verified `identity.key`.
+ * The per-caller step agent: a Think agent that runs the jobs a task workflow
+ * starts, one Durable Object per verified `identity.key`. It speaks no A2A: the
+ * task is its host's (`/task`), and a job reports to the workflow that started
+ * it (`/workflow`).
  *
- * What it adds to Think is the A2A task lifecycle, and three rules hold it:
+ * What it adds to Think is the step job, and these rules hold it:
  *
- *  - **A task can outlive the turn that started it.** Work that may run past
- *    Think's fifteen-minute turn is dispatched detached or scheduled; the task
- *    stays `working` while the ledger holds open work for it, and the turn that
- *    ends with none is the one that answers.
+ *  - **A job can outlive the turn that started it.** Work that may run past a
+ *    turn is dispatched detached or scheduled; the job stays `working` while
+ *    the ledger holds open work for it, and the turn that ends with none is the
+ *    one that answers. A turn nearing the runtime's ceiling stops and carries on
+ *    in the next, the same way.
  *  - **`onSubmissionStatus` is not a delivery channel.** It fires inside the
- *    turn slot and its errors are only logged, so it does the guarded write and
- *    hands the callback to a durable queue.
- *  - **Cancellation is decided by the guarded write, never by a probe.** A read
- *    then an act reopens the window where a cancel lands and the gatekeeper
- *    still gets a `completed`.
+ *    turn slot and its errors are only logged, so it does the guarded write —
+ *    which owes the report in the same write — and hands the report to a durable
+ *    queue.
+ *  - **Cancellation is decided by the guarded write, never by a probe.**
+ *  - **A turn for a job that has ended does nothing.** It is not recovered,
+ *    its tools are refused, and it stops at its next step.
  *
- * A subclass supplies the model, the copy and the compaction values; core ships
- * no numbers and no prompt copy. A subclass that overrides a Think hook this
- * class implements calls `super`.
+ * A subclass supplies the model, the compaction values and the words a
+ * continuation turn opens with; core ships no prompt copy. A subclass that
+ * overrides a Think hook this class implements calls `super`.
  */
-export abstract class A2AAgent<
+export abstract class StepAgent<
   Env extends Cloudflare.Env & CoreEnv = Cloudflare.Env & CoreEnv
 > extends Think<Env> {
   /**
@@ -164,21 +158,27 @@ export abstract class A2AAgent<
   override contextOverflow = { reactive: true };
 
   /**
-   * The task ledger. Not `tasks`: every `Agent` already has `this.tasks`, the
+   * The job ledger. Not `tasks`: every `Agent` already has `this.tasks`, the
    * agents SDK's durable task capability.
    */
-  readonly ledger = new A2ATasks((strings, ...values) =>
+  readonly ledger = new StepJobs((strings, ...values) =>
     this.sql(strings, ...values)
   );
 
   abstract override getModel(): ThinkModel;
-  protected abstract readonly copy: A2ACopy;
   /** Compact once the stamped history estimate crosses this. */
   protected abstract readonly compactAfterTokens: number;
   /** The recent tail compaction keeps verbatim. */
   protected abstract readonly keepRecentTokens: number;
   /** Output ceiling per step. Unset, the provider's default applies. */
   protected readonly maxOutputTokens?: number;
+  /**
+   * The longest one step can take — a model call and the tools it runs. A turn
+   * takes no new step once less than this is left of {@link TURN_CEILING_MS}.
+   * Measured, not chosen: a single GLM step took over three minutes live.
+   * Override for a model that measures differently.
+   */
+  protected readonly longestStepMs: number = 4 * 60 * 1000;
 
   /** This agent's plugins. Default: none. */
   getPlugins(): AgentPlugin<Env>[] {
@@ -190,11 +190,13 @@ export abstract class A2AAgent<
     return [];
   }
 
-  /** Learned from the `jku` each accepted turn carries; never configured. */
+  /** Learned from the `jku` each job carries; never configured. */
   readonly #origin = new SelfOrigin();
   #plugins?: AssembledPlugins<Env>;
   #buffered = "";
   #flushed = false;
+  /** When the alarm invocation in flight began: where a turn's clock starts. */
+  #invokedAt: number | undefined;
 
   protected get plugins(): AssembledPlugins<Env> {
     return (this.#plugins ??= assemblePlugins(this.getPlugins(), this.env));
@@ -209,16 +211,12 @@ export abstract class A2AAgent<
     assertArtifactsBound(this.env);
     this.plugins.check(this.pluginContext(), this.#reservedToolNames());
     await super.onStart();
+    // The origin is held in memory, and a detached run's note after an
+    // eviction would otherwise carry no link.
+    for (const job of this.ledger.openJobs()) this.#origin.note(job.jku);
     // Every side effect a transition owes is recorded with it, so an object
     // evicted between the two finds the debt here. Queued rather than run:
     // each is retried, and none of them belongs in a start.
-    for (const { taskId, key } of this.ledger.pendingDeliveries()) {
-      const task = this.ledger.get(taskId);
-      if (task) await this.#enqueueDelivery(taskId, key, task);
-    }
-    for (const taskId of this.ledger.pendingHooks()) {
-      await this.queue("runSettleHooks", { taskId }, { id: `hooks:${taskId}` });
-    }
     for (const workId of this.ledger.pendingFollowUps()) {
       await this.queue(
         "submitFollowUp",
@@ -226,8 +224,30 @@ export abstract class A2AAgent<
         { id: `follow-up:${workId}` }
       );
     }
-    for (const taskId of this.ledger.pendingAnswers()) {
-      await this.queue("submitAnswer", { taskId }, { id: `answer:${taskId}` });
+    for (const stepJobId of this.ledger.pendingAnswers()) {
+      await this.queue(
+        "submitAnswer",
+        { stepJobId },
+        { id: `answer:${stepJobId}` }
+      );
+    }
+    for (const { stepJobId, n } of this.ledger.unsent()) {
+      await this.#queueReport(stepJobId, n);
+    }
+  }
+
+  /**
+   * A submitted turn runs inside a queue job on the alarm, after every job due
+   * before it — each of which spends the same invocation's wall clock. So a
+   * turn's deadline is measured from when the invocation began, not from when
+   * the turn did.
+   */
+  override async alarm(): Promise<void> {
+    this.#invokedAt = Date.now();
+    try {
+      await super.alarm();
+    } finally {
+      this.#invokedAt = undefined;
     }
   }
 
@@ -317,23 +337,97 @@ export abstract class A2AAgent<
   }
 
   /**
-   * Both of these end the turn on the call: `ask_user` waits for a person and
-   * `check_back` has scheduled its own wake. Without them the loop would run
-   * another step on a turn that is finished.
+   * A turn ends on `ask_user` — it waits for a person — and on `check_back`,
+   * which has scheduled its own wake. Without them the loop would run another
+   * step on a turn that is finished. It ends too once its job has ended, and
+   * once it nears the ceiling, when it carries on in the next turn.
+   *
+   * A turn for a job that has ended is offered no tools. A subclass that sets
+   * `activeTools` keeps that empty list; {@link beforeToolCall} refuses the
+   * calls either way.
    */
   override beforeTurn(
     _ctx: TurnContext
   ): TurnConfig | void | Promise<TurnConfig | void> {
+    const since = this.#invokedAt ?? Date.now();
+    const stepJobId = this.turnStepJobId();
+    const closed = stepJobId !== undefined && this.ledger.closed(stepJobId);
     return {
       stopWhen: [
         hasToolCall(ASK_USER_TOOL_NAME),
-        hasToolCall(CHECK_BACK_TOOL_NAME)
+        hasToolCall(CHECK_BACK_TOOL_NAME),
+        ...(stepJobId === undefined
+          ? []
+          : [
+              () => this.ledger.closed(stepJobId),
+              this.#deadline(stepJobId, since)
+            ])
       ],
+      ...(closed ? { activeTools: [] } : {}),
       ...(this.maxOutputTokens !== undefined
         ? { maxOutputTokens: this.maxOutputTokens }
         : {})
     };
   }
+
+  /**
+   * Refuse every tool call once the turn's job has ended. The guard a turn
+   * already running when its job ended meets — `beforeTurn` has passed for it —
+   * and the one a subclass's `activeTools` cannot undo.
+   */
+  override beforeToolCall(
+    _ctx: ToolCallContext
+  ): ToolCallDecision | void | Promise<ToolCallDecision | void> {
+    const stepJobId = this.turnStepJobId();
+    if (stepJobId !== undefined && this.ledger.closed(stepJobId)) {
+      return { action: "block", reason: TASK_ENDED };
+    }
+  }
+
+  /**
+   * A turn stops taking steps once less than {@link longestStepMs} is left of
+   * the ceiling, and its job carries on: the stop does what `check_back` does
+   * — a wait, and a wake at once — so settlement finds open work and the
+   * continuation turn picks the job up.
+   *
+   * The SDK evaluates every stop condition together, and only after a step
+   * whose tool calls all ran. `ask_user` never ends a step that way; a
+   * `check_back` step has scheduled its own wake, and is left to it.
+   */
+  #deadline(stepJobId: string, since: number): StopCondition<ToolSet> {
+    return async ({ steps }) => {
+      if (Date.now() - since < TURN_CEILING_MS - this.longestStepMs) {
+        return false;
+      }
+      const calls = steps[steps.length - 1]?.toolCalls ?? [];
+      if (calls.some((c) => c.toolName === CHECK_BACK_TOOL_NAME)) return false;
+      if (this.ledger.closed(stepJobId)) return false;
+      const workId = `${stepJobId}:${this.ledger.nextPushKey(stepJobId, "continue")}`;
+      await this.#wakeLater(stepJobId, workId, "continue", 0, "onContinue", {
+        stepJobId,
+        workId
+      } satisfies ContinueWake);
+      return true;
+    };
+  }
+
+  /** The wake a turn's deadline scheduled: a continuation turn. */
+  async onContinue(wake: ContinueWake): Promise<void> {
+    await ensureStarted(this);
+    const job = this.ledger.job(wake.stepJobId);
+    if (!job || this.ledger.closed(wake.stepJobId)) return;
+    this.ledger.beginFollowUp(wake.workId, {
+      id: `continue:${wake.workId}`,
+      text: this.formatContinuation(job)
+    });
+    await this.submitFollowUp({ workId: wake.workId });
+  }
+
+  /**
+   * What a continuation turn opens with, once a turn stopped short of the
+   * ceiling. The agent's words: core writes no prompt copy.
+   */
+  protected abstract formatContinuation(job: StepJob): string;
 
   /**
    * Push what the model wrote before a tool call, the moment the call starts.
@@ -352,8 +446,8 @@ export abstract class A2AAgent<
     this.#flushed = true;
     const text = this.#buffered.trim();
     this.#buffered = "";
-    const taskId = this.turnTaskId();
-    if (text && taskId) await this.#push(taskId, text, "step");
+    const stepJobId = this.turnStepJobId();
+    if (text && stepJobId) await this.#push(stepJobId, text, "step");
   }
 
   override onStepEnd(): void {
@@ -383,12 +477,17 @@ export abstract class A2AAgent<
     return super.repairInterruptedToolPart(part);
   }
 
-  /** A canceled task's interrupted turn is not continued. */
+  /**
+   * The interrupted turn of a job that has ended is not continued — canceled,
+   * failed or completed alike. Think marks a submission cut at its ceiling
+   * `error`, then recovers the same turn anyway, which would run on after its
+   * job has reported and its retry has started.
+   */
   protected override async onChatRecovery(ctx: {
     messages: UIMessage[];
   }): Promise<{ continue: boolean } | void> {
-    const taskId = latestTaskId(ctx.messages);
-    if (taskId && this.ledger.row(taskId)?.state === "canceled") {
+    const stepJobId = latestStepJobId(ctx.messages);
+    if (stepJobId && this.ledger.closed(stepJobId)) {
       return { continue: false };
     }
   }
@@ -418,192 +517,183 @@ export abstract class A2AAgent<
     });
   }
 
-  // --- the A2A surface core's executor and task store call -------------------
+  // --- step jobs: the surface a task workflow calls ----------------------------
 
   /**
-   * Record the task and submit its turn. Idempotent on `messageId`: a dispatch
-   * retry finds the submission bound and does nothing, and Think's own
-   * `idempotencyKey` closes the narrower race underneath.
+   * Start a job and submit its first turn. Idempotent on the job id: a re-run
+   * start step finds the job and starts nothing. A job that already settled
+   * sends its reports again — a restarted instance waits for them from the
+   * first, and would otherwise wait for good. A job stopped before it started
+   * left a canceled row, and starts nothing.
    */
-  async acceptTask(turn: AcceptedTurn): Promise<PlainTask> {
+  async startStepJob(job: StepJob): Promise<void> {
     await ensureStarted(this);
-    this.#origin.note(turn.jku);
-    const row = this.ledger.accept({
-      messageId: turn.messageId,
-      taskId: turn.taskId,
-      contextId: turn.contextId,
-      push: {
-        taskId: turn.taskId,
-        contextId: turn.contextId,
-        pushUrl: turn.pushUrl,
-        pushToken: turn.pushToken,
-        jku: turn.jku
-      },
-      identity: turn.identity
-    });
-    const task = this.ledger.get(row.taskId)!;
-    if (row.state !== "submitted" || row.submissionId) return task;
-
-    const caller = this.callerContext(turn.identity);
-    if (this.getConfig<A2AConfig>()?.caller !== caller) {
-      this.configure<A2AConfig>({ ...this.getConfig<A2AConfig>(), caller });
+    this.#origin.note(job.jku);
+    const existing = this.ledger.row(job.stepJobId);
+    if (existing && isTerminalState(existing.state)) {
+      if (existing.state !== "canceled") {
+        for (const n of this.ledger.numbers(job.stepJobId)) {
+          await this.#queueReport(job.stepJobId, n, true);
+        }
+      }
+      return;
     }
+    if (existing?.submissionId) return;
+    const row = this.ledger.accept(job);
+    if (this.getConfig<A2AConfig>()?.caller !== job.caller) {
+      this.configure<A2AConfig>({
+        ...this.getConfig<A2AConfig>(),
+        caller: job.caller
+      });
+    }
+    const id = `stepjob:${job.stepJobId}`;
+    const keys = keysOf(row);
     const submission = await this.runTurn({
       mode: "submit",
-      input: userMessage(turn.messageId, turn.text, row.taskId, row.contextId),
-      idempotencyKey: turn.messageId,
-      metadata: { taskId: row.taskId }
+      input: userMessage(id, this.formatStepJobInput(job), keys),
+      idempotencyKey: id,
+      metadata: metadataOf(keys)
     });
-    this.ledger.bindSubmission(row.taskId, submission.submissionId);
-    return task;
-  }
-
-  async getTask(taskId: string): Promise<PlainTask | null> {
-    await ensureStarted(this);
-    return this.ledger.get(taskId);
-  }
-
-  async listTasks(query: TaskListQuery): Promise<TaskListPage> {
-    await ensureStarted(this);
-    return this.ledger.list(query);
+    this.ledger.bindSubmission(job.stepJobId, submission.submissionId);
   }
 
   /**
-   * The a2a-js `TaskStore` write. A `canceled` state takes the same path
-   * `cancelTask` does: the SDK's cancel branch writes the canceled task here
-   * rather than calling the executor, and a cancel from the wire has to stop
-   * the work either way.
+   * A job's first message. The workflow sends the input; what the job's `role`
+   * asks of this agent, and what a retry (`job.attempt > 1`) should look at,
+   * are the agent's to say, so a subclass briefs them here.
    */
-  async saveTask(task: Task): Promise<boolean> {
-    await ensureStarted(this);
-    if (task.status?.state === TaskState.TASK_STATE_CANCELED) {
-      return (await this.#cancel(task.id, task)) !== null;
-    }
-    return this.ledger.save(task);
-  }
-
-  async cancelTask(taskId: string): Promise<PlainTask | null> {
-    await ensureStarted(this);
-    return this.#cancel(taskId);
+  protected formatStepJobInput(job: StepJob): string {
+    return job.input;
   }
 
   /**
-   * Record a person's reply to the question a task asked, and submit it as the
-   * task's next turn. Nothing is woken: Think's first-in-first-out turn queue
-   * orders the answer behind anything still running.
-   *
-   * A reply naming no question of this task, an option the question never
-   * offered, or a typed answer to a question that takes only its options,
-   * changes nothing. A timeout is settled from the queue, not here: the request
-   * handler loads the task before it takes the message, and a task failed
-   * inline would make it refuse the very message reporting the expiry.
-   *
-   * The resume owes the answer's turn, so a retry — or the start-up sweep —
-   * submits one a failed or evicted call left owed.
+   * The answer to a question the job asked, relayed by the workflow: its next
+   * turn. A repeat finds the question already taken and does nothing.
    */
-  async answerTask(input: {
-    taskId: string;
-    messageId: string;
-    reply: HumanReply;
-  }): Promise<PlainTask | null> {
+  async answerStepJob(stepJobId: string, answer: StepAnswer): Promise<void> {
     await ensureStarted(this);
-    const { taskId, messageId, reply } = input;
-    const row = this.ledger.row(taskId);
-    if (!row) return null;
-    // An answer an earlier call resumed on and never submitted goes first.
-    if (row.answer) await this.submitAnswer({ taskId });
-    const request = row.request;
-    if (!request || request.requestId !== reply.requestId) {
-      console.warn("[agent] a reply names no question of this task", {
-        taskId,
-        requestId: reply.requestId
-      });
-      return this.ledger.get(taskId);
-    }
-    if (reply.kind === "timeout") {
-      await this.queue("expireTask", { taskId, requestId: reply.requestId });
-      return this.ledger.get(taskId);
-    }
-    const { optionId } = reply.answer;
-    const option = request.options?.find((o) => o.id === optionId);
-    if (optionId !== undefined && !option) {
-      console.warn(
-        "[agent] a reply picks an option the question never offered",
-        {
-          taskId,
-          requestId: reply.requestId,
-          optionId
-        }
-      );
-      return this.ledger.get(taskId);
-    }
-    if (!option && request.options && !request.allowFreeform) {
-      console.warn(
-        "[agent] a typed reply to a question that takes only its options",
-        { taskId, requestId: reply.requestId }
-      );
-      return this.ledger.get(taskId);
-    }
-
-    const text = [option?.label, reply.answer.text]
+    const request = this.ledger.row(stepJobId)?.request;
+    if (!request) return;
+    const option = request.options?.find((o) => o.id === answer.optionId);
+    const text = [option?.label ?? answer.optionId, answer.text]
       .filter((part): part is string => Boolean(part))
       .join("\n\n");
-    if (this.ledger.resume(taskId, { id: `answer:${messageId}`, text })) {
-      await this.submitAnswer({ taskId });
+    if (
+      this.ledger.resume(stepJobId, { id: `answer:${request.requestId}`, text })
+    ) {
+      await this.submitAnswer({ stepJobId });
     }
-    return this.ledger.get(taskId);
   }
 
   /**
-   * Submit the answer's turn a resumed task owes, then clear it. A repeat
+   * Submit the answer's turn a resumed job owes, then clear it. A repeat
    * submits again under the same idempotency key, or finds it cleared.
    */
-  async submitAnswer(payload: { taskId: string }): Promise<void> {
+  async submitAnswer(payload: { stepJobId: string }): Promise<void> {
     await ensureStarted(this);
-    const row = this.ledger.row(payload.taskId);
+    const row = this.ledger.row(payload.stepJobId);
     if (!row?.answer) return;
     if (!isTerminalState(row.state)) {
+      const keys = keysOf(row);
       await this.runTurn({
         mode: "submit",
-        input: userMessage(
-          row.answer.id,
-          row.answer.text,
-          payload.taskId,
-          row.contextId
-        ),
+        input: userMessage(row.answer.id, row.answer.text, keys),
         idempotencyKey: row.answer.id,
-        metadata: { taskId: payload.taskId }
+        metadata: metadataOf(keys)
       });
     }
-    this.ledger.answered(payload.taskId, row.answer.id);
+    this.ledger.answered(payload.stepJobId, row.answer.id);
   }
 
-  /** A question nobody answered. Guarded, so an answer that won stays won. */
-  async expireTask(payload: {
-    taskId: string;
-    requestId: string;
+  /**
+   * Stop a job: its turn, its background runs, its wakes. It reports nothing —
+   * the host that stopped it has settled the task — and it resets nothing: the
+   * agent that picks the task up again decides what becomes of the work.
+   */
+  async cancelStepJob(stepJobId: string): Promise<void> {
+    await ensureStarted(this);
+    if (!this.ledger.row(stepJobId)) {
+      this.ledger.tombstone(stepJobId);
+      return;
+    }
+    await this.#cancel(stepJobId);
+  }
+
+  /**
+   * The host's end-of-task notice: the task a job of this agent ran for ended.
+   * A job of it still open has nobody left to report to — a pipeline that threw
+   * while a parallel step still worked leaves one — so it is stopped, keeping
+   * its work, before the hook runs.
+   */
+  async stepTaskSettled(taskId: string, state: TaskState): Promise<void> {
+    await ensureStarted(this);
+    for (const stepJobId of this.ledger.openJobsOf(taskId)) {
+      await this.#cancel(stepJobId);
+    }
+    try {
+      await this.onTaskSettled(taskId, state);
+    } catch (err) {
+      console.warn("[agent] task settle hook failed", {
+        taskId,
+        state,
+        err: String(err)
+      });
+    }
+  }
+
+  /**
+   * A task a job of this agent ran for reached a state it never leaves —
+   * release what was held for it. Fires for every terminal state, `canceled`
+   * included, at least once per agent. A throw is logged and swallowed.
+   */
+  protected async onTaskSettled(
+    _taskId: string,
+    _state: TaskState
+  ): Promise<void> {}
+
+  /**
+   * Send one report to the job's workflow. An instance no longer running takes
+   * nothing more — `sendEvent` refuses it — so the report is dropped rather
+   * than retried for as long as the queue would.
+   */
+  async deliverStepJobReport(payload: {
+    stepJobId: string;
+    n: number;
+    resend?: boolean;
   }): Promise<void> {
     await ensureStarted(this);
-    const row = this.ledger.row(payload.taskId);
-    if (!row || row.request?.requestId !== payload.requestId) return;
-    await this.#finish(
-      payload.taskId,
-      buildFailedTask(payload.taskId, row.contextId, this.copy.questionExpired)
-    );
+    const { stepJobId, n } = payload;
+    const owed = this.ledger.report(stepJobId, n);
+    const job = this.ledger.job(stepJobId);
+    if (!owed || !job || (owed.sent && !payload.resend)) return;
+    try {
+      await this.sendWorkflowEvent(job.workflow.name, job.workflow.id, {
+        type: await reportEventType(stepJobId, n),
+        payload: owed.report
+      });
+    } catch (err) {
+      if (!(await this.#instanceGone(job))) throw err;
+      console.warn("[agent] a report's instance has ended; dropped", {
+        stepJobId,
+        n
+      });
+    }
+    this.ledger.sent(stepJobId, n);
   }
 
   // --- settlement ------------------------------------------------------------
 
   /**
-   * The submission ledger's view of a turn, turned into the task lifecycle.
-   * Keyed on `metadata.taskId`; a submission without one is not a task's turn.
+   * The submission ledger's view of a turn, turned into the job lifecycle.
+   * Keyed on `metadata.stepJobId`; a submission without one is not a job's
+   * turn.
    */
   protected override async onSubmissionStatus(
     submission: ThinkSubmissionInspection
   ): Promise<void> {
-    const taskId = submission.metadata?.taskId;
-    if (typeof taskId !== "string") return;
-    // A follow-up's turn has ended, so its work no longer holds the task open.
+    const stepJobId = submission.metadata?.stepJobId;
+    if (typeof stepJobId !== "string") return;
+    // A follow-up's turn has ended, so its work no longer holds the job open.
     const workId = submission.metadata?.workId;
     if (
       typeof workId === "string" &&
@@ -614,19 +704,16 @@ export abstract class A2AAgent<
     }
     switch (submission.status) {
       case "running":
-        if (this.ledger.markWorking(taskId) === "canceled") {
-          await this.cancelSubmission(submission.submissionId, "task canceled");
+        if (this.ledger.markWorking(stepJobId) === "closed") {
+          await this.cancelSubmission(submission.submissionId, TASK_ENDED);
         }
         return;
       case "completed":
-        await this.#settleCompleted(taskId);
+        await this.#settleCompleted(stepJobId);
         return;
       case "error":
       case "skipped":
-        await this.#finish(
-          taskId,
-          buildFailedTask(taskId, this.#contextOf(taskId), this.copy.failed)
-        );
+        await this.#fail(stepJobId, submission.error ?? "the turn failed");
         return;
       default:
       // `pending` needs nothing, and `aborted` is a guarded no-op: the cancel
@@ -635,27 +722,26 @@ export abstract class A2AAgent<
   }
 
   /**
-   * What a completed turn means for the task, in this order:
+   * What a completed turn means for the job, in this order:
    *
-   *  1. a question is pending → park, and the caller is asked;
+   *  1. a question is pending → park, and the workflow relays it;
    *  2. work is still open → an interim turn: push its closing words and stay
    *     `working`;
-   *  3. otherwise the turn is the answer.
+   *  3. otherwise the turn is the job's reply.
    *
-   * Without (2), a detached dispatch would settle the task the moment the
-   * parent turn ended, and the child's result would land on a closed task.
+   * Without (2), a detached dispatch would settle the job the moment the
+   * parent turn ended, and the child's result would land on a closed one.
    */
-  async #settleCompleted(taskId: string): Promise<void> {
-    const row = this.ledger.row(taskId);
-    if (!row || isTerminalState(row.state)) return;
+  async #settleCompleted(stepJobId: string): Promise<void> {
+    if (this.ledger.closed(stepJobId)) return;
     // The async read: the `messages` getter is empty on a cold object, and a
     // turn recovered after an eviction is exactly when this runs on one.
-    const outcome = readTurn(await this.getMessages(), taskId);
+    const outcome = readTurn(await this.getMessages(), stepJobId);
 
     if (outcome.ask) {
       const request: HitlRequestData = {
         type: HITL_REQUEST_TYPE,
-        requestId: `${taskId}:${outcome.ask.toolCallId}`,
+        requestId: `${stepJobId}:${outcome.ask.toolCallId}`,
         requestKind: "choice",
         prompt: outcome.ask.question,
         ...(outcome.ask.options
@@ -667,197 +753,104 @@ export abstract class A2AAgent<
             }
           : { allowFreeform: true })
       };
-      const parked = buildInputRequiredTask(taskId, row.contextId, request);
-      if (this.ledger.park(parked, request)) {
-        await this.#enqueueDelivery(
-          taskId,
-          questionKey(request.requestId),
-          parked
-        );
-      }
+      const n = this.ledger.park(stepJobId, request);
+      if (n !== null) await this.#queueReport(stepJobId, n);
       return;
     }
 
-    if (this.ledger.openWork(taskId) > 0) {
-      if (outcome.reply) await this.#push(taskId, outcome.reply, "turn");
+    if (this.ledger.openWork(stepJobId) > 0) {
+      if (outcome.reply) await this.#push(stepJobId, outcome.reply, "turn");
       return;
     }
 
-    await this.#finish(
-      taskId,
-      buildCompletedTask(
-        taskId,
-        row.contextId,
-        outcome.reply || this.copy.emptyReply
-      )
-    );
+    const n = this.ledger.settle(stepJobId, {
+      state: "completed",
+      reply: outcome.reply
+    });
+    if (n !== null) await this.#queueReport(stepJobId, n);
   }
 
   /**
-   * The guarded terminal write — which owes the callback and the hooks in the
-   * same statement — then the callback, then the hooks.
+   * A turn that errored fails its job. Its background runs and wakes are
+   * stopped, keeping their work: nothing will read what they return, and the
+   * step's retry would otherwise work beside them.
    */
-  async #finish(taskId: string, task: Task): Promise<void> {
-    if (!this.ledger.settle(task)) return;
-    const state = taskStateLabel(
-      task.status?.state ?? TaskState.TASK_STATE_UNSPECIFIED
-    );
-    await this.#enqueueDelivery(taskId, state, task);
-    await this.#settled(taskId);
+  async #fail(stepJobId: string, error: string): Promise<void> {
+    const n = this.ledger.settle(stepJobId, { state: "failed", error });
+    if (n === null) return;
+    await this.#queueReport(stepJobId, n);
+    await this.#stopWork(stepJobId);
   }
 
-  /**
-   * Hand one callback to the durable queue, keyed on the event it reports.
-   * The stable id makes a repeat replace the pending item rather than queue a
-   * second.
-   */
-  async #enqueueDelivery(
-    taskId: string,
-    key: string,
-    task: Task
+  async #queueReport(
+    stepJobId: string,
+    n: number,
+    resend = false
   ): Promise<void> {
-    await this.queue<DeliveryJob>(
-      "deliverTask",
-      { taskId, key, task: Task.toJSON(task) },
-      {
-        id: `deliver:${taskId}:${key}`,
-        retry: DELIVERY_RETRY
-      }
+    await this.queue(
+      "deliverStepJobReport",
+      { stepJobId, n, ...(resend ? { resend } : {}) },
+      { id: `report:${stepJobId}:${n}`, retry: DELIVERY_RETRY }
     );
   }
 
-  /**
-   * POST one callback, if it is still the one the task owes. Throws on a
-   * non-2xx so the queue retries. A question the task has moved past — to an
-   * answer, or to another question — is neither sent nor acknowledged.
-   */
-  async deliverTask(job: DeliveryJob): Promise<void> {
-    await ensureStarted(this);
-    const row = this.ledger.row(job.taskId);
-    if (!row?.push || row.deliveryKey !== job.key) return;
-    this.#origin.note(row.push.jku);
-    await createPushChannel(this.env.A2A_SIGNING_KEY, row.push).deliver(
-      Task.fromJSON(job.task)
-    );
-    this.ledger.delivered(job.taskId, job.key);
-  }
-
-  /** The settle hooks a start-up sweep found owed. */
-  async runSettleHooks(payload: { taskId: string }): Promise<void> {
-    await ensureStarted(this);
-    const row = this.ledger.row(payload.taskId);
-    if (!row?.hooksPending) return;
-    if (row.state === "canceled") await this.#stopCanceled(payload.taskId);
-    else await this.#settled(payload.taskId);
+  async #instanceGone(job: StepJob): Promise<boolean> {
+    try {
+      const binding = (this.env as Record<string, unknown>)[job.workflow.name];
+      const status = await (
+        await (binding as Workflow).get(job.workflow.id)
+      ).status();
+      return ["complete", "errored", "terminated"].includes(status.status);
+    } catch {
+      return false;
+    }
   }
 
   // --- cancellation ----------------------------------------------------------
 
   /**
-   * The one place a task becomes canceled: the guarded flip first — terminal,
-   * so every later non-canceled write is refused — then stop everything still
-   * running for it. The flip's verdict decides whether anything else happens:
-   * a cancel replayed on a task already canceled answers with it and stops
-   * nothing twice.
+   * The guarded flip first — terminal, so every later write is refused, and
+   * any unsent report dropped with it — then everything still running for the
+   * job is stopped. The stop runs whether or not this call flipped it, and is
+   * safe to repeat: a job that failed can still have a background run going.
    */
-  async #cancel(taskId: string, task?: Task): Promise<PlainTask | null> {
-    const canceled = this.ledger.cancel(taskId, task);
-    if (!canceled) {
-      return this.ledger.row(taskId)?.state === "canceled"
-        ? this.ledger.get(taskId)
-        : null;
-    }
-    await this.#stopCanceled(taskId);
-    return canceled;
-  }
-
-  /**
-   * Everything a cancel stops, then the hooks. Runs after the flip, and again
-   * from the start-up sweep if an eviction cut it short, so every step is safe
-   * to repeat.
-   */
-  async #stopCanceled(taskId: string): Promise<void> {
-    const submissionId = this.ledger.row(taskId)?.submissionId;
+  async #cancel(stepJobId: string): Promise<void> {
+    this.ledger.cancel(stepJobId);
+    const submissionId = this.ledger.row(stepJobId)?.submissionId;
     if (submissionId) {
-      await this.cancelSubmission(submissionId, "task canceled").catch(
+      await this.cancelSubmission(submissionId, TASK_ENDED).catch(
         (err: unknown) =>
           console.warn("[agent] submission not canceled", {
-            taskId,
+            stepJobId,
             err: String(err)
           })
       );
     }
     // `cancelSubmission` misses a recovered continuation, which runs under a
     // new request id, and a follow-up turn has a submission of its own.
-    if (this.turnTaskId() === taskId) this.abortAllRequests();
+    if (this.turnStepJobId() === stepJobId) this.abortAllRequests();
+    await this.#stopWork(stepJobId);
+  }
 
-    for (const work of this.ledger.openWorkRows(taskId)) {
+  /** Stop a job's background runs and wakes, keeping what they did. */
+  async #stopWork(stepJobId: string): Promise<void> {
+    for (const work of this.ledger.openWorkRows(stepJobId)) {
       try {
         if (work.kind === "detached") {
-          await this.cancelAgentTool(work.workId, "task canceled");
+          await this.cancelAgentTool(work.workId, TASK_ENDED);
         } else if (work.kind === "wait" && work.scheduleId) {
           await this.cancelSchedule(work.scheduleId);
         }
       } catch (err) {
         console.warn("[agent] work not stopped", {
-          taskId,
+          stepJobId,
           workId: work.workId,
           err: String(err)
         });
       }
       this.ledger.closeWork(work.workId);
     }
-
-    try {
-      await this.onTaskCanceled(taskId);
-    } catch (err) {
-      console.warn("[agent] task cancel hook failed", {
-        taskId,
-        err: String(err)
-      });
-    }
-    await this.#settled(taskId);
   }
-
-  /**
-   * End the transcript, then the subclass hook, then record that both ran.
-   * The transcript first, because the hook may take as long as a container
-   * takes to stop, while somebody may be watching for the line that says it
-   * finished. At least once: an eviction before the record reruns them.
-   */
-  async #settled(taskId: string): Promise<void> {
-    const state =
-      this.ledger.get(taskId)?.status?.state ??
-      TaskState.TASK_STATE_UNSPECIFIED;
-    await settleTranscript(this.env, taskId, state);
-    try {
-      await this.onTaskSettled(taskId, state);
-    } catch (err) {
-      console.warn("[agent] task settle hook failed", {
-        taskId,
-        state,
-        err: String(err)
-      });
-    }
-    this.ledger.hooksRan(taskId);
-  }
-
-  /**
-   * Stop work still in flight for a task just canceled, beyond what core
-   * stops itself (the turn, detached runs, scheduled wakes). Best-effort:
-   * cancellation is already recorded. At least once, like the settle hook.
-   */
-  protected async onTaskCanceled(_taskId: string): Promise<void> {}
-
-  /**
-   * A task reached a state it never leaves — release what was held for its
-   * lifetime. Fires for every terminal state, `canceled` included, at least
-   * once. A throw is logged and swallowed: the row is already durable.
-   */
-  protected async onTaskSettled(
-    _taskId: string,
-    _state: TaskState
-  ): Promise<void> {}
 
   // --- delegation ------------------------------------------------------------
 
@@ -882,6 +875,8 @@ export abstract class A2AAgent<
       description,
       inputSchema: spec.inputSchema,
       execute: async (input: unknown, { toolCallId, abortSignal }) => {
+        // The work is the job's; the run belongs to the A2A task.
+        const stepJobId = this.#requireTurnStepJobId();
         const taskId = this.requireTurnTaskId();
         const runId = `${spec.detached ? "detached" : "agent-tool"}:${toolCallId}`;
         const runtime = await spec.prepare?.({
@@ -892,18 +887,18 @@ export abstract class A2AAgent<
         });
         // A cancel landing while `prepare` ran found no work to stop. Checked
         // and recorded with no await between, so none lands in the gap.
-        if (this.#closed(taskId)) {
+        if (this.ledger.closed(stepJobId)) {
           await this.#release(spec, {
             runId,
             taskId,
             runtime,
-            result: { status: "aborted", error: TASK_CANCELED }
+            result: { status: "aborted", error: TASK_ENDED }
           });
-          return failure("aborted", TASK_CANCELED);
+          return failure("aborted", TASK_ENDED);
         }
         this.ledger.addWork({
           workId: runId,
-          taskId,
+          stepJobId,
           kind: spec.detached ? "detached" : "awaited",
           name: Cls.name,
           ...(runtime ? { runtime } : {})
@@ -924,14 +919,14 @@ export abstract class A2AAgent<
           });
           if (dispatch.status !== "running") {
             // A synchronous rejection wires no `onFinish`: nothing would ever
-            // close this row, and the task would stay `working` for ever.
+            // close this row, and the job would stay `working` for ever.
             const error = dispatch.error ?? "the background run did not start";
             await this.#settleRefused(spec, runId, taskId, runtime, error);
             return failure("error", error);
           }
           // One landing during the dispatch found the run not yet registered,
           // and `cancelAgentTool` ignores a run it does not know.
-          if (this.#closed(taskId)) await this.cancelAgentTool(runId);
+          if (this.ledger.closed(stepJobId)) await this.cancelAgentTool(runId);
           return { started: runId };
         }
 
@@ -989,7 +984,7 @@ export abstract class A2AAgent<
       this.#subAgent(work.name)?.spec as SubAgentSpec<unknown, Env> | undefined,
       {
         runId: run.runId,
-        taskId: work.taskId,
+        taskId: this.ledger.row(work.stepJobId)?.taskId ?? work.stepJobId,
         runtime: work.runtime,
         result
       }
@@ -1034,12 +1029,6 @@ export abstract class A2AAgent<
     }
   }
 
-  /** Whether a task is gone or settled — past starting anything for. */
-  #closed(taskId: string): boolean {
-    const row = this.ledger.row(taskId);
-    return !row || isTerminalState(row.state);
-  }
-
   /**
    * The `onFinish` of every detached run: close its work and submit the
    * follow-up turn that carries its result. Delivery is at-least-once, and the
@@ -1052,9 +1041,7 @@ export abstract class A2AAgent<
     await ensureStarted(this);
     if (result.status === "interrupted" && result.childStillRunning) return;
     const work = this.ledger.work(run.runId);
-    if (!work) return;
-    const row = this.ledger.row(work.taskId);
-    if (!row || isTerminalState(row.state)) return;
+    if (!work || this.ledger.closed(work.stepJobId)) return;
     this.ledger.beginFollowUp(run.runId, {
       id: `finish:${run.runId}`,
       text: this.formatDetachedCompletion(run, result)
@@ -1066,33 +1053,29 @@ export abstract class A2AAgent<
    * Submit the follow-up a closed work row owes. It stays owed until its turn
    * ends (see {@link onSubmissionStatus}), so a repeat — a redelivered finish,
    * the start-up sweep — submits again under the same idempotency key, which
-   * is a no-op. A task that closed meanwhile owes it nothing.
+   * is a no-op. A job that closed meanwhile owes it nothing.
    */
   async submitFollowUp(payload: { workId: string }): Promise<void> {
     await ensureStarted(this);
     const work = this.ledger.work(payload.workId);
     const followUp = this.ledger.followUp(payload.workId);
     if (!work || !followUp) return;
-    const row = this.ledger.row(work.taskId);
+    const row = this.ledger.row(work.stepJobId);
     if (!row || isTerminalState(row.state)) {
       this.ledger.endFollowUp(payload.workId);
       return;
     }
+    const keys = keysOf(row);
     await this.runTurn({
       mode: "submit",
-      input: userMessage(
-        followUp.id,
-        followUp.text,
-        work.taskId,
-        row.contextId
-      ),
+      input: userMessage(followUp.id, followUp.text, keys),
       idempotencyKey: followUp.id,
-      metadata: { taskId: work.taskId, workId: payload.workId }
+      metadata: { ...metadataOf(keys), workId: payload.workId }
     });
   }
 
   /**
-   * `check_back`: put the task down and pick it up later, as a scheduled wake
+   * `check_back`: put the job down and pick it up later, as a scheduled wake
    * rather than a wait inside the turn — a turn cannot outlive fifteen
    * minutes. Opt-in: `check_back: this.checkBackTool()` in `getTools()`.
    */
@@ -1101,24 +1084,16 @@ export abstract class A2AAgent<
       description: CHECK_BACK_DESCRIPTION,
       inputSchema: checkBackInputSchema,
       execute: async ({ seconds, why }, { toolCallId }) => {
-        const taskId = this.requireTurnTaskId();
+        const stepJobId = this.#requireTurnStepJobId();
         const workId = `wait:${toolCallId}`;
-        this.ledger.addWork({
+        await this.#wakeLater(
+          stepJobId,
           workId,
-          taskId,
-          kind: "wait",
-          name: CHECK_BACK_TOOL_NAME
-        });
-        const schedule = await this.schedule<CheckBackWake>(
+          CHECK_BACK_TOOL_NAME,
           seconds,
           "onCheckBack",
-          { taskId, workId, seconds, why }
+          { stepJobId, workId, seconds, why } satisfies CheckBackWake
         );
-        // A cancel while `schedule` ran closed the wait with no schedule to
-        // cancel: this wake is an orphan, so cancel it here.
-        if (!this.ledger.setWorkSchedule(workId, schedule.id)) {
-          await this.cancelSchedule(schedule.id);
-        }
         return { waiting: seconds };
       }
     });
@@ -1127,8 +1102,7 @@ export abstract class A2AAgent<
   /** The wake `check_back` scheduled: the same follow-up as a finished run. */
   async onCheckBack(wake: CheckBackWake): Promise<void> {
     await ensureStarted(this);
-    const row = this.ledger.row(wake.taskId);
-    if (!row || isTerminalState(row.state)) return;
+    if (this.ledger.closed(wake.stepJobId)) return;
     this.ledger.beginFollowUp(wake.workId, {
       id: `wake:${wake.workId}`,
       text: `Waited ${wake.seconds}s: ${wake.why}`
@@ -1136,11 +1110,32 @@ export abstract class A2AAgent<
     await this.submitFollowUp({ workId: wake.workId });
   }
 
+  /**
+   * A wait that holds the job open, and the schedule that ends it. The wait is
+   * written first, so the job cannot settle before its wake.
+   */
+  async #wakeLater(
+    stepJobId: string,
+    workId: string,
+    name: string,
+    seconds: number,
+    callback: "onCheckBack" | "onContinue",
+    payload: CheckBackWake | ContinueWake
+  ): Promise<void> {
+    this.ledger.addWork({ workId, stepJobId, kind: "wait", name });
+    const schedule = await this.schedule(seconds, callback, payload);
+    // A cancel while `schedule` ran closed the wait with no schedule to
+    // cancel: this wake is an orphan, so cancel it here.
+    if (!this.ledger.setWorkSchedule(workId, schedule.id)) {
+      await this.cancelSchedule(schedule.id);
+    }
+  }
+
   // --- the transcript --------------------------------------------------------
 
   /**
    * A child's live note. Best-effort and not replayed after an eviction, which
-   * is why the finish hook replays the persisted copy. The task comes from the
+   * is why the finish hook replays the persisted copy. The job comes from the
    * work row: a detached run reports while no turn of this agent is running.
    */
   override async onProgress(
@@ -1149,12 +1144,12 @@ export abstract class A2AAgent<
   ): Promise<void> {
     if (progress.milestone !== NOTE_MILESTONE) return;
     const note = readNote(progress.data);
-    const taskId = this.ledger.work(run.runId)?.taskId;
-    if (note && taskId) await this.#note(taskId, sourceOf(run), note);
+    const stepJobId = this.ledger.work(run.runId)?.stepJobId;
+    if (note && stepJobId) await this.#note(stepJobId, sourceOf(run), note);
   }
 
   /**
-   * The finish hook's replay, inline so the notes land before the task can
+   * The finish hook's replay, inline so the notes land before the job can
    * settle. The transcript relies on it as the retry of a live note, so one
    * that fails is not dropped: it goes to the queue, which retries it.
    */
@@ -1190,27 +1185,28 @@ export abstract class A2AAgent<
     for (const milestone of inspection?.milestones ?? []) {
       if (milestone.name !== NOTE_MILESTONE) continue;
       const note = readNote(milestone.data);
-      if (note) await this.#note(work.taskId, job.source, note);
+      if (note) await this.#note(work.stepJobId, job.source, note);
     }
   }
 
+  /** A job's notes go on its task's transcript, and their lines to the host. */
   async #note(
-    taskId: string,
+    stepJobId: string,
     source: NoteSource,
     note: NoteData
   ): Promise<void> {
-    const channel = this.#channel(taskId);
-    if (!channel) return;
+    const job = this.ledger.job(stepJobId);
+    if (!job) return;
     await transcribeNote(
       this.env,
       {
-        taskId,
+        taskId: job.taskId,
         origin: this.#origin.peek(),
         source,
         text: note.text,
         key: note.key
       },
-      (line) => channel.working(line, note.key)
+      (line) => this.#hostProgress(job, line, note.key)
     );
   }
 
@@ -1224,7 +1220,7 @@ export abstract class A2AAgent<
     return this.name;
   }
 
-  /** This deployment's own origin, once a turn has carried it here. */
+  /** This deployment's own origin, once a job has carried it here. */
   protected selfOrigin(): string | undefined {
     return this.#origin.peek();
   }
@@ -1232,14 +1228,6 @@ export abstract class A2AAgent<
   /** The same, for a caller that cannot go on without it. */
   protected requireSelfOrigin(): string {
     return this.#origin.require();
-  }
-
-  /**
-   * The caller block's text. A rendering of a protocol fact, so core supplies
-   * it; override to name what a workspace id means in a deployment.
-   */
-  protected callerContext(identity: GatekeeperIdentity): string {
-    return callerContext(identity).trim();
   }
 
   protected pluginContext(): PluginContext<Env> {
@@ -1253,7 +1241,11 @@ export abstract class A2AAgent<
     };
   }
 
-  /** The task the running turn belongs to, from the message that started it. */
+  /**
+   * The A2A task the running turn's job belongs to, from the message that
+   * started the turn: what gateway attribution, the transcript and a
+   * sub-agent's `prepare` and `settle` name.
+   */
   protected turnTaskId(): string | undefined {
     const taskId = (this.activeTurnMetadata as { taskId?: unknown } | undefined)
       ?.taskId;
@@ -1265,56 +1257,120 @@ export abstract class A2AAgent<
     if (!taskId) {
       throw new Error(
         "this turn carries no task id: a tool that records work runs inside a " +
-          "turn submitted for a task"
+          "turn submitted for a step job"
       );
     }
     return taskId;
+  }
+
+  /** The step job the running turn belongs to: the ledger row it settles. */
+  protected turnStepJobId(): string | undefined {
+    const id = (this.activeTurnMetadata as { stepJobId?: unknown } | undefined)
+      ?.stepJobId;
+    return typeof id === "string" ? id : undefined;
+  }
+
+  /** The same job, whole — its `role` above all. */
+  protected turnStepJob(): StepJob | undefined {
+    const id = this.turnStepJobId();
+    return id ? (this.ledger.job(id) ?? undefined) : undefined;
+  }
+
+  #requireTurnStepJobId(): string {
+    const id = this.turnStepJobId();
+    if (!id) {
+      throw new Error(
+        "this turn carries no step job id: a tool that records work runs " +
+          "inside a turn submitted for a step job"
+      );
+    }
+    return id;
   }
 
   #subAgent(name: string): SubAgentClass | undefined {
     return this.getSubAgents().find((Cls) => Cls.name === name);
   }
 
-  /** Best-effort progress. A post that does not arrive never fails a turn. */
-  async #push(taskId: string, text: string, prefix: string): Promise<void> {
-    await this.#channel(taskId)?.working(
-      text,
-      this.ledger.nextPushKey(taskId, prefix)
-    );
+  /**
+   * Best-effort progress, through the host, which owns the task's push
+   * channel. Keyed by the job, so two jobs of one task never share a key.
+   */
+  async #push(stepJobId: string, text: string, prefix: string): Promise<void> {
+    const job = this.ledger.job(stepJobId);
+    if (!job) return;
+    const key = `${stepJobId}:${this.ledger.nextPushKey(stepJobId, prefix)}`;
+    await this.#hostProgress(job, text, key);
   }
 
-  #channel(taskId: string): PushChannel | null {
-    const push = this.ledger.row(taskId)?.push;
-    return push ? createPushChannel(this.env.A2A_SIGNING_KEY, push) : null;
-  }
-
-  #contextOf(taskId: string): string {
-    return this.ledger.row(taskId)?.contextId ?? "";
+  /** A post that does not arrive never fails a turn. */
+  async #hostProgress(
+    job: StepJob,
+    text: string,
+    key: string
+  ): Promise<boolean> {
+    try {
+      const ns = (this.env as Record<string, unknown>)[job.host.binding];
+      const host = (await getAgentByName(
+        ns as DurableObjectNamespace<Agent>,
+        job.host.name
+      )) as unknown as {
+        progress(taskId: string, text: string, key: string): Promise<void>;
+      };
+      await host.progress(job.taskId, text, key);
+      return true;
+    } catch (err) {
+      console.warn("[agent] progress did not reach the host", {
+        stepJobId: job.stepJobId,
+        err: String(err)
+      });
+      return false;
+    }
   }
 }
 
 /**
- * One submitted user message, with the task riding in `turnMetadata`: only
- * the message's copy is visible during the turn (`activeTurnMetadata`) and
+ * What a turn is for. `taskId` is the A2A task — gateway attribution and the
+ * transcript name it — and `stepJobId` is the ledger row the turn settles.
+ */
+interface TurnKeys {
+  taskId: string;
+  stepJobId: string;
+  contextId: string;
+}
+
+function keysOf(row: JobRow): TurnKeys {
+  return {
+    taskId: row.taskId,
+    stepJobId: row.stepJobId,
+    contextId: row.contextId
+  };
+}
+
+/**
+ * One submitted user message, with the job riding in `turnMetadata`: only the
+ * message's copy is visible during the turn (`activeTurnMetadata`) and
  * survives into a recovered one. The submission carries it too, for
  * `onSubmissionStatus`, which sees that copy alone.
  */
-function userMessage(
-  id: string,
-  text: string,
-  taskId: string,
-  contextId: string
-): UIMessage {
+function userMessage(id: string, text: string, keys: TurnKeys): UIMessage {
   return {
     id,
     role: "user",
     parts: [{ type: "text", text }],
-    metadata: { turnMetadata: { taskId, contextId } }
+    metadata: { turnMetadata: keys }
   };
 }
 
-/** The envelope `agentTool` returns for a run that did not complete. */
-const TASK_CANCELED = "the task was canceled";
+/** The submission's copy of the keys, which `onSubmissionStatus` reads. */
+function metadataOf(keys: TurnKeys): Record<string, string> {
+  return { taskId: keys.taskId, stepJobId: keys.stepJobId };
+}
+
+/**
+ * What a turn of a job that has ended is told: a sub-agent's refusal, a tool
+ * call refused, a canceled submission's reason.
+ */
+const TASK_ENDED = "the task has ended";
 
 function failure(
   status: "error" | "aborted" | "interrupted",

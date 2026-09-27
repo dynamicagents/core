@@ -1,4 +1,9 @@
-import { DurableObject } from "cloudflare:workers";
+import {
+  DurableObject,
+  type WorkflowEvent,
+  type WorkflowStep
+} from "cloudflare:workers";
+import { HITL_APPROVE_OPTION_ID } from "@dynamicagents/g2a-protocol";
 import { installScheduler } from "../src/alarm/index.js";
 import type { TaskState } from "@a2a-js/sdk";
 import type { ThinkModel } from "@cloudflare/think";
@@ -7,7 +12,14 @@ import { z } from "zod";
 import { handleArtifactRoute } from "../src/artifacts/route.js";
 import type { AgentManifest } from "../src/a2a/card.js";
 import type { CoreEnv } from "../src/env.js";
-import { A2AAgent, type A2ACopy } from "../src/agent/agent.js";
+import { StepAgent, TURN_CEILING_MS } from "../src/agent/agent.js";
+import { TaskHost, type A2ACopy } from "../src/task/host.js";
+import { A2ATaskWorkflow, type TaskStep } from "../src/workflow/workflow.js";
+import type {
+  PipelineResult,
+  StepJob,
+  TaskParams
+} from "../src/workflow/types.js";
 import type { SubAgentSpec } from "../src/contract/subagent.js";
 import { SubAgent, type SubAgentClass } from "../src/subagent/subagent.js";
 import { createA2AWorker, defineAgent } from "../src/worker/index.js";
@@ -24,16 +36,22 @@ import { TEST_TENANT } from "../src/testing/auth.js";
  *
  * `@dynamicagents/core` is a library, not a Worker — but a Think agent only
  * runs inside workerd. So this is the minimal host that gives the pool
- * something to bind: an `A2AAgent` on a rule-based model, a sub-agent it
- * awaits, one it detaches, and core's `Artifacts` object.
+ * something to bind: a task host, the pipeline it runs, step agents on a
+ * rule-based model, a sub-agent they await, one they detach, and core's
+ * `Artifacts` object.
  *
  * Deliberately thin. Anything richer belongs in `starter`, where a real agent
  * is the thing being tested rather than the lifecycle.
  */
 
 export interface TestEnv extends CoreEnv {
+  TEST_HOST: DurableObjectNamespace<TestHost>;
   TEST_AGENT: DurableObjectNamespace<TestAgent>;
+  TEST_STEP_B: DurableObjectNamespace<TestStepB>;
   CAPPED_AGENT: DurableObjectNamespace<CappedAgent>;
+  DEADLINE_AGENT: DurableObjectNamespace<DeadlineAgent>;
+  TEST_TASK: Workflow<TaskParams>;
+  TEST_BAD_TASK: Workflow<TaskParams>;
 }
 
 export const COPY: A2ACopy = {
@@ -41,6 +59,9 @@ export const COPY: A2ACopy = {
   emptyReply: "I finished, but had nothing to say.",
   questionExpired: "Nobody answered in time, so I stopped."
 };
+
+/** What a continuation turn opens with. */
+export const CONTINUE = "continue";
 
 /** The text of the most recent tool result, as the model was shown it. */
 function lastToolOutput(view: ModelTurnView): string {
@@ -59,14 +80,53 @@ function after(text: string, prefix: string): string | undefined {
   return text.startsWith(prefix) ? text.slice(prefix.length) : undefined;
 }
 
+function userText(message: ModelTurnView["prompt"][number]): string {
+  if (message.role !== "user") return "";
+  return message.content
+    .filter((part) => part.type === "text")
+    .map((part) => (part as { text: string }).text)
+    .join("")
+    .trim();
+}
+
+/**
+ * `steps:<n>`: one tool step at a time until `n` have run, counted across the
+ * continuation turns a deadline splits them into.
+ */
+function stepsLoop(view: ModelTurnView): MockStep | undefined {
+  let done = 0;
+  for (let i = view.prompt.length - 1; i >= 0; i--) {
+    const message = view.prompt[i];
+    if (message.role === "tool") done++;
+    if (message.role !== "user") continue;
+    const text = userText(message);
+    const target = after(text, "steps:");
+    if (target !== undefined) {
+      return done < Number(target)
+        ? call("test_wait", { seconds: 0 }, `step ${done + 1}`)
+        : { text: `did ${target} steps` };
+    }
+    if (text !== CONTINUE) return undefined;
+  }
+  return undefined;
+}
+
 /**
  * The parent's script, keyed on the message that started the turn. Anything it
  * does not claim is echoed — which is how a follow-up turn answers: a finished
  * run and a `check_back` wake arrive as ordinary user messages.
  */
 function parentRule(view: ModelTurnView): MockStep {
-  const text = view.lastUserText;
-  if (text === "boom") return { error: "told to fail" };
+  const raw = view.lastUserText;
+  // A retry is told so; only `flaky` behaves differently for it.
+  if (raw === "retry:flaky") return { text: "recovered" };
+  const text = after(raw, "retry:") ?? raw;
+  if (["boom", "flaky", "broken"].includes(text)) {
+    return { error: "told to fail" };
+  }
+
+  const steps = stepsLoop(view);
+  if (steps) return steps;
 
   const answered = view.answered;
   const ask = after(text, "ask:");
@@ -80,6 +140,14 @@ function parentRule(view: ModelTurnView): MockStep {
     return answered
       ? { text: `waited ${wait}` }
       : call("test_wait", { seconds: Number(wait) });
+  }
+  const closing = after(text, "closing:");
+  if (closing !== undefined) {
+    // A step that waits, then one that would act — if the turn went on.
+    if (!answered) return call("test_wait", { seconds: Number(closing) });
+    return lastToolOutput(view).includes("waited")
+      ? call("test_mark", {})
+      : { text: "went on" };
   }
   const delegate = after(text, "delegate:");
   if (delegate !== undefined) {
@@ -104,6 +172,9 @@ function parentRule(view: ModelTurnView): MockStep {
     return answered
       ? { text: lastToolOutput(view) }
       : call("test_background", { task: bg }, "Started in the background.");
+  }
+  if (text === "whoami") {
+    return answered ? { text: lastToolOutput(view) } : call("test_whoami", {});
   }
   const checkback = after(text, "checkback:");
   if (checkback !== undefined) {
@@ -216,23 +287,33 @@ export class TestBackground extends TestSubAgentBase {
   static override spec = BACKGROUND_SPEC as SubAgentSpec<never, never>;
 }
 
-/** Read one task's ledger, as JSON: what a callback cannot carry. */
-export interface TaskDebug {
-  row: {
-    state: string;
-    deliveryKey: string | null;
-    hooksPending: boolean;
-  } | null;
-  work: { workId: string; kind: string; open: boolean; settled: boolean }[];
-  runs: { runId: string; status: string }[];
-  /** Every state `onTaskSettled` fired with, for this task. */
-  settledHooks: number[];
-  /** Every run a spec's `settle` released, on this object. */
-  released: { runId: string; status: string }[];
+/** One report a job owes or sent. */
+export interface StepReportDebug {
+  stepJobId: string;
+  n: number;
+  report: { state: string; reply?: string; error?: string };
+  sent: boolean;
 }
 
-export class TestAgent extends A2AAgent<TestEnv> {
-  protected readonly copy = COPY;
+/** One job's ledger, as JSON: what a report cannot carry. */
+export interface JobDebug {
+  row: { state: string; request: { requestId: string } | null } | null;
+  work: {
+    workId: string;
+    kind: string;
+    name: string;
+    open: boolean;
+    settled: boolean;
+  }[];
+  runs: { runId: string; status: string }[];
+  reports: StepReportDebug[];
+  /** Every run a spec's `settle` released, on this object. */
+  released: { runId: string; status: string }[];
+  /** How many `test_mark` calls ran, on this object. */
+  marks: number;
+}
+
+export class TestAgent extends StepAgent<TestEnv> {
   protected readonly compactAfterTokens = 100_000;
   protected readonly keepRecentTokens = 20_000;
   /** just-bash in an agent that never shells out is dead weight. */
@@ -250,8 +331,36 @@ export class TestAgent extends A2AAgent<TestEnv> {
     return {
       ...super.getTools(),
       test_wait: waitTool,
-      check_back: this.checkBackTool()
+      check_back: this.checkBackTool(),
+      test_whoami: tool({
+        description: "Say which task, job and role this turn is for.",
+        inputSchema: z.object({}),
+        execute: async () =>
+          JSON.stringify({
+            taskId: this.turnTaskId() ?? null,
+            stepJobId: this.turnStepJobId() ?? null,
+            role: this.turnStepJob()?.role ?? null
+          })
+      }),
+      test_mark: tool({
+        description: "Act on the world.",
+        inputSchema: z.object({}),
+        execute: async () => {
+          this.sql`CREATE TABLE IF NOT EXISTS test_marks (at INTEGER)`;
+          this.sql`INSERT INTO test_marks VALUES (${Date.now()})`;
+          return "marked";
+        }
+      })
     };
+  }
+
+  /** A retry is told so: the scripted model keys on the `retry:` prefix. */
+  protected override formatStepJobInput(job: StepJob): string {
+    return job.attempt > 1 ? `retry:${job.input}` : job.input;
+  }
+
+  protected override formatContinuation(): string {
+    return CONTINUE;
   }
 
   /**
@@ -259,7 +368,7 @@ export class TestAgent extends A2AAgent<TestEnv> {
    * prove the finish replay delivers them.
    */
   override async onProgress(
-    ...args: Parameters<A2AAgent<TestEnv>["onProgress"]>
+    ...args: Parameters<StepAgent<TestEnv>["onProgress"]>
   ): Promise<void> {
     if (this.name.startsWith("noprogress:")) return;
     await super.onProgress(...args);
@@ -276,10 +385,10 @@ export class TestAgent extends A2AAgent<TestEnv> {
   }
 
   /** JSON, not the shape: RPC type mapping over a Think class is too deep. */
-  async debugTask(taskId: string): Promise<string> {
-    const row = this.ledger.row(taskId);
-    const runs: TaskDebug["runs"] = [];
-    for (const work of this.ledger.workRows(taskId)) {
+  async debugJob(stepJobId: string): Promise<string> {
+    const row = this.ledger.row(stepJobId);
+    const runs: JobDebug["runs"] = [];
+    for (const work of this.ledger.workRows(stepJobId)) {
       if (work.kind === "wait") continue;
       const Cls = work.name === "TestBackground" ? TestBackground : TestChild;
       const child = await this.dynamicAgents.get(Cls, work.workId);
@@ -289,28 +398,64 @@ export class TestAgent extends A2AAgent<TestEnv> {
         status: inspection?.status ?? "unknown"
       });
     }
-    const debug: TaskDebug = {
+    const debug: JobDebug = {
       row: row
         ? {
             state: row.state,
-            deliveryKey: row.deliveryKey,
-            hooksPending: row.hooksPending
+            request: row.request ? { requestId: row.request.requestId } : null
           }
         : null,
-      work: this.ledger.workRows(taskId).map((w) => ({
+      work: this.ledger.workRows(stepJobId).map((w) => ({
         workId: w.workId,
         kind: w.kind,
+        name: w.name,
         open: w.open,
         settled: w.settled
       })),
       runs,
-      settledHooks: this.#settledHooks(taskId),
-      released: this.#released()
+      reports: this.#reports().filter((r) => r.stepJobId === stepJobId),
+      released: this.#released(),
+      marks: this.#marks()
     };
     return JSON.stringify(debug);
   }
 
-  #released(): TaskDebug["released"] {
+  /** Every step job report this object owes or sent, as JSON. */
+  async debugStepJobs(): Promise<string> {
+    return JSON.stringify(this.#reports());
+  }
+
+  /** Every state `onTaskSettled` fired with for a task, as JSON. */
+  async debugSettled(taskId: string): Promise<string> {
+    this
+      .sql`CREATE TABLE IF NOT EXISTS test_settled (task_id TEXT, state INTEGER)`;
+    return JSON.stringify(
+      this.sql<{ state: number }>`
+        SELECT state FROM test_settled WHERE task_id = ${taskId}`.map(
+        (r) => r.state
+      )
+    );
+  }
+
+  #reports(): StepReportDebug[] {
+    // Any read makes the ledger's tables, which a fresh object has not.
+    this.ledger.numbers("");
+    return this.sql<{
+      step_job_id: string;
+      n: number;
+      report_json: string;
+      sent: number;
+    }>`
+      SELECT step_job_id, n, report_json, sent FROM da_step_job_reports
+      ORDER BY step_job_id, n`.map((r) => ({
+      stepJobId: r.step_job_id,
+      n: r.n,
+      report: JSON.parse(r.report_json) as StepReportDebug["report"],
+      sent: r.sent === 1
+    }));
+  }
+
+  #released(): JobDebug["released"] {
     this
       .sql`CREATE TABLE IF NOT EXISTS test_released (run_id TEXT, status TEXT)`;
     return this.sql<{ run_id: string; status: string }>`
@@ -320,12 +465,10 @@ export class TestAgent extends A2AAgent<TestEnv> {
     }));
   }
 
-  #settledHooks(taskId: string): number[] {
-    this
-      .sql`CREATE TABLE IF NOT EXISTS test_settled (task_id TEXT, state INTEGER)`;
-    return this.sql<{ state: number }>`
-      SELECT state FROM test_settled WHERE task_id = ${taskId}`.map(
-      (r) => r.state
+  #marks(): number {
+    this.sql`CREATE TABLE IF NOT EXISTS test_marks (at INTEGER)`;
+    return (
+      this.sql<{ n: number }>`SELECT COUNT(*) AS n FROM test_marks`[0]?.n ?? 0
     );
   }
 }
@@ -333,6 +476,206 @@ export class TestAgent extends A2AAgent<TestEnv> {
 /** Rejects every detached dispatch synchronously: its cap is zero. */
 export class CappedAgent extends TestAgent {
   override maxConcurrentAgentTools = 0;
+}
+
+/** A second step agent class, so a pipeline can span two namespaces. */
+export class TestStepB extends TestAgent {}
+
+/** A step leaves no room at all: every step that calls a tool meets it. */
+export class DeadlineAgent extends TestAgent {
+  protected override readonly longestStepMs = TURN_CEILING_MS;
+}
+
+/** One task on the host, as JSON. */
+export interface TaskDebug {
+  row: {
+    state: string;
+    deliveryKey: string | null;
+    hooksPending: boolean;
+    stopPending: boolean;
+  } | null;
+  /** Every state the host's `onTaskSettled` fired with, for this task. */
+  settledHooks: number[];
+}
+
+/**
+ * The task host. Its pipeline is {@link TestTask}; the step agents it runs are
+ * {@link TestAgent} and its siblings.
+ */
+export class TestHost extends TaskHost<TestEnv> {
+  protected readonly copy = COPY;
+  protected readonly workflowBinding = "TEST_TASK";
+  protected readonly hostBinding = "TEST_HOST";
+
+  /** A reply starting `lost:` is a completion report that never arrived. */
+  override async onWorkflowComplete(
+    workflowName: string,
+    workflowId: string,
+    result?: unknown
+  ): Promise<void> {
+    if (
+      (result as { reply?: string } | undefined)?.reply?.startsWith("lost:")
+    ) {
+      return;
+    }
+    await super.onWorkflowComplete(workflowName, workflowId, result);
+  }
+
+  protected override async onTaskSettled(
+    taskId: string,
+    state: TaskState
+  ): Promise<void> {
+    this
+      .sql`CREATE TABLE IF NOT EXISTS test_settled (task_id TEXT, state INTEGER)`;
+    this.sql`INSERT INTO test_settled VALUES (${taskId}, ${state})`;
+  }
+
+  async debugTask(taskId: string): Promise<string> {
+    const row = this.ledger.row(taskId);
+    this
+      .sql`CREATE TABLE IF NOT EXISTS test_settled (task_id TEXT, state INTEGER)`;
+    const debug: TaskDebug = {
+      row: row
+        ? {
+            state: row.state,
+            deliveryKey: row.deliveryKey,
+            hooksPending: row.hooksPending,
+            stopPending: row.stopPending
+          }
+        : null,
+      settledHooks: this.sql<{ state: number }>`
+        SELECT state FROM test_settled WHERE task_id = ${taskId}`.map(
+        (r) => r.state
+      )
+    };
+    return JSON.stringify(debug);
+  }
+}
+
+/**
+ * The test pipeline, keyed on the task's text like the scripted models:
+ *
+ *  - `two:<text>` — a step on each of two agents, the second fed the first's reply;
+ *  - `approve:<text>` — plan, ask for approval, plan again on a rejection's
+ *    feedback, and act once approved;
+ *  - `role:<role>:<text>` — one step, with a role;
+ *  - `say:<text>` — a progress line, then the one step;
+ *  - `capped:<text>` / `deadline:<text>` — the one step, on
+ *    {@link CappedAgent} / {@link DeadlineAgent};
+ *  - `orphan:<text>` — the one step, beside a branch that throws while it works;
+ *  - `twice:` — one label run twice;
+ *  - `throw` — the pipeline throws;
+ *  - anything else — one step on {@link TestAgent}, fed the text.
+ */
+export class TestTask extends A2ATaskWorkflow<TestEnv> {
+  override run(event: WorkflowEvent<TaskParams>, step: WorkflowStep) {
+    return super.run(event, step);
+  }
+
+  protected async pipeline(
+    event: WorkflowEvent<TaskParams>,
+    step: TaskStep
+  ): Promise<PipelineResult> {
+    const text = event.payload.text;
+    if (text === "throw") throw new Error("the pipeline threw");
+
+    const two = after(text, "two:");
+    if (two !== undefined) {
+      const first = await step.agent("first", {
+        agent: "TEST_AGENT",
+        input: two
+      });
+      const second = await step.agent("second", {
+        agent: "TEST_STEP_B",
+        input: `echo:B saw ${first}`
+      });
+      return { reply: second };
+    }
+
+    const approve = after(text, "approve:");
+    if (approve !== undefined) {
+      let feedback = "";
+      for (let n = 0; ; n++) {
+        const plan = await step.agent("plan", {
+          agent: "TEST_AGENT",
+          input: `echo:plan ${n} for ${approve}${feedback}`,
+          role: "plan",
+          key: String(n)
+        });
+        const answer = await step.ask(`approve:${n}`, {
+          kind: "approval",
+          prompt: plan,
+          allowFreeform: true
+        });
+        if (answer.optionId === HITL_APPROVE_OPTION_ID) {
+          const done = await step.agent("code", {
+            agent: "TEST_AGENT",
+            input: `echo:did ${plan}`,
+            role: "code"
+          });
+          return { reply: done };
+        }
+        feedback = ` (${answer.text ?? "rejected"})`;
+        await step.say("Replanning.");
+      }
+    }
+
+    const role = after(text, "role:");
+    if (role !== undefined) {
+      const [name, ...rest] = role.split(":");
+      return {
+        reply: await step.agent("main", {
+          agent: "TEST_AGENT",
+          input: rest.join(":"),
+          role: name
+        })
+      };
+    }
+
+    const orphan = after(text, "orphan:");
+    if (orphan !== undefined) {
+      const [reply] = await Promise.all([
+        step.agent("main", { agent: "TEST_AGENT", input: orphan }),
+        (async () => {
+          await step.sleep("orphan:pause", "1 second");
+          throw new Error("the pipeline threw beside a working step");
+        })()
+      ]);
+      return { reply };
+    }
+
+    if (text === "twice:") {
+      await step.agent("main", { agent: "TEST_AGENT", input: "echo:once" });
+      await step.agent("main", { agent: "TEST_AGENT", input: "echo:twice" });
+      return { reply: "never" };
+    }
+
+    for (const [prefix, binding] of [
+      ["capped:", "CAPPED_AGENT"],
+      ["deadline:", "DEADLINE_AGENT"]
+    ] as const) {
+      const input = after(text, prefix);
+      if (input !== undefined) {
+        return { reply: await step.agent("main", { agent: binding, input }) };
+      }
+    }
+
+    const said = after(text, "say:");
+    if (said !== undefined) await step.say(said);
+    return {
+      reply: await step.agent("main", {
+        agent: "TEST_AGENT",
+        input: said ?? text
+      })
+    };
+  }
+}
+
+/** A pipeline that inherits `run()`: the constructor refuses it. */
+export class NoRunTask extends A2ATaskWorkflow<TestEnv> {
+  protected async pipeline(): Promise<PipelineResult> {
+    return { reply: "never" };
+  }
 }
 
 /** Core's own class, exported unchanged. */
@@ -348,21 +691,15 @@ const manifest: AgentManifest = {
   skills: []
 };
 
-export const testAgent = defineAgent({
+export const testHost = defineAgent({
   tenant: TEST_TENANT,
   manifest,
-  agent: (env: TestEnv) => env.TEST_AGENT
-});
-
-export const cappedAgent = defineAgent({
-  tenant: "capped",
-  manifest,
-  agent: (env: TestEnv) => env.CAPPED_AGENT
+  agent: (env: TestEnv) => env.TEST_HOST
 });
 
 const a2a = createA2AWorker<TestEnv>({
   manifest,
-  agents: [testAgent, cappedAgent]
+  agents: [testHost]
 });
 
 /**

@@ -3,8 +3,10 @@
 **The mandatory foundation for a Dynamic Agent on Cloudflare Workers.**
 
 Zero-trust A2A (signed AgentCard, gatekeeper-JWT verification, no shared secrets), and
-the durable A2A task lifecycle on [`@cloudflare/think`](https://www.npmjs.com/package/@cloudflare/think):
-accept, ask, cancel, delegate, deliver — and a task that outlives the turn that started it.
+the durable task around agents on [`@cloudflare/think`](https://www.npmjs.com/package/@cloudflare/think):
+a host that owns the A2A task, a workflow that runs it as a pipeline of steps, and step
+agents whose jobs outlive the turns that start them — accept, ask, cancel, delegate,
+deliver.
 
 Think runs the turn. You bring the model and the prompts. Core brings everything you
 cannot choose not to have.
@@ -69,12 +71,12 @@ const manifest = {
   skills: []
 };
 
-// One Durable Object per verified caller, keyed by the gatekeeper identity —
-// which is what makes a task unreachable from any other caller by construction.
+// One task host per verified caller, keyed by the gatekeeper identity — which
+// is what makes a task unreachable from any other caller by construction.
 const myAgent = defineAgent({
   tenant: "my-agent",
   manifest,
-  agent: (env: Env) => env.MyAgent
+  agent: (env: Env) => env.MyAgentTasks
 });
 
 export default {
@@ -143,23 +145,62 @@ wildcard.
 > interoperate across this change in either direction, so they deploy together and
 > registered agents are re-registered.
 
-### 3. Write your agent
+### 3. Write your host, your pipeline and your agent
 
-`A2AAgent` is a Think agent with the A2A task lifecycle on it. `SendMessage` becomes a
-durable Think submission; the turn's outcome becomes the task's state; the result is
-posted to the gatekeeper from a durable outbox. What is yours is what Think asks of any
-agent — plus the words core will not write.
+A task is a pipeline of steps, and these roles run it, each the only owner of its
+state:
+
+| role              | core's class                    | owns                                                                                                                         |
+| ----------------- | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| **task host**     | `TaskHost` (`/task`)            | the A2A task: its ledger, the push channel, the delivery outbox, cancellation, the transcript's settle                       |
+| **task workflow** | `A2ATaskWorkflow` (`/workflow`) | the sequence of steps and the state between them — one Workflow instance per task, id = task id                              |
+| **step agent**    | `StepAgent` (`/agent`)          | a step job and its conversation: a Think agent that runs the job over as many turns as it needs, and reports to the workflow |
+
+`SendMessage` reaches the host, which records the task and starts its workflow. Every
+word the gatekeeper hears comes from the host; a step agent speaks no A2A. A tenant
+with one agent is a one-step pipeline.
 
 ```ts
-import { A2AAgent } from "@dynamicagents/core/agent";
+import { TaskHost } from "@dynamicagents/core/task";
+import { A2ATaskWorkflow, type TaskStep } from "@dynamicagents/core/workflow";
+import { StepAgent } from "@dynamicagents/core/agent";
 import { gatewayLogFields, workersAIModel } from "@dynamicagents/core/model";
 
-export class MyAgent extends A2AAgent<Env> {
+export class MyAgentTasks extends TaskHost<Env> {
   protected readonly copy = {
     failed: "Something went wrong on my side.",
     emptyReply: "I finished, but had nothing to say.",
     questionExpired: "Nobody answered in time, so I stopped."
   };
+  protected readonly workflowBinding = "MY_AGENT_TASK";
+  protected readonly hostBinding = "MyAgentTasks";
+}
+
+export class MyAgentTask extends A2ATaskWorkflow<Env> {
+  // Required, one line, in every pipeline: see below.
+  override run(event, step) {
+    return super.run(event, step);
+  }
+
+  protected async pipeline(event, step: TaskStep) {
+    const plan = await step.agent("plan", {
+      agent: "MyAgent",
+      role: "plan",
+      input: event.payload.text
+    });
+    const answer = await step.ask("approve", {
+      kind: "approval",
+      prompt: plan
+    });
+    if (answer.optionId !== "approve") return { reply: "Stopped at the plan." };
+    await step.say("Building it.");
+    return {
+      reply: await step.agent("build", { agent: "MyAgent", input: plan })
+    };
+  }
+}
+
+export class MyAgent extends StepAgent<Env> {
   protected readonly compactAfterTokens = 100_000;
   protected readonly keepRecentTokens = 20_000;
 
@@ -171,24 +212,51 @@ export class MyAgent extends A2AAgent<Env> {
     });
   }
 
-  configureContext() {
-    return [soulBlock, ...super.configureContext()];
+  protected formatContinuation() {
+    return "Carry on from where you stopped.";
   }
 
-  getPlugins() {
-    return [scraper({ apiKey: this.env.SCRAPER_API_KEY })];
+  configureContext() {
+    return [soulBlock, ...super.configureContext()];
   }
 }
 ```
 
-A turn ends the way every Think turn does: when the model stops calling tools. Its
-last words answer the task. On top of that, core gives the model `ask_user` — the task
-parks as `input-required`, and the person's answer is the next turn — and
-`search_history` over the conversation's own full-text index. `check_back` is opt-in:
-`check_back: this.checkBackTool()` in `getTools()` lets the model put a task down and
-pick it up later, as a scheduled wake rather than a wait inside the turn.
+**The pipeline's helpers.** `step.agent(name, { agent, input, role?, key? })` runs a
+job on a step agent — `agent` is its binding name, and the instance is always the
+caller's — and returns its reply. `step.ask(name, request)` parks the task on a
+question of the pipeline's own and returns the answer. `step.say(text)` pushes one
+progress line. `step.do` is Workflows' own. A step whose job reports `failed` runs
+once more, as `<name>:retry` with `attempt: 2`; a second failure fails the task. A
+name used twice in one run — a loop without a `key` — fails the task by name, because
+Workflows would otherwise hand the second the first one's result.
 
-`Env` here is your generated one, and `A2AAgent` constrains it to `CoreEnv` — `AI`,
+**Every pipeline declares `run()`,** as the one line above. The agents SDK gives a
+workflow its host and its helpers only on a class that defines `run` itself, and an
+inherited one would get neither, silently. The base constructor refuses a pipeline
+that does not.
+
+**A job spans turns.** It ends the way every Think turn does, when the model stops
+calling tools, and its last words are its reply. On top of that, core gives the model
+`ask_user` — the job parks, the host asks the caller, and the answer is the job's
+next turn — and `search_history` over the conversation's own full-text index.
+`check_back` is opt-in: `check_back: this.checkBackTool()` in `getTools()` lets the
+model put a job down and pick it up later, as a scheduled wake rather than a wait
+inside the turn. A turn that nears the runtime's fifteen-minute ceiling stops taking
+steps and carries on in a continuation turn that opens with `formatContinuation()`;
+`longestStepMs` is how long one step may take, and an agent overrides it for a model
+that measures differently. A turn for a job that has ended — canceled, failed,
+completed — is not recovered, and every tool it calls is refused.
+
+What a job's `role` means, and what a retry should look at, are the agent's to say:
+`formatStepJobInput(job)` briefs the model ahead of the input, and `turnStepJob()` gives
+`beforeTurn` the job, to shape the tools a role may call.
+
+**Wrangler.** Each tenant binds its host, its workflow and its step agents. The host's
+Durable Object binding is named as its class: a workflow's callbacks find the host by
+name.
+
+`Env` here is your generated one, and every class constrains it to `CoreEnv` — `AI`,
 the two A2A secrets, and the `ARTIFACTS` namespace from step 5.
 
 ### 4. Delegate, if your agent delegates
@@ -220,9 +288,9 @@ export class Researcher extends SubAgent<Env> {
 **Awaited or detached, nothing in between.** A Think turn lives inside one invocation
 and is cut after at most fifteen minutes, and an awaited run in flight at the cut is
 lost. So a sub-agent that may run longer declares `detached: true`: the call returns at
-once, the task stays `working` while the run is open, and the run's result arrives as a
-follow-up turn that answers the task. Every other sub-agent is awaited and finishes
-inside the turn. A task settles on the turn that ends with no open work — no detached
+once, the job stays `working` while the run is open, and the run's result arrives as a
+follow-up turn that answers the job. Every other sub-agent is awaited and finishes
+inside the turn. A job settles on the turn that ends with no open work — no detached
 run, no pending `check_back`.
 
 `prepare` and `settle` bracket each run on the parent: acquire what the run needs and
@@ -305,8 +373,10 @@ test harness cannot reach a production bundle.
 | Subpath                            | What's in it                                                                                   |
 | ---------------------------------- | ---------------------------------------------------------------------------------------------- |
 | `@dynamicagents/core`              | the plugin contract (`definePlugin`, `restrictTools`, `SubAgentSpec`), env slices, `withAbort` |
-| `@dynamicagents/core/agent`        | `A2AAgent`, core's tools (`ask_user`, `check_back`, `search_history`)                          |
-| `@dynamicagents/core/subagent`     | `SubAgent`, the child an `A2AAgent` dispatches                                                 |
+| `@dynamicagents/core/task`         | `TaskHost`, the owner of a caller's A2A tasks, and `A2ACopy`                                   |
+| `@dynamicagents/core/workflow`     | `A2ATaskWorkflow` and its step helpers, the job and report types                               |
+| `@dynamicagents/core/agent`        | `StepAgent`, core's tools (`ask_user`, `check_back`, `search_history`)                         |
+| `@dynamicagents/core/subagent`     | `SubAgent`, the child a `StepAgent` dispatches                                                 |
 | `@dynamicagents/core/model`        | `workersAIModel`, `gatewayLogFields`                                                           |
 | `@dynamicagents/core/a2a`          | card signing, JWKS, gatekeeper-JWT verify, push notify, task store, executor                   |
 | `@dynamicagents/core/worker`       | `createA2AWorker()`, `defineAgent()` — the whole zero-trust edge                               |
@@ -357,7 +427,7 @@ short-lived token for that: `iss` is
 this deployment's origin, `jku` is derived from it, and the audience is normalized to a
 bare origin because the far side compares it byte-for-byte.
 
-Its `iss` is **not** something to configure. Inside an `A2AAgent` it is:
+Its `iss` is **not** something to configure. Inside a `StepAgent` it is:
 
 ```ts
 getModel() {
@@ -367,20 +437,21 @@ getModel() {
 
 `requireSelfOrigin()` (and `selfOrigin()`, which returns `undefined` instead of
 throwing) answer with the origin core already delivers: the executor computes the
-callback `jku` from `new URL(request.url).origin`, and it rides every accepted turn
-into the object. A `SELF_ORIGIN` secret only restates that, and has to
+callback `jku` from `new URL(request.url).origin`, and it rides every accepted task
+into its workflow, and every job into its step agent. A `SELF_ORIGIN` secret only restates that, and has to
 be kept byte-identical with the verifier's allowlist by hand in every environment.
 
-The first turn an instance serves **pins** it, and nothing is persisted. Pinning is
+The first job an instance serves **pins** it, and nothing is persisted. Pinning is
 what makes it safe to read: one object serves RPCs, queue items and its own turn
 concurrently, and a credential thunk fires several frames below the code that set the
 value, so a mutable field could hand one call another's origin. An agent has one endpoint anyway — the one
 its card advertises and a verifier allowlists — and a fresh isolate on deploy re-learns
 it.
 
-It is known **once a turn has been accepted**: `onStart`, a constructor and a
-scheduled callback can run before any request has said what this deployment is
-called, and `requireSelfOrigin()` throws there saying so.
+It is known **once a job has arrived**: a constructor, and a scheduled callback on a
+fresh instance, can run before anything has said what this deployment is called, and
+`requireSelfOrigin()` throws there saying so. `onStart` re-learns it from the jobs an
+evicted instance still holds open.
 
 ---
 
@@ -467,9 +538,9 @@ The harness both predecessor agents grew, shipped so you don't grow it a third t
   expect(done.state).toBe("TASK_STATE_COMPLETED");
   ```
 
-  The turn runs on the agent's own alarm after the accept returns, so a spec waits for
-  its effect: `waitForState` and `waitForTerminal` watch the callbacks. Give each spec
-  its own `identity` and it gets its own Durable Object.
+  The task runs in its workflow after the accept returns, so a spec waits for its
+  effect: `waitForState` and `waitForTerminal` watch the callbacks the host posts. Give
+  each spec its own `identity` and it gets its own host and step agents.
 
   It exists because the pieces above were never the hard part. The audience is the
   **endpoint**, not the origin; the tenant claim has to match the tenant in the
@@ -481,13 +552,16 @@ The harness both predecessor agents grew, shipped so you don't grow it a third t
 
 ## What core deliberately does _not_ contain
 
-- **Prompt copy of any kind.** Not a soul, not a user-facing failure message: the
-  `copy` an `A2AAgent` needs is abstract, because a run must never execute under an
+- **Prompt copy of any kind.** Not a soul, not a user-facing failure message, not
+  the words a continuation turn opens with: the host's `copy` and a step agent's
+  `formatContinuation` are abstract, because a run must never execute under an
   identity nobody chose.
-- **A loop.** Think runs the turn. Core adds the A2A task around it.
+- **A loop.** Think runs the turn. Core adds the task host, the workflow and the step
+  job around it.
 - **Numbers.** Model ids, compaction thresholds, output ceilings are the agent's.
   There are no budgets: the gatekeeper cancels a task that has not settled within the
-  hour.
+  hour. The exception is `longestStepMs`, the step half of the runtime's turn
+  ceiling: a default, which an agent overrides for its own model.
 - **A model fallback.** A transient failure is retried by the AI SDK and an
   interrupted turn is continued by Think's recovery.
 - Browser tools, shell, a workspace backend. All optional → plugins.
@@ -497,7 +571,8 @@ The harness both predecessor agents grew, shipped so you don't grow it a third t
 ## Requirements
 
 - **Node** ≥ 24 (for build and test only — the package itself runs on workerd)
-- **Bindings:** `AI`, one Durable Object per agent, `ARTIFACTS`
+- **Bindings:** `AI`, per tenant a task host, its workflow and its step agents,
+  `ARTIFACTS`
 - **Secrets:** `A2A_SIGNING_KEY`, `GATEKEEPER_ORIGINS`
 - **Peers, never bundled:** `@cloudflare/think`, `agents`, `ai`, `workers-ai-provider`
 
