@@ -150,11 +150,11 @@ wildcard.
 A task is a pipeline of steps, and these roles run it, each the only owner of its
 state:
 
-| role              | core's class                    | owns                                                                                                                         |
-| ----------------- | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| **task host**     | `TaskHost` (`/task`)            | the A2A task: its ledger, the push channel, the delivery outbox, cancellation, the transcript's settle                       |
-| **task workflow** | `A2ATaskWorkflow` (`/workflow`) | the sequence of steps and the state between them — one Workflow instance per task, id = task id                              |
-| **step agent**    | `StepAgent` (`/agent`)          | a step job and its conversation: a Think agent that runs the job over as many turns as it needs, and reports to the workflow |
+| role              | core's class                 | owns                                                                                                                         |
+| ----------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| **task host**     | `TaskHost` (`/task`)         | the A2A task: its ledger, the push channel, the delivery outbox, cancellation, the transcript's settle                       |
+| **task workflow** | `TaskWorkflow` (`/workflow`) | the sequence of steps and the state between them — one Workflow instance per task, id = task id                              |
+| **step agent**    | `StepAgent` (`/agent`)       | a step job and its conversation: a Think agent that runs the job over as many turns as it needs, and reports to the workflow |
 
 `SendMessage` reaches the host, which records the task and starts its workflow. Every
 word the gatekeeper hears comes from the host; a step agent speaks no A2A. A tenant
@@ -162,7 +162,7 @@ with one agent is a one-step pipeline.
 
 ```ts
 import { TaskHost } from "@dynamicagents/core/task";
-import { A2ATaskWorkflow, type TaskStep } from "@dynamicagents/core/workflow";
+import { TaskWorkflow, type TaskStep } from "@dynamicagents/core/workflow";
 import { StepAgent } from "@dynamicagents/core/agent";
 import { gatewayLogFields, workersAIModel } from "@dynamicagents/core/model";
 
@@ -176,7 +176,7 @@ export class MyAgentTasks extends TaskHost<Env> {
   protected readonly hostBinding = "MyAgentTasks";
 }
 
-export class MyAgentTask extends A2ATaskWorkflow<Env> {
+export class MyAgentTask extends TaskWorkflow<Env> {
   // Required, one line, in every pipeline: see below.
   override run(event, step) {
     return super.run(event, step);
@@ -375,7 +375,7 @@ test harness cannot reach a production bundle.
 | ---------------------------------- | ---------------------------------------------------------------------------------------------- |
 | `@dynamicagents/core`              | the plugin contract (`definePlugin`, `restrictTools`, `SubAgentSpec`), env slices, `withAbort` |
 | `@dynamicagents/core/task`         | `TaskHost`, the owner of a caller's A2A tasks, and `A2ACopy`                                   |
-| `@dynamicagents/core/workflow`     | `A2ATaskWorkflow` and its step helpers, the job and report types                               |
+| `@dynamicagents/core/workflow`     | `TaskWorkflow` and its step helpers, the job and report types                                  |
 | `@dynamicagents/core/agent`        | `StepAgent`, core's tools (`ask_user`, `check_back`, `search_history`)                         |
 | `@dynamicagents/core/subagent`     | `SubAgent`, the child a `StepAgent` dispatches                                                 |
 | `@dynamicagents/core/model`        | `workersAIModel`, `gatewayLogFields`                                                           |

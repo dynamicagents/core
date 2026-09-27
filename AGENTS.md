@@ -140,11 +140,11 @@ publish train (core → plugins → starter), so one repo is always briefly behi
 Think runs the turn — the loop, recovery, compaction, agent tools, actions. Core
 wraps it in a task, split across these roles, each the only owner of its state:
 
-| role                              | where           | owns                                                                                                                                                                                |
-| --------------------------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| task host (`TaskHost`)            | `src/task/`     | the A2A task: its guarded ledger (`src/task/tasks.ts`), the push channel, the delivery outbox, the cancel ordering, retention, the transcript's settle, the end-of-task notice      |
-| task workflow (`A2ATaskWorkflow`) | `src/workflow/` | the sequence of a task's steps and the state between them; the job ids and event types both sides derive (`src/workflow/keys.ts`)                                                   |
-| step agent (`StepAgent`)          | `src/agent/`    | a step job: its guarded ledger (`src/agent/step-jobs.ts`), the mapping from a turn's outcome to the job's report, a job that outlives its turn through open work, the turn deadline |
+| role                           | where           | owns                                                                                                                                                                                |
+| ------------------------------ | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| task host (`TaskHost`)         | `src/task/`     | the A2A task: its guarded ledger (`src/task/tasks.ts`), the push channel, the delivery outbox, the cancel ordering, retention, the transcript's settle, the end-of-task notice      |
+| task workflow (`TaskWorkflow`) | `src/workflow/` | the sequence of a task's steps and the state between them; the job ids and event types both sides derive (`src/workflow/keys.ts`)                                                   |
+| step agent (`StepAgent`)       | `src/agent/`    | a step job: its guarded ledger (`src/agent/step-jobs.ts`), the mapping from a turn's outcome to the job's report, a job that outlives its turn through open work, the turn deadline |
 
 Every one of those is an ordering an agent cannot vary and still be correct: a cancel
 decided by a probe instead of the guarded write's verdict is a canceled task that

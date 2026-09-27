@@ -14,7 +14,7 @@ import type { AgentManifest } from "../src/a2a/card.js";
 import type { CoreEnv } from "../src/env.js";
 import { StepAgent, TURN_CEILING_MS } from "../src/agent/agent.js";
 import { TaskHost, type A2ACopy } from "../src/task/host.js";
-import { A2ATaskWorkflow, type TaskStep } from "../src/workflow/workflow.js";
+import { TaskWorkflow, type TaskStep } from "../src/workflow/workflow.js";
 import type {
   PipelineResult,
   StepJob,
@@ -567,7 +567,7 @@ export class TestHost extends TaskHost<TestEnv> {
  *  - `throw` — the pipeline throws;
  *  - anything else — one step on {@link TestAgent}, fed the text.
  */
-export class TestTask extends A2ATaskWorkflow<TestEnv> {
+export class TestTask extends TaskWorkflow<TestEnv> {
   override run(event: WorkflowEvent<TaskParams>, step: WorkflowStep) {
     return super.run(event, step);
   }
@@ -672,7 +672,7 @@ export class TestTask extends A2ATaskWorkflow<TestEnv> {
 }
 
 /** A pipeline that inherits `run()`: the constructor refuses it. */
-export class NoRunTask extends A2ATaskWorkflow<TestEnv> {
+export class NoRunTask extends TaskWorkflow<TestEnv> {
   protected async pipeline(): Promise<PipelineResult> {
     return { reply: "never" };
   }

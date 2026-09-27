@@ -100,7 +100,7 @@ const START = {
  * `say:`), and a label used twice in one run is refused: a step whose name
  * repeats returns the first one's recorded result, silently.
  */
-export abstract class A2ATaskWorkflow<
+export abstract class TaskWorkflow<
   Env extends Cloudflare.Env & CoreEnv = Cloudflare.Env & CoreEnv
 > extends AgentWorkflow<TaskHost<Env>, TaskParams, DefaultProgress, Env> {
   #steps: string[] = [];
