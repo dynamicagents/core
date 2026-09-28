@@ -120,6 +120,8 @@ interface A2AConfig {
  *    which owes the report in the same write — and hands the report to a durable
  *    queue.
  *  - **Cancellation is decided by the guarded write, never by a probe.**
+ *  - **A turn the runtime cuts is continued while its job is open,** under
+ *    its own submission, at the cost of the step in flight.
  *  - **A turn for a job that has ended does nothing.** It is not recovered,
  *    its tools are refused, and it stops at its next step.
  *
@@ -136,6 +138,16 @@ export abstract class StepAgent<
    * a tool runs is normal.
    */
   static override options = { agentToolReattachNoProgressTimeoutMs: Infinity };
+
+  /**
+   * Whether a turn cut short is continued is the job ledger's to say — an open
+   * job's is, and an ended one's is declined in `onChatRecovery` — not the age
+   * of its fiber. Think's default errors a running submission whose fiber is
+   * older than fifteen minutes, which every turn the runtime cuts at its
+   * ceiling is, and then continues the turn without it: the job fails, and its
+   * retry runs beside the old turn.
+   */
+  protected static override submissionRecoveryStaleMs = Infinity;
 
   override maxSteps = Infinity;
   override chatRecovery = { maxRecoveryWork: Infinity };
@@ -395,10 +407,9 @@ export abstract class StepAgent<
   }
 
   /**
-   * The interrupted turn of a job that has ended is not continued — canceled,
-   * failed or completed alike. Think marks a submission cut at its ceiling
-   * `error`, then recovers the same turn anyway, which would run on after its
-   * job has reported and its retry has started.
+   * An interrupted turn is continued while its job is open, and not once the
+   * job has ended — canceled, failed or completed alike. A failed job's retry
+   * is already running, and the old turn would run on beside it.
    */
   protected override async onChatRecovery(ctx: {
     messages: UIMessage[];
@@ -1053,7 +1064,7 @@ export abstract class StepAgent<
 
   /**
    * `check_back`: put the job down and pick it up later, as a scheduled wake
-   * rather than a wait inside the turn — a turn cannot outlive fifteen
+   * rather than a wait inside the turn, which the runtime cuts at fifteen
    * minutes. Opt-in: `check_back: this.checkBackTool()` in `getTools()`.
    */
   protected checkBackTool(): Tool {

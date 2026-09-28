@@ -6,7 +6,7 @@ import {
 import { HITL_APPROVE_OPTION_ID } from "@dynamicagents/g2a-protocol";
 import { installScheduler } from "../src/alarm/index.js";
 import type { TaskState } from "@a2a-js/sdk";
-import type { ThinkModel } from "@cloudflare/think";
+import { Think, type ThinkModel } from "@cloudflare/think";
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import { handleArtifactRoute } from "../src/artifacts/route.js";
@@ -49,6 +49,7 @@ export interface TestEnv extends CoreEnv {
   TEST_AGENT: DurableObjectNamespace<TestAgent>;
   TEST_STEP_B: DurableObjectNamespace<TestStepB>;
   CAPPED_AGENT: DurableObjectNamespace<CappedAgent>;
+  STALE_AGENT: DurableObjectNamespace<StaleAgent>;
   TEST_TASK: Workflow<TaskParams>;
   TEST_BAD_TASK: Workflow<TaskParams>;
 }
@@ -439,6 +440,12 @@ export class CappedAgent extends TestAgent {
 /** A second step agent class, so a pipeline can span two namespaces. */
 export class TestStepB extends TestAgent {}
 
+/** A step agent on Think's own staleness cutoff, which `StepAgent` lifts. */
+export class StaleAgent extends TestAgent {
+  protected static override submissionRecoveryStaleMs =
+    Think.submissionRecoveryStaleMs;
+}
+
 /** One task on the host, as JSON. */
 export interface TaskDebug {
   row: {
@@ -514,6 +521,7 @@ export class TestHost extends TaskHost<TestEnv> {
  *  - `role:<role>:<text>` — one step, with a role;
  *  - `say:<text>` — a progress line, then the one step;
  *  - `capped:<text>` — the one step, on {@link CappedAgent};
+ *  - `stale:<text>` — the one step, on {@link StaleAgent};
  *  - `orphan:<text>` — the one step, beside a branch that throws while it works;
  *  - `twice:` — one label run twice;
  *  - `throw` — the pipeline throws;
@@ -602,14 +610,14 @@ export class TestTask extends TaskWorkflow<TestEnv> {
       return { reply: "never" };
     }
 
-    const capped = after(text, "capped:");
-    if (capped !== undefined) {
-      return {
-        reply: await step.agent("main", {
-          agent: "CAPPED_AGENT",
-          input: capped
-        })
-      };
+    for (const [prefix, agent] of [
+      ["capped:", "CAPPED_AGENT"],
+      ["stale:", "STALE_AGENT"]
+    ] as const) {
+      const input = after(text, prefix);
+      if (input !== undefined) {
+        return { reply: await step.agent("main", { agent, input }) };
+      }
     }
 
     const said = after(text, "say:");

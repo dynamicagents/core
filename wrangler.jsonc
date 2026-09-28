@@ -27,6 +27,7 @@
       { "name": "TEST_AGENT", "class_name": "TestAgent" },
       { "name": "TEST_STEP_B", "class_name": "TestStepB" },
       { "name": "CAPPED_AGENT", "class_name": "CappedAgent" },
+      { "name": "STALE_AGENT", "class_name": "StaleAgent" },
       { "name": "ARTIFACTS", "class_name": "Artifacts" },
       // The `/alarm` specs' hosts, `PlainScheduled` and `DelegatingScheduled` —
       // see `test/worker.ts`.
@@ -60,7 +61,7 @@
     },
     {
       "tag": "v3",
-      "new_sqlite_classes": ["TestHost", "TestStepB"]
+      "new_sqlite_classes": ["TestHost", "TestStepB", "StaleAgent"]
     }
   ]
 }

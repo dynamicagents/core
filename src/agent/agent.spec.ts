@@ -43,7 +43,7 @@ import worker, {
 
 const testEnv = env as unknown as TestEnv;
 
-type AgentBinding = "TEST_AGENT" | "CAPPED_AGENT";
+type AgentBinding = "TEST_AGENT" | "CAPPED_AGENT" | "STALE_AGENT";
 
 function harnessFor(label: string, binding: AgentBinding = "TEST_AGENT") {
   const key = `${label}:${crypto.randomUUID()}`;
@@ -53,16 +53,18 @@ function harnessFor(label: string, binding: AgentBinding = "TEST_AGENT") {
     identity: { key, name: "Spec Caller", kind: "custom", workspaceId: 1 }
   });
   const ns = testEnv[binding] as DurableObjectNamespace<TestAgent>;
-  const agent = ns.get(ns.idFromName(key));
+  /** A stub an abort broke stays broken, so the reads take a fresh one. */
+  const stub = () => ns.get(ns.idFromName(key));
+  const agent = stub();
   const host = testEnv.TEST_HOST.get(testEnv.TEST_HOST.idFromName(key));
   /** The job a one-step pipeline runs for the task. */
   const debug = async (taskId: string): Promise<JobDebug> =>
-    JSON.parse(await agent.debugJob(`${taskId}:main`)) as JobDebug;
+    JSON.parse(await stub().debugJob(`${taskId}:main`)) as JobDebug;
   const jobDebug = async (stepJobId: string): Promise<JobDebug> =>
-    JSON.parse(await agent.debugJob(stepJobId)) as JobDebug;
+    JSON.parse(await stub().debugJob(stepJobId)) as JobDebug;
   const settled = async (taskId: string): Promise<number[]> =>
-    JSON.parse(await agent.debugSettled(taskId)) as number[];
-  return { harness, agent, host, debug, jobDebug, settled };
+    JSON.parse(await stub().debugSettled(taskId)) as number[];
+  return { harness, agent, stub, host, debug, jobDebug, settled };
 }
 
 const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -567,6 +569,123 @@ describe("a detached sub-agent", () => {
   });
 });
 
+describe("a turn the runtime cuts", () => {
+  /** Longer than the runtime lets an alarm invocation run. */
+  const CEILING_AGE_MS = 16 * 60_000;
+
+  /**
+   * Reset the object mid-step, its turn aged as one the runtime cuts at its
+   * ceiling is: Think reads a turn's age from its chat fiber, its task run and
+   * its stream.
+   */
+  async function cutMidStep(
+    { stub, debug }: ReturnType<typeof harnessFor>,
+    taskId: string
+  ): Promise<void> {
+    await until(
+      "the turn to start",
+      () => debug(taskId),
+      (d) => d.row?.state === "working"
+    );
+    await pause(1_000);
+    await runInDurableObject(stub(), (_instance, state) => {
+      for (const table of [
+        "cf_agents_runs",
+        "cf_agents_task_runs",
+        "cf_agents_streams"
+      ]) {
+        state.storage.sql.exec(
+          `UPDATE ${table} SET created_at = created_at - ?`,
+          CEILING_AGE_MS
+        );
+      }
+    });
+    // The abort rejects the call that made it.
+    await runInDurableObject(stub(), (_instance, state) => {
+      state.abort("cut");
+    }).catch(() => {});
+  }
+
+  async function submissions(
+    stub: () => DurableObjectStub<TestAgent>
+  ): Promise<string[]> {
+    return runInDurableObject(stub(), async (instance: TestAgent) =>
+      (await instance.listSubmissions()).map((s) => s.status).sort()
+    );
+  }
+
+  /** How many times the conversation says `text`: once per turn that ended. */
+  async function said(
+    stub: () => DurableObjectStub<TestAgent>,
+    text: string
+  ): Promise<number> {
+    return runInDurableObject(
+      stub(),
+      async (instance: TestAgent) =>
+        (await instance.getMessages())
+          .flatMap((m) => m.parts)
+          .filter((p) => p.type === "text" && p.text === text).length
+    );
+  }
+
+  it("is continued under its submission, and its job reports once", async () => {
+    const agent = harnessFor("cut");
+    const { harness, stub, debug } = agent;
+    using _ = harness.interceptGatekeeper();
+
+    const accepted = await harness.send("wait:4");
+    await cutMidStep(agent, accepted.id);
+
+    const done = await harness.waitForTerminal(accepted.id);
+    expect(done.state).toBe("TASK_STATE_COMPLETED");
+    await pause(500);
+    expect(terminals(harness, accepted.id)).toHaveLength(1);
+    expect(reportsOf(await debug(accepted.id))).toEqual(["completed"]);
+    expect(await submissions(stub)).toEqual(["completed"]);
+    expect(await said(stub, "waited 4")).toBe(1);
+  });
+
+  it("fails its job on Think's own staleness cutoff, and is not run beside the retry", async () => {
+    const agent = harnessFor("stale", "STALE_AGENT");
+    const { harness, stub, debug, jobDebug } = agent;
+    using _ = harness.interceptGatekeeper();
+
+    const accepted = await harness.send("stale:wait:4");
+    await cutMidStep(agent, accepted.id);
+
+    const done = await harness.waitForTerminal(accepted.id);
+    expect(done.state).toBe("TASK_STATE_COMPLETED");
+    await pause(500);
+    expect(reportsOf(await debug(accepted.id))).toEqual(["failed"]);
+    expect(reportsOf(await jobDebug(`${accepted.id}:main:retry`))).toEqual([
+      "completed"
+    ]);
+    expect(await submissions(stub)).toEqual(["completed", "error"]);
+    // The retry's reply alone.
+    expect(await said(stub, "waited 4")).toBe(1);
+  });
+
+  it("is declined once its job was canceled, and the agent runs its next job", async () => {
+    const agent = harnessFor("cut-cancel");
+    const { harness, stub, debug } = agent;
+    using _ = harness.interceptGatekeeper();
+
+    const accepted = await harness.send("wait:4");
+    await cutMidStep(agent, accepted.id);
+    await cancel(harness, accepted.id);
+    await until(
+      "the job to stop",
+      () => debug(accepted.id),
+      (d) => d.row?.state === "canceled"
+    );
+
+    const next = await harness.send("echo:after");
+    expect((await harness.waitForTerminal(next.id)).text).toBe("after");
+    expect(terminals(harness, accepted.id)).toHaveLength(0);
+    expect(await submissions(stub)).toEqual(["aborted", "completed"]);
+  });
+});
+
 describe("recovering what an eviction cut short", () => {
   it("settles on the last of two results that landed before either follow-up ran", async () => {
     const { agent, jobDebug } = harnessFor("follow-ups");
@@ -849,7 +968,7 @@ describe("a turn for a job that has ended", () => {
       const failed = seedJob(instance, ended);
       instance.ledger.settle(failed.stepJobId, {
         state: "failed",
-        error: "cut at the ceiling"
+        error: "the turn failed"
       });
       const canceled = seedJob(instance, ended);
       instance.ledger.cancel(canceled.stepJobId);
@@ -897,7 +1016,7 @@ describe("a turn for a job that has ended", () => {
       (d) => d.row?.state === "working"
     );
     await pause(500);
-    // Ended with no abort, as Think's stale sweep leaves a turn it cut.
+    // Ended with no abort, as a failed job is.
     await runInDurableObject(agent, (instance: TestAgent) => {
       instance.ledger.cancel(stepJobId);
     });

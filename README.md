@@ -239,10 +239,11 @@ next turn — and `search_history` over the conversation's own full-text index.
 `check_back` is opt-in: `check_back: this.checkBackTool()` in `getTools()` lets the
 model put a job down and pick it up later, as a scheduled wake rather than a wait
 inside the turn. A turn runs inside the object's alarm, which the runtime stops after
-fifteen minutes, so work that can run longer belongs outside it — a detached
-sub-agent, or a `check_back` wake. A turn cut there fails its job. A turn for a job
-that has ended — canceled, failed, completed — is not recovered, and every tool it
-calls is refused.
+fifteen minutes. A turn cut there is continued while its job is open, at the cost of
+the step in flight, so a turn holds only steps that finish within it: work that can
+run longer belongs outside it — a detached sub-agent, or a `check_back` wake. A turn
+for a job that has ended — canceled, failed, completed — is not recovered, and every
+tool it calls is refused.
 
 What a job's `role` means, and what a retry should look at, are the agent's to say:
 `formatStepJobInput(job)` briefs the model ahead of the input, and `turnStepJob()` gives
