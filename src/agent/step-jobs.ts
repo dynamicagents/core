@@ -394,11 +394,26 @@ export class StepJobs {
       WHERE step_job_id = ${stepJobId} AND n = ${n}`;
   }
 
-  /** Every report of a job, sent or not: what a restarted instance waits for. */
+  /** Every report of a job, sent or not. */
   numbers(stepJobId: string): number[] {
     this.#ensure();
     return this.sql<{ n: number }>`SELECT n FROM da_step_job_reports
       WHERE step_job_id = ${stepJobId} ORDER BY n`.map((r) => r.n);
+  }
+
+  /**
+   * The reports a restarted instance waits for that may go now: every one,
+   * save those still waiting on the job's stop ({@link unsent}).
+   */
+  resendable(stepJobId: string): number[] {
+    this.#ensure();
+    return this.sql<{ n: number }>`SELECT n FROM da_step_job_reports r
+      WHERE step_job_id = ${stepJobId} AND (sent = 1 OR NOT EXISTS (
+        SELECT 1 FROM da_step_work w
+        JOIN da_step_jobs j ON j.step_job_id = w.step_job_id
+        WHERE w.step_job_id = r.step_job_id AND w.open = 1
+          AND j.state NOT IN ('submitted', 'working', 'input-required')))
+      ORDER BY n`.map((r) => r.n);
   }
 
   /** Reports not yet sent, save those waiting on a stop ({@link unstopped}). */

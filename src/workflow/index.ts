@@ -25,6 +25,7 @@ export {
 export type {
   AskRequest,
   NotedStepJob,
+  ParkOutcome,
   PipelineResult,
   StepAnswer,
   StepJob,

@@ -410,12 +410,16 @@ export abstract class StepAgent<
    * An interrupted turn is continued while its job is open, and not once the
    * job has ended — canceled, failed or completed alike. A failed job's retry
    * is already running, and the old turn would run on beside it.
+   *
+   * Nor is a turn that names no job: every message this class submits names
+   * one, so such a turn — an `A2AAgent` turn still running when its class
+   * became a `StepAgent` — has nothing to settle or report it.
    */
   protected override async onChatRecovery(ctx: {
     messages: UIMessage[];
   }): Promise<{ continue: boolean } | void> {
     const stepJobId = latestStepJobId(ctx.messages);
-    if (stepJobId && this.ledger.closed(stepJobId)) {
+    if (!stepJobId || this.ledger.closed(stepJobId)) {
       return { continue: false };
     }
   }
@@ -451,7 +455,8 @@ export abstract class StepAgent<
    * Start a job and submit its first turn. Idempotent on the job id: a re-run
    * start step finds the job and starts nothing. A job that already settled
    * sends its reports again — a restarted instance waits for them from the
-   * first, and would otherwise wait for good. A job stopped before it started
+   * first, and would otherwise wait for good — save one still waiting on the
+   * job's stop, which goes once the stop holds. A job stopped before it started
    * left a canceled row, and starts nothing.
    */
   async startStepJob(job: StepJob): Promise<void> {
@@ -460,7 +465,7 @@ export abstract class StepAgent<
     const existing = this.ledger.row(job.stepJobId);
     if (existing && isTerminalState(existing.state)) {
       if (existing.state !== "canceled") {
-        for (const n of this.ledger.numbers(job.stepJobId)) {
+        for (const n of this.ledger.resendable(job.stepJobId)) {
           await this.#queueReport(job.stepJobId, n, true);
         }
       }

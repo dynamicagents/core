@@ -161,10 +161,12 @@ describe("reports", () => {
       expect(ledger.unsent()).toEqual([]);
       expect(ledger.unstopped()).toEqual(["t1:main"]);
       expect(ledger.unsentOf("t1:main")).toEqual([1]);
+      expect(ledger.resendable("t1:main")).toEqual([0]);
 
       ledger.closeWork("d");
       expect(ledger.unstopped()).toEqual([]);
       expect(ledger.unsent()).toEqual([{ stepJobId: "t1:main", n: 1 }]);
+      expect(ledger.resendable("t1:main")).toEqual([0, 1]);
     });
   });
 

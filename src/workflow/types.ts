@@ -87,6 +87,12 @@ export interface TaskResult extends PipelineResult {
   verdict: { outcome: string; steps: string[] };
 }
 
+/**
+ * What a park found: the task `parked` on the question, `closed`, or already
+ * `asking` another — a task holds one question at a time.
+ */
+export type ParkOutcome = "parked" | "closed" | "asking";
+
 /** A noted step job: where the host reaches its agent to stop or notify it. */
 export interface NotedStepJob {
   stepJobId: string;

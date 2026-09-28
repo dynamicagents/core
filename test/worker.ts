@@ -524,6 +524,8 @@ export class TestHost extends TaskHost<TestEnv> {
  *  - `stale:<text>` — the one step, on {@link StaleAgent};
  *  - `orphan:<text>` — the one step, beside a branch that throws while it works;
  *  - `twice:` — one label run twice;
+ *  - `asks:` — two questions at once;
+ *  - `retry-named:` — a step named as a retry;
  *  - `throw` — the pipeline throws;
  *  - anything else — one step on {@link TestAgent}, fed the text.
  */
@@ -607,6 +609,20 @@ export class TestTask extends TaskWorkflow<TestEnv> {
     if (text === "twice:") {
       await step.agent("main", { agent: "TEST_AGENT", input: "echo:once" });
       await step.agent("main", { agent: "TEST_AGENT", input: "echo:twice" });
+      return { reply: "never" };
+    }
+
+    if (text === "asks:") {
+      await Promise.all(
+        ["one", "two"].map((name) =>
+          step.ask(name, { kind: "approval", prompt: name })
+        )
+      );
+      return { reply: "never" };
+    }
+
+    if (text === "retry-named:") {
+      await step.agent("main:retry", { agent: "TEST_AGENT", input: "echo:x" });
       return { reply: "never" };
     }
 

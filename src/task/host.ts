@@ -19,9 +19,9 @@ import { ensureStarted } from "../agent/lifecycle.js";
 import type { CoreEnv } from "../env.js";
 import { isTerminalState, TASK_RETENTION_MS } from "../ledger.js";
 import { answerEventType } from "../workflow/keys.js";
-import type { StepAnswer, TaskResult } from "../workflow/types.js";
+import type { ParkOutcome, StepAnswer, TaskResult } from "../workflow/types.js";
 import type { StepAgentStub } from "../workflow/workflow.js";
-import { TaskRuns } from "./runs.js";
+import { TaskRuns, type NoticeJob } from "./runs.js";
 import { A2ATasks, questionKey, type OwedAnswer } from "./tasks.js";
 
 /** The user-facing strings core needs and never writes. */
@@ -47,13 +47,6 @@ interface DeliveryJob {
   /** The ledger's `deliveryKey` for the event this callback reports. */
   key: string;
   task: unknown;
-}
-
-/** The end-of-task notice, to one agent that ran a job for the task. */
-interface NoticeJob {
-  taskId: string;
-  binding: string;
-  state: number;
 }
 
 /**
@@ -112,6 +105,9 @@ export abstract class TaskHost<
     }
     for (const taskId of this.ledger.pendingHooks()) {
       await this.queue("runSettleHooks", { taskId }, { id: `hooks:${taskId}` });
+    }
+    for (const notice of this.runs.owedNotices()) {
+      await this.#queueNotice(notice);
     }
     for (const taskId of this.ledger.pendingAnswers()) {
       await this.queue(
@@ -298,15 +294,15 @@ export abstract class TaskHost<
   }
 
   /**
-   * Park the task on a question and owe its callback, answering whether the
-   * task is parked on it. A question already answered is not asked again: a
-   * replayed park step would otherwise put an answered question back.
+   * Park the task on a question and owe its callback. A question already
+   * answered is not asked again: a replayed park step would otherwise put an
+   * answered question back.
    */
-  async park(taskId: string, request: HitlRequestData): Promise<boolean> {
+  async park(taskId: string, request: HitlRequestData): Promise<ParkOutcome> {
     await ensureStarted(this);
     const row = this.ledger.row(taskId);
-    if (!row || isTerminalState(row.state)) return false;
-    if (this.runs.wasAnswered(request.requestId)) return true;
+    if (!row || isTerminalState(row.state)) return "closed";
+    if (this.runs.wasAnswered(request.requestId)) return "parked";
     const parked = buildInputRequiredTask(taskId, row.contextId, request);
     if (this.ledger.park(parked, request)) {
       await this.#enqueueDelivery(
@@ -315,7 +311,9 @@ export abstract class TaskHost<
         parked
       );
     }
-    return this.ledger.row(taskId)?.request?.requestId === request.requestId;
+    return this.ledger.row(taskId)?.request?.requestId === request.requestId
+      ? "parked"
+      : "asking";
   }
 
   /**
@@ -451,6 +449,14 @@ export abstract class TaskHost<
     await (
       await this.#stepAgent(job.binding)
     ).stepTaskSettled(job.taskId, job.state);
+    this.runs.noticed(job.taskId, job.binding);
+  }
+
+  async #queueNotice(notice: NoticeJob): Promise<void> {
+    await this.queue<NoticeJob>("notifyStepAgent", notice, {
+      id: `notice:${notice.taskId}:${notice.binding}`,
+      retry: DELIVERY_RETRY
+    });
   }
 
   /**
@@ -634,19 +640,17 @@ export abstract class TaskHost<
    * End the transcript, then tell each agent that ran a job, then the host's
    * own hook, then record that all of them ran. The transcript first, because
    * somebody may be watching for the line that says it finished. At least
-   * once: an eviction before the record reruns them.
+   * once: an eviction before the record reruns them. Each notice stays owed
+   * past that record, until its agent took it: it is what stops the task's
+   * jobs and releases what they held.
    */
   async #settled(taskId: string): Promise<void> {
     const state =
       this.ledger.get(taskId)?.status?.state ??
       TaskState.TASK_STATE_UNSPECIFIED;
     await settleTranscript(this.env, taskId, state);
-    for (const binding of this.runs.agents(taskId)) {
-      await this.queue<NoticeJob>(
-        "notifyStepAgent",
-        { taskId, binding, state },
-        { id: `notice:${taskId}:${binding}`, retry: DELIVERY_RETRY }
-      );
+    for (const notice of this.runs.oweNotices(taskId, state)) {
+      await this.#queueNotice(notice);
     }
     try {
       await this.onTaskSettled(taskId, state);

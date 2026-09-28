@@ -21,6 +21,7 @@ import {
 import type {
   AskRequest,
   NotedStepJob,
+  ParkOutcome,
   PipelineResult,
   StepAnswer,
   StepJob,
@@ -49,11 +50,17 @@ export interface AgentStepOptions {
 
 /** The step helpers a pipeline gets, beside `step.do` and the rest. */
 export interface TaskStep extends AgentWorkflowStep {
-  /** Run a job on a step agent and return its reply. */
+  /**
+   * Run a job on a step agent and return its reply. A name ending in
+   * `:retry` is refused: a failed job's second attempt runs under it.
+   */
   agent(name: string, options: AgentStepOptions): Promise<string>;
   /** A progress line to the caller. */
   say(text: string): Promise<void>;
-  /** Park the task on a question to the caller, and return the answer. */
+  /**
+   * Park the task on a question to the caller, and return the answer. A task
+   * holds one question at a time, so one asked while another waits fails.
+   */
   ask(name: string, request: AskRequest): Promise<StepAnswer>;
 }
 
@@ -68,12 +75,18 @@ export interface StepAgentStub {
 /** The task host surface a workflow's steps call. */
 export interface TaskHostStub {
   noteStepJob(taskId: string, job: NotedStepJob): Promise<boolean>;
-  park(taskId: string, request: HitlRequestData): Promise<boolean>;
+  park(taskId: string, request: HitlRequestData): Promise<ParkOutcome>;
   progress(taskId: string, text: string, key: string): Promise<void>;
 }
 
 /** A job that reported `failed`: the one failure a step retries. */
 class StepJobFailed extends Error {}
+
+/**
+ * A step's second attempt runs under its name plus this, so a step named with
+ * it would take the retry's job.
+ */
+const RETRY_SUFFIX = ":retry";
 
 /** The start step's retry: the RPCs it makes are short and idempotent. */
 const START = {
@@ -162,11 +175,10 @@ export abstract class TaskWorkflow<
 
   /**
    * Run a job, and run it once more if it fails. A failed report is a turn
-   * that errored — the runtime cutting a long turn short is one — and the
-   * work it did is kept, so a second attempt on the same agent can carry on
-   * from it. What the agent is told about the retry is its own
-   * `formatStepJobInput`'s, from the job's `attempt`. Anything else — a closed
-   * task, a start that cannot be made — fails at once.
+   * that errored, and the work it did is kept, so a second attempt on the same
+   * agent can carry on from it. What the agent is told about the retry is its
+   * own `formatStepJobInput`'s, from the job's `attempt`. Anything else — a
+   * closed task, a start that cannot be made — fails at once.
    */
   async #agentStep(
     step: TaskStep,
@@ -174,11 +186,16 @@ export abstract class TaskWorkflow<
     name: string,
     options: AgentStepOptions
   ): Promise<string> {
+    if (name.endsWith(RETRY_SUFFIX)) {
+      throw new Error(
+        `step "${name}": a name ending in "${RETRY_SUFFIX}" is a retry's`
+      );
+    }
     try {
       return await this.#job(step, params, name, options, 1);
     } catch (err) {
       if (!(err instanceof StepJobFailed)) throw err;
-      return this.#job(step, params, `${name}:retry`, options, 2);
+      return this.#job(step, params, `${name}${RETRY_SUFFIX}`, options, 2);
     }
   }
 
@@ -277,12 +294,21 @@ export abstract class TaskWorkflow<
     label: string,
     request: HitlRequestData
   ): Promise<StepAnswer> {
-    await step.do(`${label}:park`, START, async () => {
-      if (!(await (await this.#host(params)).park(params.taskId, request))) {
+    const parked = await step.do(`${label}:park`, START, async () => {
+      const parked = await (
+        await this.#host(params)
+      ).park(params.taskId, request);
+      if (parked === "closed") {
         throw new NonRetryableError("the task is closed");
       }
-      return null;
+      return parked;
     });
+    // Thrown outside the step, so the task's error keeps the reason.
+    if (parked === "asking") {
+      throw new Error(
+        `"${label}" asked while the task waits on another question: ask one at a time`
+      );
+    }
     const event = await step.waitForEvent<StepAnswer>(`${label}:reply`, {
       type: await answerEventType(request.requestId),
       timeout: WAIT_CEILING

@@ -832,6 +832,9 @@ describe("stopping a job's work", () => {
         instance.finishStopWork({ stepJobId: job.stepJobId })
       ).rejects.toThrow("not stopped yet");
       expect(instance.ledger.openWorkRows(job.stepJobId)).toHaveLength(1);
+      // A redelivered start sends nothing early either.
+      await instance.startStepJob(job);
+      expect(queued).not.toContain("deliverStepJobReport");
       // A restart retries the stop, and sends the report only after it.
       expect(instance.ledger.unstopped()).toContain(job.stepJobId);
       expect(instance.ledger.unsent()).not.toContainEqual({
@@ -975,6 +978,24 @@ describe("a turn for a job that has ended", () => {
       for (const job of [completed, failed, canceled]) {
         expect(await recover(job)).toEqual({ continue: false });
       }
+    });
+  });
+
+  it("is not continued when it names no job", async () => {
+    const { agent } = harnessFor("no-job");
+
+    await runInDurableObject(agent, async (instance: TestAgent) => {
+      const hooks = instance as unknown as TurnHooks;
+      // An `A2AAgent` turn's message names its task alone.
+      const message: UIMessage = {
+        id: "m1",
+        role: "user",
+        parts: [{ type: "text", text: "go on" }],
+        metadata: { turnMetadata: { taskId: "t1" } }
+      };
+      expect(await hooks.onChatRecovery({ messages: [message] })).toEqual({
+        continue: false
+      });
     });
   });
 

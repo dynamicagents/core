@@ -355,8 +355,9 @@ export class A2ATasks {
 
   /**
    * Park a running task on a question, and owe its callback in the same
-   * statement. Only from `working`, or from `input-required` — the same park
-   * re-run.
+   * statement. Only from `working`, or from `input-required` on the same
+   * question — the park re-run. A task holds one question at a time, so
+   * another question asked meanwhile is refused rather than put in its place.
    */
   park(task: Task, request: HitlRequestData): boolean {
     this.#ensure();
@@ -366,7 +367,9 @@ export class A2ATasks {
           request_json = ${JSON.stringify(request)},
           delivery_key = ${questionKey(request.requestId)},
           updated_at = ${Date.now()}
-      WHERE task_id = ${task.id} AND state IN ('working', 'input-required')
+      WHERE task_id = ${task.id} AND (state = 'working' OR (
+        state = 'input-required'
+        AND json_extract(request_json, '$.requestId') = ${request.requestId}))
       RETURNING task_id`;
     return rows.length > 0;
   }

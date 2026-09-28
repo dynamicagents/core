@@ -333,6 +333,25 @@ describe("a task parked on a question", () => {
     });
   });
 
+  it("holds one question: the same park re-run, never another in its place", async () => {
+    await withLedger((ledger) => {
+      accept(ledger);
+      ledger.markWorking("t1");
+      const parked = buildInputRequiredTask("t1", "c1", request);
+      expect(ledger.park(parked, request)).toBe(true);
+      expect(ledger.park(parked, request)).toBe(true);
+
+      const other = { ...request, requestId: "t1:call-2" };
+      expect(
+        ledger.park(buildInputRequiredTask("t1", "c1", other), other)
+      ).toBe(false);
+      expect(ledger.row("t1")?.request?.requestId).toBe(request.requestId);
+      expect(ledger.row("t1")?.deliveryKey).toBe(
+        `input-required:${request.requestId}`
+      );
+    });
+  });
+
   it("parks only a task that is working", async () => {
     await withLedger((ledger) => {
       accept(ledger);

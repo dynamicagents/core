@@ -869,6 +869,60 @@ describe("the host's own bookkeeping", () => {
       expect(instance.ledger.row(taskId)?.stopPending).toBe(true);
     });
   });
+
+  it("owes each end-of-task notice until its agent takes it", async () => {
+    const { harness, host } = setup("notices");
+    using _ = harness.interceptGatekeeper();
+    const taskId = crypto.randomUUID();
+    const state = TaskState.TASK_STATE_FAILED;
+    await host.getTask("none");
+
+    await runInDurableObject(host, async (instance) => {
+      acceptInto(instance, harness.pushUrl, taskId);
+      instance.ledger.markWorking(taskId);
+      // An agent the host cannot reach, beside one it can.
+      instance.runs.note(taskId, {
+        stepJobId: `${taskId}:a`,
+        binding: "NO_SUCH_AGENT"
+      });
+      instance.runs.note(taskId, {
+        stepJobId: `${taskId}:b`,
+        binding: "TEST_AGENT"
+      });
+      instance.ledger.settle(buildFailedTask(taskId, "c1", "no"));
+      await instance.runSettleHooks({ taskId });
+      expect(instance.ledger.row(taskId)?.hooksPending).toBe(false);
+
+      await expect(
+        instance.notifyStepAgent({ taskId, binding: "NO_SUCH_AGENT", state })
+      ).rejects.toThrow();
+      await instance.notifyStepAgent({ taskId, binding: "TEST_AGENT", state });
+      expect(
+        instance.runs.owedNotices().filter((notice) => notice.taskId === taskId)
+      ).toEqual([{ taskId, binding: "NO_SUCH_AGENT", state }]);
+
+      // A start sends it again.
+      const stub = instance as unknown as {
+        queue(
+          callback: string,
+          payload: unknown,
+          ...rest: unknown[]
+        ): Promise<string>;
+      };
+      const queued: unknown[] = [];
+      const queue = stub.queue.bind(instance);
+      stub.queue = (callback, payload, ...rest) => {
+        if (callback === "notifyStepAgent") queued.push(payload);
+        return queue(callback, payload, ...rest);
+      };
+      await instance.onStart();
+      expect(queued).toContainEqual({
+        taskId,
+        binding: "NO_SUCH_AGENT",
+        state
+      });
+    });
+  });
 });
 
 describe("a pipeline's own guards", () => {
@@ -894,5 +948,27 @@ describe("a pipeline's own guards", () => {
     expect(done.state).toBe("TASK_STATE_FAILED");
     const { error } = await status(task.id);
     expect(error?.message).toContain('step "agent:main" ran twice');
+  });
+
+  it("fails a task that asks two questions at once, rather than leave one unanswerable", async () => {
+    const { harness } = setup("asks");
+    using _ = harness.interceptGatekeeper();
+    const task = await harness.send("asks:");
+    const done = await harness.waitForTerminal(task.id);
+    expect(done.state).toBe("TASK_STATE_FAILED");
+    const { error } = await status(task.id);
+    expect(error?.message).toContain(
+      "while the task waits on another question"
+    );
+  });
+
+  it("refuses a step named as a retry", async () => {
+    const { harness } = setup("retry-named");
+    using _ = harness.interceptGatekeeper();
+    const task = await harness.send("retry-named:");
+    const done = await harness.waitForTerminal(task.id);
+    expect(done.state).toBe("TASK_STATE_FAILED");
+    const { error } = await status(task.id);
+    expect(error?.message).toContain('step "main:retry"');
   });
 });

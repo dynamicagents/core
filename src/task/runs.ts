@@ -1,11 +1,20 @@
 import type { Sql } from "../ledger.js";
 import type { NotedStepJob, TaskParams } from "../workflow/types.js";
 
+/** The end-of-task notice, to one agent that ran a job for the task. */
+export interface NoticeJob {
+  taskId: string;
+  binding: string;
+  state: number;
+}
+
 /**
  * The host's own record of each task's workflow run: what it was started
  * with, so a start cut short can be run again; the step jobs its steps
- * started, so a cancel reaches them and the end of the task notifies them; and
- * the questions already answered, so a replayed park never asks one again.
+ * started, so a cancel reaches them and the end of the task notifies them; the
+ * notices not yet delivered, so one that ran out of retries is sent again at
+ * the next start; and the questions already answered, so a replayed park never
+ * asks one again.
  *
  * On the same SQLite as the task ledger (`./tasks.ts`), whose rows these
  * outlive only until the retention sweep.
@@ -28,6 +37,12 @@ export class TaskRuns {
       binding TEXT NOT NULL,
       created_at INTEGER NOT NULL,
       PRIMARY KEY (task_id, step_job_id)
+    )`;
+    this.sql`CREATE TABLE IF NOT EXISTS da_task_notices (
+      task_id TEXT NOT NULL,
+      binding TEXT NOT NULL,
+      state INTEGER NOT NULL,
+      PRIMARY KEY (task_id, binding)
     )`;
     this.sql`CREATE TABLE IF NOT EXISTS da_task_answered (
       request_id TEXT PRIMARY KEY,
@@ -74,6 +89,34 @@ export class TaskRuns {
     return [...new Set(this.jobs(taskId).map((job) => job.binding))];
   }
 
+  /** Owe each agent that ran a job for the task its notice; return them. */
+  oweNotices(taskId: string, state: number): NoticeJob[] {
+    for (const binding of this.agents(taskId)) {
+      this.sql`INSERT OR IGNORE INTO da_task_notices (task_id, binding, state)
+        VALUES (${taskId}, ${binding}, ${state})`;
+    }
+    return this.owedNotices().filter((notice) => notice.taskId === taskId);
+  }
+
+  /** Every notice not yet delivered. */
+  owedNotices(): NoticeJob[] {
+    this.#ensure();
+    return this.sql<{ task_id: string; binding: string; state: number }>`
+      SELECT task_id, binding, state FROM da_task_notices
+      ORDER BY task_id, binding`.map((r) => ({
+      taskId: r.task_id,
+      binding: r.binding,
+      state: r.state
+    }));
+  }
+
+  /** A notice the agent took. */
+  noticed(taskId: string, binding: string): void {
+    this.#ensure();
+    this.sql`DELETE FROM da_task_notices
+      WHERE task_id = ${taskId} AND binding = ${binding}`;
+  }
+
   /** A question the caller answered. Never asked again. */
   answered(taskId: string, requestId: string): void {
     this.#ensure();
@@ -95,6 +138,8 @@ export class TaskRuns {
     this.sql`DELETE FROM da_task_runs
       WHERE task_id NOT IN (SELECT task_id FROM da_a2a_tasks)`;
     this.sql`DELETE FROM da_task_step_jobs
+      WHERE task_id NOT IN (SELECT task_id FROM da_a2a_tasks)`;
+    this.sql`DELETE FROM da_task_notices
       WHERE task_id NOT IN (SELECT task_id FROM da_a2a_tasks)`;
     this.sql`DELETE FROM da_task_answered
       WHERE task_id NOT IN (SELECT task_id FROM da_a2a_tasks)`;

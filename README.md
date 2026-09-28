@@ -223,9 +223,11 @@ job on a step agent — `agent` is its binding name, and the instance is always 
 caller's — and returns its reply. `step.ask(name, request)` parks the task on a
 question of the pipeline's own and returns the answer. `step.say(text)` pushes one
 progress line. `step.do` is Workflows' own. A step whose job reports `failed` runs
-once more, as `<name>:retry` with `attempt: 2`; a second failure fails the task. A
-name used twice in one run — a loop without a `key` — fails the task by name, because
-Workflows would otherwise hand the second the first one's result.
+once more, as `<name>:retry` with `attempt: 2`; a second failure fails the task, and
+a step named with that suffix is refused. A name used twice in one run — a loop
+without a `key` — fails the task by name, because Workflows would otherwise hand the
+second the first one's result. A task holds one question at a time, so a
+`step.ask`, or a job's `ask_user`, made while another question waits fails the task.
 
 **Every pipeline declares `run()`,** as the one line above. The agents SDK gives a
 workflow its host and its helpers only on a class that defines `run` itself, and an
