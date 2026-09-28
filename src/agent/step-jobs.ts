@@ -17,9 +17,10 @@ import type { StepJob, StepJobReport } from "../workflow/types.js";
  *    transaction, so a failure leaves either neither or both, and the start-up
  *    sweep sends what is unsent. Reports are numbered, because the workflow
  *    waits for report `n` under an event type of its own.
- *  - **A closed job's reports wait for its work to stop.** The workflow
- *    retries a failed step as soon as its report lands, and the retry would
- *    otherwise run beside a run or a wake the stop missed.
+ *  - **A closed job's reports wait for its work to stop,** and so does its
+ *    task's settle hook. The workflow retries a failed step as soon as its
+ *    report lands, and the retry would otherwise run beside a run or a wake
+ *    the stop missed; the hook releases what that work runs in.
  *  - **Open work keeps a job alive across turns.** A detached sub-agent run or
  *    a scheduled wake is a work row, and settlement asks this table — not the
  *    model — whether the job is finished.
@@ -148,6 +149,11 @@ export class StepJobs {
     )`;
     this.sql`CREATE INDEX IF NOT EXISTS da_step_work_job
       ON da_step_work (step_job_id, open)`;
+    this.sql`CREATE TABLE IF NOT EXISTS da_step_task_hooks (
+      task_id TEXT PRIMARY KEY,
+      state INTEGER NOT NULL,
+      created_at INTEGER NOT NULL
+    )`;
     this.#ensured = true;
   }
 
@@ -430,6 +436,35 @@ export class StepJobs {
     );
   }
 
+  // --- the end of a task -----------------------------------------------------
+
+  /** A task ended: its settle hook is owed. Recorded once, whatever repeats. */
+  oweTaskHook(taskId: string, state: number): void {
+    this.#ensure();
+    this
+      .sql`INSERT OR IGNORE INTO da_step_task_hooks (task_id, state, created_at)
+      VALUES (${taskId}, ${state}, ${Date.now()})`;
+  }
+
+  /** Owed settle hooks whose task has no job with work still open. */
+  dueTaskHooks(): { taskId: string; state: number }[] {
+    this.#ensure();
+    return this.sql<{ task_id: string; state: number }>`
+      SELECT task_id, state FROM da_step_task_hooks h
+      WHERE NOT EXISTS (
+        SELECT 1 FROM da_step_work w
+        JOIN da_step_jobs j ON j.step_job_id = w.step_job_id
+        WHERE j.task_id = h.task_id AND w.open = 1)`.map((r) => ({
+      taskId: r.task_id,
+      state: r.state
+    }));
+  }
+
+  taskHookRan(taskId: string): void {
+    this.#ensure();
+    this.sql`DELETE FROM da_step_task_hooks WHERE task_id = ${taskId}`;
+  }
+
   // --- work ----------------------------------------------------------------
 
   /**
@@ -591,6 +626,7 @@ export class StepJobs {
     this.sql`DELETE FROM da_step_work
       WHERE created_at < ${before}
         AND step_job_id NOT IN (SELECT step_job_id FROM da_step_jobs)`;
+    this.sql`DELETE FROM da_step_task_hooks WHERE created_at < ${before}`;
   }
 }
 

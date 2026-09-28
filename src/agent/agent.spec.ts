@@ -738,6 +738,43 @@ describe("stopping a job's work", () => {
       (sent) => sent
     );
   });
+
+  it("runs the task's settle hook only once its work has stopped", async () => {
+    const { agent } = harnessFor("stop-hook");
+    const ended = await endedInstance();
+
+    await runInDurableObject(agent, async (instance: TestAgent) => {
+      const job = seedJob(instance, ended);
+      instance.ledger.addWork({
+        workId: "wait:w1",
+        stepJobId: job.stepJobId,
+        kind: "wait",
+        name: "check_back",
+        scheduleId: "s1"
+      });
+      const stub = instance as unknown as {
+        cancelSchedule(id: string): Promise<boolean>;
+      };
+      stub.cancelSchedule = async () => {
+        throw new Error("the schedule store is away");
+      };
+      const hooks = async () =>
+        JSON.parse(await instance.debugSettled(job.taskId)) as number[];
+
+      // The notice cancels the open job, and its stop fails.
+      await instance.stepTaskSettled(job.taskId, TaskState.TASK_STATE_FAILED);
+      expect(instance.ledger.row(job.stepJobId)?.state).toBe("canceled");
+      expect(await hooks()).toEqual([]);
+      // A notice repeated finds the hook owed, not yet due.
+      await instance.stepTaskSettled(job.taskId, TaskState.TASK_STATE_FAILED);
+      expect(await hooks()).toEqual([]);
+
+      stub.cancelSchedule = async () => true;
+      await instance.finishStopWork({ stepJobId: job.stepJobId });
+      expect(await hooks()).toEqual([TaskState.TASK_STATE_FAILED]);
+      expect(instance.ledger.dueTaskHooks()).toEqual([]);
+    });
+  });
 });
 
 describe("check_back", () => {

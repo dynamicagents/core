@@ -213,6 +213,9 @@ export abstract class StepAgent<
     for (const { stepJobId, n } of this.ledger.unsent()) {
       await this.#queueReport(stepJobId, n);
     }
+    if (this.ledger.dueTaskHooks().length > 0) {
+      await this.queue("runTaskHooks", {}, { id: "task-hooks" });
+    }
   }
 
   override classifyChatError(error: unknown) {
@@ -537,28 +540,45 @@ export abstract class StepAgent<
    * The host's end-of-task notice: the task a job of this agent ran for ended.
    * A job of it still open has nobody left to report to — a pipeline that threw
    * while a parallel step still worked leaves one — so it is stopped, keeping
-   * its work, before the hook runs.
+   * its work. The hook is owed, and runs once no job of the task has work
+   * open: a stop that failed runs it when its retry holds.
    */
   async stepTaskSettled(taskId: string, state: TaskState): Promise<void> {
     await ensureStarted(this);
     for (const stepJobId of this.ledger.openJobsOf(taskId)) {
       await this.#cancel(stepJobId);
     }
-    try {
-      await this.onTaskSettled(taskId, state);
-    } catch (err) {
-      console.warn("[agent] task settle hook failed", {
-        taskId,
-        state,
-        err: String(err)
-      });
+    this.ledger.oweTaskHook(taskId, state);
+    await this.#runDueTaskHooks();
+  }
+
+  /** Owed settle hooks whose work has stopped, run from the queue. */
+  async runTaskHooks(): Promise<void> {
+    await ensureStarted(this);
+    await this.#runDueTaskHooks();
+  }
+
+  /** At least once: an eviction before the record reruns a hook. */
+  async #runDueTaskHooks(): Promise<void> {
+    for (const { taskId, state } of this.ledger.dueTaskHooks()) {
+      try {
+        await this.onTaskSettled(taskId, state as TaskState);
+      } catch (err) {
+        console.warn("[agent] task settle hook failed", {
+          taskId,
+          state,
+          err: String(err)
+        });
+      }
+      this.ledger.taskHookRan(taskId);
     }
   }
 
   /**
    * A task a job of this agent ran for reached a state it never leaves —
    * release what was held for it. Fires for every terminal state, `canceled`
-   * included, at least once per agent. A throw is logged and swallowed.
+   * included, at least once per agent, once none of the task's jobs has work
+   * still running. A throw is logged and swallowed.
    */
   protected async onTaskSettled(
     _taskId: string,
@@ -753,7 +773,7 @@ export abstract class StepAgent<
    */
   async #stopWork(stepJobId: string): Promise<void> {
     if (await this.#tryStopWork(stepJobId)) {
-      await this.#releaseReports(stepJobId);
+      await this.#stopped(stepJobId);
     } else {
       await this.#queueStopWork(stepJobId);
     }
@@ -776,13 +796,15 @@ export abstract class StepAgent<
         `the work of job ${payload.stepJobId} is not stopped yet`
       );
     }
-    await this.#releaseReports(payload.stepJobId);
+    await this.#stopped(payload.stepJobId);
   }
 
-  async #releaseReports(stepJobId: string): Promise<void> {
+  /** What waited for a job's work to stop: its reports, its task's hook. */
+  async #stopped(stepJobId: string): Promise<void> {
     for (const n of this.ledger.unsentOf(stepJobId)) {
       await this.#queueReport(stepJobId, n);
     }
+    await this.#runDueTaskHooks();
   }
 
   async #tryStopWork(stepJobId: string): Promise<boolean> {

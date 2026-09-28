@@ -333,6 +333,35 @@ describe("work", () => {
   });
 });
 
+describe("the end of a task", () => {
+  it("owes its settle hook until none of its jobs has work open", async () => {
+    await withLedger((ledger) => {
+      ledger.accept(job("t1:main"));
+      ledger.accept(job("t2:main", "t2"));
+      ledger.addWork({
+        workId: "d",
+        stepJobId: "t1:main",
+        kind: "detached",
+        name: "C"
+      });
+      ledger.cancel("t1:main");
+      ledger.oweTaskHook("t1", 4);
+      ledger.oweTaskHook("t1", 5);
+      ledger.oweTaskHook("t2", 4);
+      // Another task's open work holds nothing of this one's.
+      expect(ledger.dueTaskHooks()).toEqual([{ taskId: "t2", state: 4 }]);
+
+      ledger.closeWork("d");
+      expect(ledger.dueTaskHooks()).toEqual([
+        { taskId: "t1", state: 4 },
+        { taskId: "t2", state: 4 }
+      ]);
+      ledger.taskHookRan("t1");
+      expect(ledger.dueTaskHooks()).toEqual([{ taskId: "t2", state: 4 }]);
+    });
+  });
+});
+
 describe("retention", () => {
   it("sweeps settled jobs past the window, with what they owned, and never an open one", async () => {
     await withLedger((ledger) => {
