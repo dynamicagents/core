@@ -232,6 +232,9 @@ export abstract class StepAgent<
         { id: `answer:${stepJobId}` }
       );
     }
+    for (const stepJobId of this.ledger.unstopped()) {
+      await this.#queueStopWork(stepJobId);
+    }
     for (const { stepJobId, n } of this.ledger.unsent()) {
       await this.#queueReport(stepJobId, n);
     }
@@ -773,13 +776,12 @@ export abstract class StepAgent<
 
   /**
    * A turn that errored fails its job. Its background runs and wakes are
-   * stopped, keeping their work: nothing will read what they return, and the
-   * step's retry would otherwise work beside them.
+   * stopped, keeping their work, and the report is sent once the stop held.
    */
   async #fail(stepJobId: string, error: string): Promise<void> {
-    const n = this.ledger.settle(stepJobId, { state: "failed", error });
-    if (n === null) return;
-    await this.#queueReport(stepJobId, n);
+    if (this.ledger.settle(stepJobId, { state: "failed", error }) === null) {
+      return;
+    }
     await this.#stopWork(stepJobId);
   }
 
@@ -834,12 +836,20 @@ export abstract class StepAgent<
   }
 
   /**
-   * Stop a job's background runs and wakes, keeping what they did. A row is
-   * closed only once its stop held: the job has ended, so nothing else would
-   * revisit it, and one that failed is retried from the queue.
+   * Stop a job's background runs and wakes, keeping what they did, then send
+   * the reports that waited for it (see `StepJobs`). A row is closed only once
+   * its stop held: the job has ended, so nothing else would revisit it, and
+   * one that failed is retried from the queue.
    */
   async #stopWork(stepJobId: string): Promise<void> {
-    if (await this.#tryStopWork(stepJobId)) return;
+    if (await this.#tryStopWork(stepJobId)) {
+      await this.#releaseReports(stepJobId);
+    } else {
+      await this.#queueStopWork(stepJobId);
+    }
+  }
+
+  async #queueStopWork(stepJobId: string): Promise<void> {
     await this.queue(
       "finishStopWork",
       { stepJobId },
@@ -855,6 +865,13 @@ export abstract class StepAgent<
       throw new Error(
         `the work of job ${payload.stepJobId} is not stopped yet`
       );
+    }
+    await this.#releaseReports(payload.stepJobId);
+  }
+
+  async #releaseReports(stepJobId: string): Promise<void> {
+    for (const n of this.ledger.unsentOf(stepJobId)) {
+      await this.#queueReport(stepJobId, n);
     }
   }
 

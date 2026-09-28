@@ -671,11 +671,11 @@ describe("recovering what an eviction cut short", () => {
 });
 
 describe("stopping a job's work", () => {
-  it("keeps a row open until its stop has held", async () => {
+  it("keeps a row open, and a failed job's report back, until its stop has held", async () => {
     const { agent } = harnessFor("stop-work");
     const ended = await endedInstance();
 
-    await runInDurableObject(agent, async (instance: TestAgent) => {
+    const job = await runInDurableObject(agent, async (instance: TestAgent) => {
       const job = seedJob(instance, ended);
       instance.ledger.addWork({
         workId: "wait:w1",
@@ -684,22 +684,59 @@ describe("stopping a job's work", () => {
         name: "check_back",
         scheduleId: "s1"
       });
-      instance.ledger.settle(job.stepJobId, { state: "failed", error: "cut" });
       const stub = instance as unknown as {
         cancelSchedule(id: string): Promise<boolean>;
+        onSubmissionStatus(submission: unknown): Promise<void>;
+        queue(callback: string, ...rest: unknown[]): Promise<string>;
+      };
+      const queued: string[] = [];
+      const queue = stub.queue.bind(instance);
+      stub.queue = (callback, ...rest) => {
+        queued.push(callback);
+        return queue(callback, ...rest);
       };
       stub.cancelSchedule = async () => {
         throw new Error("the schedule store is away");
       };
+
+      // The turn errors, and the stop that follows fails.
+      await stub.onSubmissionStatus({
+        submissionId: "sub-1",
+        status: "error",
+        error: "cut",
+        metadata: { stepJobId: job.stepJobId }
+      });
+      expect(instance.ledger.row(job.stepJobId)?.state).toBe("failed");
+      expect(queued).toContain("finishStopWork");
+      expect(queued).not.toContain("deliverStepJobReport");
       await expect(
         instance.finishStopWork({ stepJobId: job.stepJobId })
       ).rejects.toThrow("not stopped yet");
       expect(instance.ledger.openWorkRows(job.stepJobId)).toHaveLength(1);
+      // A restart retries the stop, and sends the report only after it.
+      expect(instance.ledger.unstopped()).toContain(job.stepJobId);
+      expect(instance.ledger.unsent()).not.toContainEqual({
+        stepJobId: job.stepJobId,
+        n: 0
+      });
 
       stub.cancelSchedule = async () => true;
       await instance.finishStopWork({ stepJobId: job.stepJobId });
       expect(instance.ledger.openWorkRows(job.stepJobId)).toEqual([]);
+      expect(queued).toContain("deliverStepJobReport");
+      return job;
     });
+
+    await until(
+      "the report released",
+      () =>
+        runInDurableObject(
+          agent,
+          (instance: TestAgent) =>
+            instance.ledger.report(job.stepJobId, 0)?.sent ?? false
+        ),
+      (sent) => sent
+    );
   });
 });
 

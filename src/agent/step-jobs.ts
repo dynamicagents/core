@@ -17,6 +17,9 @@ import type { StepJob, StepJobReport } from "../workflow/types.js";
  *    transaction, so a failure leaves either neither or both, and the start-up
  *    sweep sends what is unsent. Reports are numbered, because the workflow
  *    waits for report `n` under an event type of its own.
+ *  - **A closed job's reports wait for its work to stop.** The workflow
+ *    retries a failed step as soon as its report lands, and the retry would
+ *    otherwise run beside a run or a wake the stop missed.
  *  - **Open work keeps a job alive across turns.** A detached sub-agent run or
  *    a scheduled wake is a work row, and settlement asks this table — not the
  *    model — whether the job is finished.
@@ -392,14 +395,39 @@ export class StepJobs {
       WHERE step_job_id = ${stepJobId} ORDER BY n`.map((r) => r.n);
   }
 
+  /** Reports not yet sent, save those waiting on a stop ({@link unstopped}). */
   unsent(): { stepJobId: string; n: number }[] {
     this.#ensure();
     return this.sql<{ step_job_id: string; n: number }>`
-      SELECT step_job_id, n FROM da_step_job_reports WHERE sent = 0
+      SELECT step_job_id, n FROM da_step_job_reports
+      WHERE sent = 0 AND step_job_id NOT IN (
+        SELECT w.step_job_id FROM da_step_work w
+        JOIN da_step_jobs j ON j.step_job_id = w.step_job_id
+        WHERE w.open = 1
+          AND j.state NOT IN ('submitted', 'working', 'input-required'))
       ORDER BY step_job_id, n`.map((r) => ({
       stepJobId: r.step_job_id,
       n: r.n
     }));
+  }
+
+  /** One job's reports not yet sent. */
+  unsentOf(stepJobId: string): number[] {
+    this.#ensure();
+    return this.sql<{ n: number }>`SELECT n FROM da_step_job_reports
+      WHERE step_job_id = ${stepJobId} AND sent = 0 ORDER BY n`.map((r) => r.n);
+  }
+
+  /** Closed jobs with work still open: a stop that has not held yet. */
+  unstopped(): string[] {
+    this.#ensure();
+    return this.sql<{ step_job_id: string }>`
+      SELECT DISTINCT w.step_job_id FROM da_step_work w
+      JOIN da_step_jobs j ON j.step_job_id = w.step_job_id
+      WHERE w.open = 1
+        AND j.state NOT IN ('submitted', 'working', 'input-required')`.map(
+      (r) => r.step_job_id
+    );
   }
 
   // --- work ----------------------------------------------------------------

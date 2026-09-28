@@ -615,16 +615,18 @@ export abstract class TaskHost<
 
   /**
    * Whether a terminate that threw found nothing left to stop: an instance
-   * already ended, or one never created. A start that creates it later stops
-   * it itself, finding the task canceled (see `#start`). A read that fails for
-   * another reason is taken the same way: the binding does not say which.
+   * already ended, or one never created. The binding does not say why a read
+   * failed, so the row does: a bound task's instance exists, and its stop
+   * stays owed. An unbound one's may not — a start that creates it later stops
+   * it itself, finding the task canceled (see `#start`), and one an eviction
+   * cut short runs no job, because `noteStepJob` refuses a closed task.
    */
   async #instanceStopped(taskId: string): Promise<boolean> {
     try {
       const { status } = await (await this.#workflow().get(taskId)).status();
       return ["complete", "errored", "terminated"].includes(status);
     } catch {
-      return true;
+      return !this.ledger.row(taskId)?.bound;
     }
   }
 

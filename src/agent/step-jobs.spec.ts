@@ -141,6 +141,33 @@ describe("reports", () => {
     });
   });
 
+  it("holds a closed job's reports back while its work is open", async () => {
+    await withLedger((ledger) => {
+      ledger.accept(job());
+      ledger.markWorking("t1:main");
+      ledger.addWork({
+        workId: "d",
+        stepJobId: "t1:main",
+        kind: "detached",
+        name: "C"
+      });
+      // An open job's question goes out whatever runs beside it.
+      ledger.park("t1:main", request);
+      expect(ledger.unsent()).toEqual([{ stepJobId: "t1:main", n: 0 }]);
+      ledger.sent("t1:main", 0);
+
+      ledger.resume("t1:main", { id: "answer:a", text: "Yes" });
+      ledger.settle("t1:main", { state: "failed", error: "cut" });
+      expect(ledger.unsent()).toEqual([]);
+      expect(ledger.unstopped()).toEqual(["t1:main"]);
+      expect(ledger.unsentOf("t1:main")).toEqual([1]);
+
+      ledger.closeWork("d");
+      expect(ledger.unstopped()).toEqual([]);
+      expect(ledger.unsent()).toEqual([{ stepJobId: "t1:main", n: 1 }]);
+    });
+  });
+
   it("owes nothing once canceled, and drops what was not yet sent", async () => {
     await withLedger((ledger) => {
       ledger.accept(job());

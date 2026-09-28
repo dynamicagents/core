@@ -22,7 +22,8 @@ import worker, {
   type JobDebug,
   type StepReportDebug,
   type TaskDebug,
-  type TestEnv
+  type TestEnv,
+  type TestHost
 } from "../../test/worker.js";
 import type { StepJob, TaskParams, TaskResult } from "./types.js";
 
@@ -811,25 +812,29 @@ describe("the host's own bookkeeping", () => {
     ).toBe(true);
   });
 
+  function acceptInto(instance: TestHost, pushUrl: string, taskId: string) {
+    instance.ledger.accept({
+      messageId: `m-${taskId}`,
+      taskId,
+      contextId: "c1",
+      push: {
+        taskId,
+        contextId: "c1",
+        pushUrl,
+        pushToken: "tok",
+        jku: "https://agent.test/.well-known/jwks.json"
+      },
+      identity: { key: "k" }
+    });
+  }
+
   it("owes a stop until every part of it has held", async () => {
     const { harness, host } = setup("stop-kept");
     using _ = harness.interceptGatekeeper();
     const taskId = crypto.randomUUID();
 
     await runInDurableObject(host, async (instance) => {
-      instance.ledger.accept({
-        messageId: `m-${taskId}`,
-        taskId,
-        contextId: "c1",
-        push: {
-          taskId,
-          contextId: "c1",
-          pushUrl: harness.pushUrl,
-          pushToken: "tok",
-          jku: "https://agent.test/.well-known/jwks.json"
-        },
-        identity: { key: "k" }
-      });
+      acceptInto(instance, harness.pushUrl, taskId);
       // A job on an agent the host cannot reach: its stop fails.
       instance.runs.note(taskId, {
         stepJobId: `${taskId}:main`,
@@ -841,6 +846,25 @@ describe("the host's own bookkeeping", () => {
       );
       expect(instance.ledger.row(taskId)?.stopPending).toBe(true);
       expect(instance.ledger.pendingStops()).toEqual([taskId]);
+    });
+  });
+
+  it("keeps a bound task's stop owed while its instance cannot be read", async () => {
+    const { harness, host } = setup("stop-unread");
+    const taskId = crypto.randomUUID();
+
+    await runInDurableObject(host, async (instance) => {
+      acceptInto(instance, harness.pushUrl, taskId);
+      instance.ledger.bind(taskId);
+      instance.ledger.cancel(taskId);
+      // The terminate fails, and so does the read that would explain it.
+      Object.defineProperty(instance, "workflowBinding", {
+        value: "NO_SUCH_WORKFLOW"
+      });
+      await expect(instance.finishStop({ taskId })).rejects.toThrow(
+        "not stopped yet"
+      );
+      expect(instance.ledger.row(taskId)?.stopPending).toBe(true);
     });
   });
 });
