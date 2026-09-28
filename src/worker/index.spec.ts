@@ -893,15 +893,23 @@ describe("protocol version negotiation", () => {
 describe("a message on an existing task", () => {
   const parkedId = "t-parked";
 
-  /** A tenant whose one Task is parked on a question, recording what reaches it. */
-  function parkedTenant(options: { recording?: "throws" } = {}) {
+  /**
+   * A tenant whose one Task is parked on a question, recording what reaches it.
+   * `ends` has the answer settle the Task, as a pipeline that returns on it
+   * does; `closed` starts the Task already completed.
+   */
+  function parkedTenant(
+    options: { recording?: "throws"; answer?: "ends"; closed?: true } = {}
+  ) {
     const answered: unknown[] = [];
     // What the handler last wrote, so a read after its own write sees it — a
     // cancel reads the Task back to confirm it took.
     let stored: Task = testTask(
       parkedId,
       "ctx-1",
-      TaskState.TASK_STATE_INPUT_REQUIRED
+      options.closed
+        ? TaskState.TASK_STATE_COMPLETED
+        : TaskState.TASK_STATE_INPUT_REQUIRED
     );
     const agent = {
       async acceptTask(): Promise<never> {
@@ -922,11 +930,17 @@ describe("a message on an existing task", () => {
           throw new Error("Durable Object reset");
         }
         answered.push(input);
+        // A closed task has no question to answer, and changes nothing.
+        if (options.closed) return structuredClone(stored);
         // Resumed, as the Durable Object resumes it: the handler loads the
         // Task after this, and answers with what it finds.
         stored = {
           ...stored,
-          status: testStatus(TaskState.TASK_STATE_WORKING)
+          status: testStatus(
+            options.answer === "ends"
+              ? TaskState.TASK_STATE_COMPLETED
+              : TaskState.TASK_STATE_WORKING
+          )
         };
         return structuredClone(stored);
       }
@@ -1000,6 +1014,30 @@ describe("a message on an existing task", () => {
         reply: expect.objectContaining({ kind: "answer", requestId: "q1" })
       })
     ]);
+  });
+
+  it("answers with the task an answer ended, rather than refusing it as terminal", async () => {
+    const { call, answered } = parkedTenant({ answer: "ends" });
+
+    const res = await call(onto(answer));
+    const body = await res.json<{
+      error?: { message: string };
+      result?: { task?: { id: string; status: { state: string } } };
+    }>();
+
+    expect(body.error).toBeUndefined();
+    expect(body.result?.task?.id).toBe(parkedId);
+    expect(body.result?.task?.status.state).toBe("TASK_STATE_COMPLETED");
+    expect(answered).toHaveLength(1);
+  });
+
+  it("refuses an answer to a task that had already ended", async () => {
+    const { call } = parkedTenant({ closed: true });
+
+    const res = await call(onto(answer));
+    const body = await res.json<{ error?: { message: string } }>();
+
+    expect(body.error?.message).toMatch(/terminal state/);
   });
 
   it("refuses an ordinary message on a task, and leaves the task waiting", async () => {
