@@ -667,6 +667,8 @@ describe("the host's own bookkeeping", () => {
     const { harness, host, hostDebug } = setup("hooks");
     using _ = harness.interceptGatekeeper();
     const taskId = crypto.randomUUID();
+    // Started first: a start that finds the hooks owed queues a run of its own.
+    await host.getTask("none");
 
     await runInDurableObject(host, async (instance) => {
       instance.ledger.accept({
