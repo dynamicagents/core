@@ -66,7 +66,8 @@ export class ArtifactsNotBoundError extends Error {
 /**
  * The binding, or {@link ArtifactsNotBoundError}.
  *
- * Called at DO start — see `A2AAgent.onStart` — so a deployment that forgot
+ * Called at DO start — see `TaskHost.onStart` and `StepAgent.onStart` — so a
+ * deployment that forgot
  * the binding fails before any request reaches a writer. The
  * runtime check survives the required type because `ArtifactsEnv` describes
  * what a consumer *declared*, and a `wrangler.jsonc` that never grew the

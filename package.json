@@ -1,7 +1,7 @@
 {
   "name": "@dynamicagents/core",
   "version": "0.12.0",
-  "description": "Shared, mandatory foundation for Dynamic Agents on Cloudflare Workers: zero-trust A2A, and the durable A2A task lifecycle on @cloudflare/think.",
+  "description": "Shared, mandatory foundation for Dynamic Agents on Cloudflare Workers: zero-trust A2A, a durable task host, task workflows, and step agents on @cloudflare/think.",
   "keywords": [
     "a2a",
     "agent2agent",
@@ -52,6 +52,14 @@
     "./agent": {
       "types": "./dist/agent/index.d.ts",
       "import": "./dist/agent/index.js"
+    },
+    "./task": {
+      "types": "./dist/task/index.d.ts",
+      "import": "./dist/task/index.js"
+    },
+    "./workflow": {
+      "types": "./dist/workflow/index.d.ts",
+      "import": "./dist/workflow/index.js"
     },
     "./subagent": {
       "types": "./dist/subagent/index.d.ts",

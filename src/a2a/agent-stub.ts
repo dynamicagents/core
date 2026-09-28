@@ -5,19 +5,19 @@ import type { HumanReply } from "./hitl.js";
 import type { AcceptedTurn } from "./executor.js";
 
 /**
- * The task-lifecycle surface core calls on an agent Durable Object, declared
- * structurally so core's edge never imports the agent class.
+ * The task-lifecycle surface core calls on a task host Durable Object, declared
+ * structurally so core's edge never imports the host class.
  *
- * `A2AAgent` implements it. A consumer's `DurableObjectStub<MyAgent>` satisfies
+ * `TaskHost` implements it. A consumer's `DurableObjectStub<MyHost>` satisfies
  * it by construction: Cloudflare's RPC type mapping wraps each return in
  * `Promise<Serializable<T>>`, and every type below is already `Serializable` —
  * that is precisely why {@link PlainTask} exists (see {@link file://./task.ts}).
  */
 export interface TaskAgent {
   /**
-   * Record (or reuse) the `submitted` task for a turn and submit the turn.
-   * **Idempotent on `messageId`**: the gatekeeper retries dispatch, and a turn
-   * runs once.
+   * Record (or reuse) the `submitted` task for a message and start its
+   * workflow. **Idempotent on `messageId`**: the gatekeeper retries dispatch,
+   * and a task runs once.
    */
   acceptTask(turn: AcceptedTurn): Promise<PlainTask>;
 

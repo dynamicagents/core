@@ -17,7 +17,7 @@ import type { GatekeeperIdentity } from "./verify.js";
  *
  * Deliberately neutral about what a workspace is: `GatekeeperIdentity.workspaceId`
  * is whatever the calling gatekeeper partitions by, and core does not know that it
- * is a Slack team. Override `A2AAgent.callerContext` for a deployment that
+ * is a Slack team. Override `TaskHost.callerContext` for a deployment that
  * wants to name it.
  */
 export function callerContext(identity: GatekeeperIdentity): string {

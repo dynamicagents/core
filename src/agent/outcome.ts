@@ -32,15 +32,18 @@ export interface TurnOutcome {
 type Part = UIMessage["parts"][number];
 
 /**
- * Read one task's turn: every assistant message after the last user message
- * stamped with this task id. Think persists `metadata.turnMetadata` on the
+ * Read one job's turn: every assistant message after the last user message
+ * stamped with this job id. Think persists `metadata.turnMetadata` on the
  * submitted message so a recovered turn resolves the same way.
  */
-export function readTurn(messages: UIMessage[], taskId: string): TurnOutcome {
+export function readTurn(
+  messages: UIMessage[],
+  stepJobId: string
+): TurnOutcome {
   let start = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
-    if (message.role === "user" && taskIdOf(message) === taskId) {
+    if (message.role === "user" && stepJobIdOf(message) === stepJobId) {
       start = i;
       break;
     }
@@ -75,18 +78,18 @@ export function readRunSummary(messages: UIMessage[]): string {
     .join("\n");
 }
 
-/** The task a message was submitted for, from its `turnMetadata`. */
-export function taskIdOf(message: UIMessage): string | undefined {
+/** The step job a message was submitted for, from its `turnMetadata`. */
+export function stepJobIdOf(message: UIMessage): string | undefined {
   const metadata = message.metadata as
-    { turnMetadata?: { taskId?: unknown } } | undefined;
-  const taskId = metadata?.turnMetadata?.taskId;
-  return typeof taskId === "string" ? taskId : undefined;
+    { turnMetadata?: { stepJobId?: unknown } } | undefined;
+  const stepJobId = metadata?.turnMetadata?.stepJobId;
+  return typeof stepJobId === "string" ? stepJobId : undefined;
 }
 
-/** The task of the latest user message — the turn a recovery is about. */
-export function latestTaskId(messages: UIMessage[]): string | undefined {
+/** The job of the latest user message — the turn a recovery is about. */
+export function latestStepJobId(messages: UIMessage[]): string | undefined {
   for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === "user") return taskIdOf(messages[i]);
+    if (messages[i].role === "user") return stepJobIdOf(messages[i]);
   }
   return undefined;
 }

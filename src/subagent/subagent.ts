@@ -23,7 +23,7 @@ import { readRunSummary } from "../agent/outcome.js";
 
 /**
  * A sub-agent: its own Durable Object facet with its own messages, recovery and
- * resumable stream, dispatched by an `A2AAgent` through `runAgentTool`. Nothing
+ * resumable stream, dispatched by a `StepAgent` through `runAgentTool`. Nothing
  * here knows about A2A — the task is the parent's.
  */
 

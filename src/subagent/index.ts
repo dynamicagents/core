@@ -1,5 +1,5 @@
 /**
- * `@dynamicagents/core/subagent` — the child an `A2AAgent` dispatches.
+ * `@dynamicagents/core/subagent` — the child a `StepAgent` dispatches.
  *
  * {@link SubAgent} is the Think agent a starter subclasses once per
  * `SubAgentSpec`; the spec itself is contract, exported from the package root,

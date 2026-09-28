@@ -37,9 +37,9 @@ import {
  * expect(accepted.status.state).toBe(TaskState.TASK_STATE_SUBMITTED);
  * ```
  *
- * The accept is synchronous; the turn runs afterwards on the agent's own alarm,
- * so there is nothing to await. Watch for its effect instead: every callback the
- * agent posts lands in {@link AgentHarness.callbacks}, and
+ * The accept is synchronous; the task runs afterwards, in its workflow and on
+ * its step agents' alarms, so there is nothing to await. Watch for its effect
+ * instead: every callback the host posts lands in {@link AgentHarness.callbacks}, and
  * {@link AgentHarness.waitForTerminal} waits for the one that settles a task.
  */
 

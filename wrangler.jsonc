@@ -14,14 +14,20 @@
   // among others).
   "compatibility_flags": ["nodejs_compat"],
 
-  // `A2AAgent` requires it. Nothing in the suite calls it: every model is a
+  // `StepAgent` requires it. Nothing in the suite calls it: every model is a
   // scripted one, and `vitest.config.ts` keeps the binding local.
   "ai": { "binding": "AI" },
 
   "durable_objects": {
     "bindings": [
+      // The task host the edge addresses, and the step agents its pipeline
+      // runs jobs on. The host's `hostBinding` names its key here: a
+      // workflow's callbacks and steps reach it through that, not its class.
+      { "name": "TEST_HOST", "class_name": "TestHost" },
       { "name": "TEST_AGENT", "class_name": "TestAgent" },
+      { "name": "TEST_STEP_B", "class_name": "TestStepB" },
       { "name": "CAPPED_AGENT", "class_name": "CappedAgent" },
+      { "name": "STALE_AGENT", "class_name": "StaleAgent" },
       { "name": "ARTIFACTS", "class_name": "Artifacts" },
       // The `/alarm` specs' hosts, `PlainScheduled` and `DelegatingScheduled` —
       // see `test/worker.ts`.
@@ -29,6 +35,17 @@
       { "name": "DELEGATING_SCHEDULED", "class_name": "DelegatingScheduled" }
     ]
   },
+
+  // `TestTask` is the pipeline every task runs; `NoRunTask` inherits `run()`,
+  // which the base class refuses.
+  "workflows": [
+    { "name": "test-task", "binding": "TEST_TASK", "class_name": "TestTask" },
+    {
+      "name": "test-bad-task",
+      "binding": "TEST_BAD_TASK",
+      "class_name": "NoRunTask"
+    }
+  ],
 
   // The sub-agent facets are absent on purpose: a facet lives beneath the agent
   // that created it and needs no binding or tag in a deployment. The pool needs
@@ -41,6 +58,10 @@
     {
       "tag": "v2",
       "new_sqlite_classes": ["PlainScheduled", "DelegatingScheduled"]
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["TestHost", "TestStepB", "StaleAgent"]
     }
   ]
 }

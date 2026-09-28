@@ -134,7 +134,7 @@ export async function transcribeNote(
  *
  * The RPC is best-effort where {@link transcribeNote}'s is not, and the
  * difference is what the caller can still do about it. This runs from
- * `A2AAgent`'s settle path, *after* the terminal row is durable and with
+ * `TaskHost`'s settle path, *after* the terminal row is durable and with
  * nothing left to retry — so a store that will not take the settle must not turn a
  * task that finished into a call that failed. The binding itself is checked
  * outside that, because an unbound namespace is a wiring fault rather than an

@@ -36,7 +36,7 @@ export interface ExecutorConfig {
 /**
  * A2A executor for the **async accept + notify** contract. On `SendMessage` it
  * does not block on generation: one `acceptTask` call records the `submitted`
- * task in the caller's object and submits its turn durably, both idempotent on
+ * task in the caller's task host and starts its workflow durably, both idempotent on
  * `messageId`, and the accepted task is published at once as the response. The
  * reply is POSTed to the gatekeeper's push webhook out of band.
  *

@@ -10,19 +10,20 @@ import { buildInputRequiredTask } from "../a2a/hitl.js";
 import { buildCompletedTask, buildFailedTask } from "../a2a/notify.js";
 import { testTask } from "../testing/fixtures.js";
 import type { TestEnv } from "../../test/worker.js";
-import { A2ATasks, TASK_RETENTION_MS } from "./tasks.js";
+import { TASK_RETENTION_MS } from "../ledger.js";
+import { A2ATasks, type OwedAnswer } from "./tasks.js";
 
 /**
- * The ledger's guarded writes, one invariant each. Every one is a race that
- * reaches the gatekeeper as a wrong callback if it regresses.
+ * The host's ledger's guarded writes, one invariant each. Every one is a race
+ * that reaches the gatekeeper as a wrong callback if it regresses.
  */
 
 const testEnv = env as unknown as TestEnv;
 
 /** A ledger over a fresh object's SQLite. */
 async function withLedger<R>(fn: (ledger: A2ATasks) => R): Promise<R> {
-  const stub = testEnv.TEST_AGENT.get(
-    testEnv.TEST_AGENT.idFromName(`ledger:${crypto.randomUUID()}`)
+  const stub = testEnv.TEST_HOST.get(
+    testEnv.TEST_HOST.idFromName(`ledger:${crypto.randomUUID()}`)
   );
   return runInDurableObject(stub, (instance) => {
     const agent = instance as unknown as {
@@ -91,6 +92,18 @@ describe("transitions", () => {
     });
   });
 
+  it("binds a started task once, and sweeps up only one never bound", async () => {
+    await withLedger((ledger) => {
+      accept(ledger, "t1", "m1");
+      accept(ledger, "t2", "m2");
+      ledger.bind("t2");
+      ledger.markWorking("t2");
+      expect(ledger.unbound()).toEqual(["t1"]);
+      expect(ledger.openBound()).toEqual(["t2"]);
+      expect(ledger.row("t2")?.bound).toBe(true);
+    });
+  });
+
   it("settles once, owing the callback and the hooks in the same write", async () => {
     await withLedger((ledger) => {
       accept(ledger);
@@ -98,6 +111,8 @@ describe("transitions", () => {
       expect(ledger.settle(buildCompletedTask("t1", "c1", "done"))).toBe(true);
       expect(ledger.row("t1")?.deliveryKey).toBe("completed");
       expect(ledger.pendingHooks()).toEqual(["t1"]);
+      // The workflow finished it: nothing is left running to stop.
+      expect(ledger.row("t1")?.stopPending).toBe(false);
       expect(ledger.settle(buildFailedTask("t1", "c1", "no"))).toBe(false);
       expect(ledger.row("t1")?.state).toBe("completed");
 
@@ -108,14 +123,31 @@ describe("transitions", () => {
     });
   });
 
-  it("owes the hooks, and no callback, for a cancel — once", async () => {
+  it("owes the stop and the hooks, and no callback, for a cancel — once", async () => {
     await withLedger((ledger) => {
       accept(ledger);
       expect(ledger.cancel("t1")).not.toBeNull();
       expect(ledger.row("t1")?.deliveryKey).toBeNull();
+      expect(ledger.row("t1")?.stopPending).toBe(true);
+      expect(ledger.pendingStops()).toEqual(["t1"]);
       expect(ledger.pendingHooks()).toEqual(["t1"]);
+      ledger.stopped("t1");
+      expect(ledger.row("t1")?.stopPending).toBe(false);
+      expect(ledger.pendingStops()).toEqual([]);
       // A replay of the cancel is not a second transition.
       expect(ledger.cancel("t1")).toBeNull();
+    });
+  });
+
+  it("owes the stop with a settle the host makes while the run still goes", async () => {
+    await withLedger((ledger) => {
+      accept(ledger);
+      ledger.markWorking("t1");
+      const failed = buildFailedTask("t1", "c1", "expired");
+      expect(ledger.settle(failed, { stop: true })).toBe(true);
+      expect(ledger.row("t1")).toEqual(
+        expect.objectContaining({ stopPending: true, hooksPending: true })
+      );
     });
   });
 
@@ -236,7 +268,11 @@ describe("a task parked on a question", () => {
     prompt: "Which one?",
     allowFreeform: true
   };
-  const answer = { id: "answer:m2", text: "the first" };
+  const answer: OwedAnswer = {
+    id: "answer:m2",
+    requestId: request.requestId,
+    text: "the first"
+  };
 
   it("parks a working task, and resumes it once", async () => {
     await withLedger((ledger) => {
@@ -254,7 +290,7 @@ describe("a task parked on a question", () => {
     });
   });
 
-  it("owes the answer's turn and drops the question's callback, in the resume's write", async () => {
+  it("owes the answer's relay and drops the question's callback, in the resume's write", async () => {
     await withLedger((ledger) => {
       accept(ledger);
       ledger.markWorking("t1");
@@ -297,6 +333,25 @@ describe("a task parked on a question", () => {
     });
   });
 
+  it("holds one question: the same park re-run, never another in its place", async () => {
+    await withLedger((ledger) => {
+      accept(ledger);
+      ledger.markWorking("t1");
+      const parked = buildInputRequiredTask("t1", "c1", request);
+      expect(ledger.park(parked, request)).toBe(true);
+      expect(ledger.park(parked, request)).toBe(true);
+
+      const other = { ...request, requestId: "t1:call-2" };
+      expect(
+        ledger.park(buildInputRequiredTask("t1", "c1", other), other)
+      ).toBe(false);
+      expect(ledger.row("t1")?.request?.requestId).toBe(request.requestId);
+      expect(ledger.row("t1")?.deliveryKey).toBe(
+        `input-required:${request.requestId}`
+      );
+    });
+  });
+
   it("parks only a task that is working", async () => {
     await withLedger((ledger) => {
       accept(ledger);
@@ -314,124 +369,6 @@ describe("a task parked on a question", () => {
       ledger.park(buildInputRequiredTask("t1", "c1", request), request);
       expect(ledger.cancel("t1")).not.toBeNull();
       expect(ledger.row("t1")?.request).toBeNull();
-    });
-  });
-});
-
-describe("work", () => {
-  it("holds a task open only for detached runs and waits", async () => {
-    await withLedger((ledger) => {
-      accept(ledger);
-      ledger.addWork({ workId: "a", taskId: "t1", kind: "awaited", name: "C" });
-      expect(ledger.openWork("t1")).toBe(0);
-      ledger.addWork({
-        workId: "d",
-        taskId: "t1",
-        kind: "detached",
-        name: "C"
-      });
-      ledger.addWork({
-        workId: "w",
-        taskId: "t1",
-        kind: "wait",
-        name: "check_back"
-      });
-      expect(ledger.openWork("t1")).toBe(2);
-      expect(ledger.openWorkRows("t1")).toHaveLength(3);
-    });
-  });
-
-  it("closes a row once, so a redelivered finish follows up once", async () => {
-    await withLedger((ledger) => {
-      ledger.addWork({
-        workId: "d",
-        taskId: "t1",
-        kind: "detached",
-        name: "C"
-      });
-      expect(ledger.closeWork("d")).toBe(true);
-      expect(ledger.closeWork("d")).toBe(false);
-      expect(ledger.openWork("t1")).toBe(0);
-    });
-  });
-
-  it("records a work row once, whatever writes it again", async () => {
-    await withLedger((ledger) => {
-      ledger.addWork({
-        workId: "d",
-        taskId: "t1",
-        kind: "detached",
-        name: "C"
-      });
-      ledger.closeWork("d");
-      ledger.addWork({
-        workId: "d",
-        taskId: "t1",
-        kind: "detached",
-        name: "C"
-      });
-      expect(ledger.work("d")?.open).toBe(false);
-    });
-  });
-
-  it("claims a run's settle once, and keeps what prepare returned for it", async () => {
-    await withLedger((ledger) => {
-      ledger.addWork({
-        workId: "d",
-        taskId: "t1",
-        kind: "detached",
-        name: "C",
-        runtime: { lease: "x" }
-      });
-      expect(ledger.work("d")?.runtime).toEqual({ lease: "x" });
-      expect(ledger.claimSettle("d")).toBe(true);
-      expect(ledger.claimSettle("d")).toBe(false);
-    });
-  });
-
-  it("closes a row and owes its follow-up in one write, holding the task until that turn has run", async () => {
-    await withLedger((ledger) => {
-      ledger.addWork({
-        workId: "d",
-        taskId: "t1",
-        kind: "detached",
-        name: "C"
-      });
-      const followUp = { id: "finish:d", text: "done" };
-      expect(ledger.beginFollowUp("d", followUp)).toBe(true);
-      expect(ledger.openWork("t1")).toBe(1);
-      // A redelivery neither reopens nor re-records it.
-      expect(ledger.beginFollowUp("d", { id: "x", text: "y" })).toBe(false);
-      expect(ledger.followUp("d")).toEqual(followUp);
-      expect(ledger.pendingFollowUps()).toEqual(["d"]);
-
-      ledger.endFollowUp("d");
-      expect(ledger.followUp("d")).toBeNull();
-      expect(ledger.pendingFollowUps()).toEqual([]);
-      expect(ledger.openWork("t1")).toBe(0);
-    });
-  });
-
-  it("attaches a schedule only to a wait that is still open", async () => {
-    await withLedger((ledger) => {
-      ledger.addWork({ workId: "w", taskId: "t1", kind: "wait", name: "cb" });
-      expect(ledger.setWorkSchedule("w", "s1")).toBe(true);
-      ledger.closeWork("w");
-      expect(ledger.setWorkSchedule("w", "s2")).toBe(false);
-      expect(ledger.work("w")?.scheduleId).toBe("s1");
-    });
-  });
-
-  it("maps a run back to its task", async () => {
-    await withLedger((ledger) => {
-      ledger.addWork({
-        workId: "d",
-        taskId: "t9",
-        kind: "detached",
-        name: "C"
-      });
-      expect(ledger.work("d")?.taskId).toBe("t9");
-      expect(ledger.work("nope")).toBeNull();
     });
   });
 });
