@@ -212,10 +212,6 @@ export class MyAgent extends StepAgent<Env> {
     });
   }
 
-  protected formatContinuation() {
-    return "Carry on from where you stopped.";
-  }
-
   configureContext() {
     return [soulBlock, ...super.configureContext()];
   }
@@ -242,11 +238,11 @@ calling tools, and its last words are its reply. On top of that, core gives the 
 next turn — and `search_history` over the conversation's own full-text index.
 `check_back` is opt-in: `check_back: this.checkBackTool()` in `getTools()` lets the
 model put a job down and pick it up later, as a scheduled wake rather than a wait
-inside the turn. A turn that nears the runtime's fifteen-minute ceiling stops taking
-steps and carries on in a continuation turn that opens with `formatContinuation()`;
-`longestStepMs` is how long one step may take, and an agent overrides it for a model
-that measures differently. A turn for a job that has ended — canceled, failed,
-completed — is not recovered, and every tool it calls is refused.
+inside the turn. A turn runs inside the object's alarm, which the runtime stops after
+fifteen minutes, so work that can run longer belongs outside it — a detached
+sub-agent, or a `check_back` wake. A turn cut there fails its job. A turn for a job
+that has ended — canceled, failed, completed — is not recovered, and every tool it
+calls is refused.
 
 What a job's `role` means, and what a retry should look at, are the agent's to say:
 `formatStepJobInput(job)` briefs the model ahead of the input, and `turnStepJob()` gives
@@ -553,16 +549,14 @@ The harness both predecessor agents grew, shipped so you don't grow it a third t
 
 ## What core deliberately does _not_ contain
 
-- **Prompt copy of any kind.** Not a soul, not a user-facing failure message, not
-  the words a continuation turn opens with: the host's `copy` and a step agent's
-  `formatContinuation` are abstract, because a run must never execute under an
-  identity nobody chose.
+- **Prompt copy of any kind.** Not a soul, not a user-facing failure message: the
+  host's `copy` is abstract, because a run must never execute under an identity
+  nobody chose.
 - **A loop.** Think runs the turn. Core adds the task host, the workflow and the step
   job around it.
 - **Numbers.** Model ids, compaction thresholds, output ceilings are the agent's.
   There are no budgets: the gatekeeper cancels a task that has not settled within the
-  hour. The exception is `longestStepMs`, the step half of the runtime's turn
-  ceiling: a default, which an agent overrides for its own model.
+  hour.
 - **A model fallback.** A transient failure is retried by the AI SDK and an
   interrupted turn is continued by Think's recovery.
 - Browser tools, shell, a workspace backend. All optional → plugins.

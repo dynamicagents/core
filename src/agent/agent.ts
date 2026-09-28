@@ -26,7 +26,6 @@ import {
   hasToolCall,
   tool,
   type LanguageModel,
-  type StopCondition,
   type Tool,
   type ToolSet,
   type UIMessage
@@ -80,26 +79,12 @@ export interface CheckBackWake {
   why: string;
 }
 
-/** What `onContinue` is handed by the schedule a turn's deadline created. */
-interface ContinueWake {
-  stepJobId: string;
-  workId: string;
-}
-
 /** How a queued job that must land is retried. */
 const DELIVERY_RETRY = {
   maxAttempts: 8,
   baseDelayMs: 2_000,
   maxDelayMs: 300_000
 };
-
-/**
- * A turn runs inside the object's alarm, and the platform stops an alarm
- * invocation after fifteen minutes of wall-clock time. Think's
- * `submissionRecoveryStaleMs` assumes the same: past it, a running submission
- * is marked `error`.
- */
-export const TURN_CEILING_MS = 15 * 60 * 1000;
 
 /** Who wrote a note: the sub-agent class and its per-parent ordinal. */
 interface NoteSource {
@@ -129,8 +114,7 @@ interface A2AConfig {
  *  - **A job can outlive the turn that started it.** Work that may run past a
  *    turn is dispatched detached or scheduled; the job stays `working` while
  *    the ledger holds open work for it, and the turn that ends with none is the
- *    one that answers. A turn nearing the runtime's ceiling stops and carries on
- *    in the next, the same way.
+ *    one that answers.
  *  - **`onSubmissionStatus` is not a delivery channel.** It fires inside the
  *    turn slot and its errors are only logged, so it does the guarded write —
  *    which owes the report in the same write — and hands the report to a durable
@@ -139,9 +123,9 @@ interface A2AConfig {
  *  - **A turn for a job that has ended does nothing.** It is not recovered,
  *    its tools are refused, and it stops at its next step.
  *
- * A subclass supplies the model, the compaction values and the words a
- * continuation turn opens with; core ships no prompt copy. A subclass that
- * overrides a Think hook this class implements calls `super`.
+ * A subclass supplies the model and the compaction values; core ships no
+ * prompt copy. A subclass that overrides a Think hook this class implements
+ * calls `super`.
  */
 export abstract class StepAgent<
   Env extends Cloudflare.Env & CoreEnv = Cloudflare.Env & CoreEnv
@@ -173,13 +157,6 @@ export abstract class StepAgent<
   protected abstract readonly keepRecentTokens: number;
   /** Output ceiling per step. Unset, the provider's default applies. */
   protected readonly maxOutputTokens?: number;
-  /**
-   * The longest one step can take — a model call and the tools it runs. A turn
-   * takes no new step once less than this is left of {@link TURN_CEILING_MS}.
-   * Measured, not chosen: a single GLM step took over three minutes live.
-   * Override for a model that measures differently.
-   */
-  protected readonly longestStepMs: number = 4 * 60 * 1000;
 
   /** This agent's plugins. Default: none. */
   getPlugins(): AgentPlugin<Env>[] {
@@ -196,8 +173,6 @@ export abstract class StepAgent<
   #plugins?: AssembledPlugins<Env>;
   #buffered = "";
   #flushed = false;
-  /** When the alarm invocation in flight began: where a turn's clock starts. */
-  #invokedAt: number | undefined;
 
   protected get plugins(): AssembledPlugins<Env> {
     return (this.#plugins ??= assemblePlugins(this.getPlugins(), this.env));
@@ -237,21 +212,6 @@ export abstract class StepAgent<
     }
     for (const { stepJobId, n } of this.ledger.unsent()) {
       await this.#queueReport(stepJobId, n);
-    }
-  }
-
-  /**
-   * A submitted turn runs inside a queue job on the alarm, after every job due
-   * before it — each of which spends the same invocation's wall clock. So a
-   * turn's deadline is measured from when the invocation began, not from when
-   * the turn did.
-   */
-  override async alarm(): Promise<void> {
-    this.#invokedAt = Date.now();
-    try {
-      await super.alarm();
-    } finally {
-      this.#invokedAt = undefined;
     }
   }
 
@@ -343,8 +303,7 @@ export abstract class StepAgent<
   /**
    * A turn ends on `ask_user` — it waits for a person — and on `check_back`,
    * which has scheduled its own wake. Without them the loop would run another
-   * step on a turn that is finished. It ends too once its job has ended, and
-   * once it nears the ceiling, when it carries on in the next turn.
+   * step on a turn that is finished. It ends too once its job has ended.
    *
    * A turn for a job that has ended is offered no tools. A subclass that sets
    * `activeTools` keeps that empty list; {@link beforeToolCall} refuses the
@@ -353,7 +312,6 @@ export abstract class StepAgent<
   override beforeTurn(
     _ctx: TurnContext
   ): TurnConfig | void | Promise<TurnConfig | void> {
-    const since = this.#invokedAt ?? Date.now();
     const stepJobId = this.turnStepJobId();
     const closed = stepJobId !== undefined && this.ledger.closed(stepJobId);
     return {
@@ -362,10 +320,7 @@ export abstract class StepAgent<
         hasToolCall(CHECK_BACK_TOOL_NAME),
         ...(stepJobId === undefined
           ? []
-          : [
-              () => this.ledger.closed(stepJobId),
-              this.#deadline(stepJobId, since)
-            ])
+          : [() => this.ledger.closed(stepJobId)])
       ],
       ...(closed ? { activeTools: [] } : {}),
       ...(this.maxOutputTokens !== undefined
@@ -387,51 +342,6 @@ export abstract class StepAgent<
       return { action: "block", reason: TASK_ENDED };
     }
   }
-
-  /**
-   * A turn stops taking steps once less than {@link longestStepMs} is left of
-   * the ceiling, and its job carries on: the stop does what `check_back` does
-   * — a wait, and a wake at once — so settlement finds open work and the
-   * continuation turn picks the job up.
-   *
-   * The SDK evaluates every stop condition together, and only after a step
-   * whose tool calls all ran. `ask_user` never ends a step that way; a
-   * `check_back` step has scheduled its own wake, and is left to it.
-   */
-  #deadline(stepJobId: string, since: number): StopCondition<ToolSet> {
-    return async ({ steps }) => {
-      if (Date.now() - since < TURN_CEILING_MS - this.longestStepMs) {
-        return false;
-      }
-      const calls = steps[steps.length - 1]?.toolCalls ?? [];
-      if (calls.some((c) => c.toolName === CHECK_BACK_TOOL_NAME)) return false;
-      if (this.ledger.closed(stepJobId)) return false;
-      const workId = `${stepJobId}:${this.ledger.nextPushKey(stepJobId, "continue")}`;
-      await this.#wakeLater(stepJobId, workId, "continue", 0, "onContinue", {
-        stepJobId,
-        workId
-      } satisfies ContinueWake);
-      return true;
-    };
-  }
-
-  /** The wake a turn's deadline scheduled: a continuation turn. */
-  async onContinue(wake: ContinueWake): Promise<void> {
-    await ensureStarted(this);
-    const job = this.ledger.job(wake.stepJobId);
-    if (!job || this.ledger.closed(wake.stepJobId)) return;
-    this.ledger.beginFollowUp(wake.workId, {
-      id: `continue:${wake.workId}`,
-      text: this.formatContinuation(job)
-    });
-    await this.submitFollowUp({ workId: wake.workId });
-  }
-
-  /**
-   * What a continuation turn opens with, once a turn stopped short of the
-   * ceiling. The agent's words: core writes no prompt copy.
-   */
-  protected abstract formatContinuation(job: StepJob): string;
 
   /**
    * Push what the model wrote before a tool call, the moment the call starts.
@@ -1131,14 +1041,23 @@ export abstract class StepAgent<
       execute: async ({ seconds, why }, { toolCallId }) => {
         const stepJobId = this.#requireTurnStepJobId();
         const workId = `wait:${toolCallId}`;
-        await this.#wakeLater(
-          stepJobId,
+        // The wait first, so the job cannot settle before its wake.
+        this.ledger.addWork({
           workId,
-          CHECK_BACK_TOOL_NAME,
+          stepJobId,
+          kind: "wait",
+          name: CHECK_BACK_TOOL_NAME
+        });
+        const schedule = await this.schedule<CheckBackWake>(
           seconds,
           "onCheckBack",
-          { stepJobId, workId, seconds, why } satisfies CheckBackWake
+          { stepJobId, workId, seconds, why }
         );
+        // A cancel while `schedule` ran closed the wait with no schedule to
+        // cancel: this wake is an orphan, so cancel it here.
+        if (!this.ledger.setWorkSchedule(workId, schedule.id)) {
+          await this.cancelSchedule(schedule.id);
+        }
         return { waiting: seconds };
       }
     });
@@ -1153,27 +1072,6 @@ export abstract class StepAgent<
       text: `Waited ${wake.seconds}s: ${wake.why}`
     });
     await this.submitFollowUp({ workId: wake.workId });
-  }
-
-  /**
-   * A wait that holds the job open, and the schedule that ends it. The wait is
-   * written first, so the job cannot settle before its wake.
-   */
-  async #wakeLater(
-    stepJobId: string,
-    workId: string,
-    name: string,
-    seconds: number,
-    callback: "onCheckBack" | "onContinue",
-    payload: CheckBackWake | ContinueWake
-  ): Promise<void> {
-    this.ledger.addWork({ workId, stepJobId, kind: "wait", name });
-    const schedule = await this.schedule(seconds, callback, payload);
-    // A cancel while `schedule` ran closed the wait with no schedule to
-    // cancel: this wake is an orphan, so cancel it here.
-    if (!this.ledger.setWorkSchedule(workId, schedule.id)) {
-      await this.cancelSchedule(schedule.id);
-    }
   }
 
   // --- the transcript --------------------------------------------------------

@@ -12,7 +12,7 @@ import { z } from "zod";
 import { handleArtifactRoute } from "../src/artifacts/route.js";
 import type { AgentManifest } from "../src/a2a/card.js";
 import type { CoreEnv } from "../src/env.js";
-import { StepAgent, TURN_CEILING_MS } from "../src/agent/agent.js";
+import { StepAgent } from "../src/agent/agent.js";
 import { TaskHost, type A2ACopy } from "../src/task/host.js";
 import { TaskWorkflow, type TaskStep } from "../src/workflow/workflow.js";
 import type {
@@ -49,7 +49,6 @@ export interface TestEnv extends CoreEnv {
   TEST_AGENT: DurableObjectNamespace<TestAgent>;
   TEST_STEP_B: DurableObjectNamespace<TestStepB>;
   CAPPED_AGENT: DurableObjectNamespace<CappedAgent>;
-  DEADLINE_AGENT: DurableObjectNamespace<DeadlineAgent>;
   TEST_TASK: Workflow<TaskParams>;
   TEST_BAD_TASK: Workflow<TaskParams>;
 }
@@ -59,9 +58,6 @@ export const COPY: A2ACopy = {
   emptyReply: "I finished, but had nothing to say.",
   questionExpired: "Nobody answered in time, so I stopped."
 };
-
-/** What a continuation turn opens with. */
-export const CONTINUE = "continue";
 
 /** The text of the most recent tool result, as the model was shown it. */
 function lastToolOutput(view: ModelTurnView): string {
@@ -80,37 +76,6 @@ function after(text: string, prefix: string): string | undefined {
   return text.startsWith(prefix) ? text.slice(prefix.length) : undefined;
 }
 
-function userText(message: ModelTurnView["prompt"][number]): string {
-  if (message.role !== "user") return "";
-  return message.content
-    .filter((part) => part.type === "text")
-    .map((part) => (part as { text: string }).text)
-    .join("")
-    .trim();
-}
-
-/**
- * `steps:<n>`: one tool step at a time until `n` have run, counted across the
- * continuation turns a deadline splits them into.
- */
-function stepsLoop(view: ModelTurnView): MockStep | undefined {
-  let done = 0;
-  for (let i = view.prompt.length - 1; i >= 0; i--) {
-    const message = view.prompt[i];
-    if (message.role === "tool") done++;
-    if (message.role !== "user") continue;
-    const text = userText(message);
-    const target = after(text, "steps:");
-    if (target !== undefined) {
-      return done < Number(target)
-        ? call("test_wait", { seconds: 0 }, `step ${done + 1}`)
-        : { text: `did ${target} steps` };
-    }
-    if (text !== CONTINUE) return undefined;
-  }
-  return undefined;
-}
-
 /**
  * The parent's script, keyed on the message that started the turn. Anything it
  * does not claim is echoed — which is how a follow-up turn answers: a finished
@@ -124,9 +89,6 @@ function parentRule(view: ModelTurnView): MockStep {
   if (["boom", "flaky", "broken"].includes(text)) {
     return { error: "told to fail" };
   }
-
-  const steps = stepsLoop(view);
-  if (steps) return steps;
 
   const answered = view.answered;
   const ask = after(text, "ask:");
@@ -359,10 +321,6 @@ export class TestAgent extends StepAgent<TestEnv> {
     return job.attempt > 1 ? `retry:${job.input}` : job.input;
   }
 
-  protected override formatContinuation(): string {
-    return CONTINUE;
-  }
-
   /**
    * An object whose name starts `noprogress:` drops live notes, so a spec can
    * prove the finish replay delivers them.
@@ -481,11 +439,6 @@ export class CappedAgent extends TestAgent {
 /** A second step agent class, so a pipeline can span two namespaces. */
 export class TestStepB extends TestAgent {}
 
-/** A step leaves no room at all: every step that calls a tool meets it. */
-export class DeadlineAgent extends TestAgent {
-  protected override readonly longestStepMs = TURN_CEILING_MS;
-}
-
 /** One task on the host, as JSON. */
 export interface TaskDebug {
   row: {
@@ -560,8 +513,7 @@ export class TestHost extends TaskHost<TestEnv> {
  *    feedback, and act once approved;
  *  - `role:<role>:<text>` — one step, with a role;
  *  - `say:<text>` — a progress line, then the one step;
- *  - `capped:<text>` / `deadline:<text>` — the one step, on
- *    {@link CappedAgent} / {@link DeadlineAgent};
+ *  - `capped:<text>` — the one step, on {@link CappedAgent};
  *  - `orphan:<text>` — the one step, beside a branch that throws while it works;
  *  - `twice:` — one label run twice;
  *  - `throw` — the pipeline throws;
@@ -650,14 +602,14 @@ export class TestTask extends TaskWorkflow<TestEnv> {
       return { reply: "never" };
     }
 
-    for (const [prefix, binding] of [
-      ["capped:", "CAPPED_AGENT"],
-      ["deadline:", "DEADLINE_AGENT"]
-    ] as const) {
-      const input = after(text, prefix);
-      if (input !== undefined) {
-        return { reply: await step.agent("main", { agent: binding, input }) };
-      }
+    const capped = after(text, "capped:");
+    if (capped !== undefined) {
+      return {
+        reply: await step.agent("main", {
+          agent: "CAPPED_AGENT",
+          input: capped
+        })
+      };
     }
 
     const said = after(text, "say:");

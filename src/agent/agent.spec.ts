@@ -43,7 +43,7 @@ import worker, {
 
 const testEnv = env as unknown as TestEnv;
 
-type AgentBinding = "TEST_AGENT" | "CAPPED_AGENT" | "DEADLINE_AGENT";
+type AgentBinding = "TEST_AGENT" | "CAPPED_AGENT";
 
 function harnessFor(label: string, binding: AgentBinding = "TEST_AGENT") {
   const key = `${label}:${crypto.randomUUID()}`;
@@ -875,44 +875,6 @@ describe("a turn for a job that has ended", () => {
         .some((p) => p.type === "text" && p.text === "went on")
     );
     expect(said).toBe(false);
-    await cancel(harness, accepted.id);
-  });
-});
-
-describe("a turn near the ceiling", () => {
-  it("stops, carries on in the next turn, and the job reports once", async () => {
-    const { harness, debug } = harnessFor("deadline", "DEADLINE_AGENT");
-    using _ = harness.interceptGatekeeper();
-
-    const accepted = await harness.send("deadline:steps:3");
-    const done = await harness.waitForTerminal(accepted.id);
-    expect(done.state).toBe("TASK_STATE_COMPLETED");
-    expect(done.text).toBe("did 3 steps");
-
-    const state = await debug(accepted.id);
-    expect(reportsOf(state)).toEqual(["completed"]);
-    // Every step that called a tool met the deadline, and was carried on.
-    const continued = state.work.filter((w) => w.name === "continue");
-    expect(continued).toHaveLength(3);
-    expect(continued.every((w) => !w.open)).toBe(true);
-    await pause(300);
-    expect(terminals(harness, accepted.id)).toHaveLength(1);
-  });
-
-  it("leaves a check_back step to its own wake", async () => {
-    const { harness, debug } = harnessFor("deadline-wait", "DEADLINE_AGENT");
-    using _ = harness.interceptGatekeeper();
-
-    const accepted = await harness.send("deadline:checkback:10");
-    await until(
-      "the wait to be recorded",
-      () => debug(accepted.id),
-      (d) => d.work.length > 0
-    );
-    await pause(1_000);
-    expect((await debug(accepted.id)).work.map((w) => w.name)).toEqual([
-      "check_back"
-    ]);
     await cancel(harness, accepted.id);
   });
 });

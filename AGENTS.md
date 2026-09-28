@@ -134,17 +134,16 @@ publish train (core → plugins → starter), so one repo is always briefly behi
 
 ## The line core does not cross
 
-**Core owns the task around Think, and ships no prompt copy and no numbers but
-`longestStepMs`.**
+**Core owns the task around Think, and ships no prompt copy and no numbers.**
 
 Think runs the turn — the loop, recovery, compaction, agent tools, actions. Core
 wraps it in a task, split across these roles, each the only owner of its state:
 
-| role                           | where           | owns                                                                                                                                                                                |
-| ------------------------------ | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| task host (`TaskHost`)         | `src/task/`     | the A2A task: its guarded ledger (`src/task/tasks.ts`), the push channel, the delivery outbox, the cancel ordering, retention, the transcript's settle, the end-of-task notice      |
-| task workflow (`TaskWorkflow`) | `src/workflow/` | the sequence of a task's steps and the state between them; the job ids and event types both sides derive (`src/workflow/keys.ts`)                                                   |
-| step agent (`StepAgent`)       | `src/agent/`    | a step job: its guarded ledger (`src/agent/step-jobs.ts`), the mapping from a turn's outcome to the job's report, a job that outlives its turn through open work, the turn deadline |
+| role                           | where           | owns                                                                                                                                                                           |
+| ------------------------------ | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| task host (`TaskHost`)         | `src/task/`     | the A2A task: its guarded ledger (`src/task/tasks.ts`), the push channel, the delivery outbox, the cancel ordering, retention, the transcript's settle, the end-of-task notice |
+| task workflow (`TaskWorkflow`) | `src/workflow/` | the sequence of a task's steps and the state between them; the job ids and event types both sides derive (`src/workflow/keys.ts`)                                              |
+| step agent (`StepAgent`)       | `src/agent/`    | a step job: its guarded ledger (`src/agent/step-jobs.ts`), the mapping from a turn's outcome to the job's report, a job that outlives its turn through open work               |
 
 Every one of those is an ordering an agent cannot vary and still be correct: a cancel
 decided by a probe instead of the guarded write's verdict is a canceled task that
@@ -161,15 +160,11 @@ still calls back `completed`.
 
 What is genuinely per-agent is explicit and mandatory:
 
-- **The words.** `TaskHost.copy` (the failed, empty and expired messages), a step
-  agent's `formatContinuation`, the soul, every block the model reads. Nothing has a
-  default.
+- **The words.** `TaskHost.copy` (the failed, empty and expired messages), the soul,
+  every block the model reads. Nothing has a default.
 - **The numbers.** The model, compaction thresholds, an output ceiling. Core sets no
   budget: the gatekeeper cancels a task that has not settled within the hour, so a
-  ceiling below that is arbitrary, and one above it is never reached. The exception
-  is `StepAgent.longestStepMs`, how long a single step may take. It is the
-  step half of the runtime's fifteen-minute turn ceiling, which core owns
-  (`TURN_CEILING_MS`), and it is a measurement an agent overrides for its own model.
+  ceiling below that is arbitrary, and one above it is never reached.
 
 So when adding to `/task`, `/workflow`, `/agent` or `/subagent`, the test is not
 "does an agent vary here" but "**could an agent vary here and still be correct**". A

@@ -10,7 +10,7 @@
  * state.
  */
 
-export { StepAgent, TURN_CEILING_MS, type CheckBackWake } from "./agent.js";
+export { StepAgent, type CheckBackWake } from "./agent.js";
 
 export {
   ASK_USER_TOOL_NAME,
