@@ -79,7 +79,10 @@ async function until<T>(
   for (;;) {
     const value = await read();
     if (ok(value)) return value;
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    if (Date.now() > deadline)
+      throw new Error(
+        `timed out waiting for ${what}: ${JSON.stringify(value)}`
+      );
     await pause(50);
   }
 }
@@ -576,11 +579,13 @@ describe("a turn the runtime cuts", () => {
   /**
    * Reset the object mid-step, its turn aged as one the runtime cuts at its
    * ceiling is: Think reads a turn's age from its chat fiber, its task run and
-   * its stream.
+   * its stream. `beforeCut` writes in the same call, so it holds past the
+   * abort.
    */
   async function cutMidStep(
     { stub, debug }: ReturnType<typeof harnessFor>,
-    taskId: string
+    taskId: string,
+    beforeCut?: (instance: TestAgent) => void
   ): Promise<void> {
     await until(
       "the turn to start",
@@ -588,7 +593,8 @@ describe("a turn the runtime cuts", () => {
       (d) => d.row?.state === "working"
     );
     await pause(1_000);
-    await runInDurableObject(stub(), (_instance, state) => {
+    await runInDurableObject(stub(), (instance: TestAgent, state) => {
+      beforeCut?.(instance);
       for (const table of [
         "cf_agents_runs",
         "cf_agents_task_runs",
@@ -671,18 +677,21 @@ describe("a turn the runtime cuts", () => {
     using _ = harness.interceptGatekeeper();
 
     const accepted = await harness.send("wait:4");
-    await cutMidStep(agent, accepted.id);
+    // The stop's first write, held, with the cut before it reached the turn.
+    // A cancel sent only after the cut races the restart's own recovery,
+    // which can finish the job first.
+    await cutMidStep(agent, accepted.id, (instance) => {
+      instance.ledger.cancel(`${accepted.id}:main`);
+    });
     await cancel(harness, accepted.id);
-    await until(
-      "the job to stop",
-      () => debug(accepted.id),
-      (d) => d.row?.state === "canceled"
-    );
 
     const next = await harness.send("echo:after");
     expect((await harness.waitForTerminal(next.id)).text).toBe("after");
     expect(terminals(harness, accepted.id)).toHaveLength(0);
-    expect(await submissions(stub)).toEqual(["aborted", "completed"]);
+    expect((await debug(accepted.id)).row?.state).toBe("canceled");
+    // Think ends a turn it did not continue as an error.
+    expect(await submissions(stub)).toEqual(["completed", "error"]);
+    expect(await said(stub, "waited 4")).toBe(0);
   });
 });
 
