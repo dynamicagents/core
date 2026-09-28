@@ -1,4 +1,9 @@
-import { AGENT_CARD_PATH, SendMessageRequest } from "@a2a-js/sdk";
+import {
+  AGENT_CARD_PATH,
+  SendMessageRequest,
+  Task,
+  TaskState
+} from "@a2a-js/sdk";
 import {
   DefaultRequestHandler,
   JsonRpcTransportHandler,
@@ -406,13 +411,14 @@ function readContinuation(rpcBody: {
  * the message id, so an answer that does arrive twice records once.
  *
  * The handler then loads the Task this has already resumed, so what the caller
- * is answered with is the Task as the reply left it.
+ * is answered with is the Task as the reply left it. `taken` is the agent's
+ * word on whether this reply was: see {@link answerEnded}.
  */
 async function recordReply(
   agent: TenantAgent,
   identity: GatekeeperIdentity,
   continuation: Continuation
-): Promise<{ error: { code: number; message: string } } | null> {
+): Promise<{ error: { code: number; message: string } } | { taken: boolean }> {
   const stub = agent.resolveAgent(identity);
   const { contextId, ...answer } = continuation;
   try {
@@ -430,8 +436,7 @@ async function recordReply(
         )
       };
     }
-    await stub.answerTask(answer);
-    return null;
+    return { taken: await stub.answerTask(answer) };
   } catch (err) {
     console.error("[worker] could not record a reply", {
       taskId: continuation.taskId,
@@ -441,6 +446,35 @@ async function recordReply(
       error: toJsonRpcError(new Error("the agent could not record the answer"))
     };
   }
+}
+
+/** The states a Task never leaves. */
+const TERMINAL_STATES: ReadonlySet<TaskState | undefined> = new Set([
+  TaskState.TASK_STATE_COMPLETED,
+  TaskState.TASK_STATE_FAILED,
+  TaskState.TASK_STATE_CANCELED,
+  TaskState.TASK_STATE_REJECTED
+]);
+
+/**
+ * The Task a reply ended, to answer its `SendMessage` with — or `null`, and the
+ * handler's answer stands.
+ *
+ * A reply can end its Task before the handler loads it: a pipeline that returns
+ * on the answer settles the Task while the reply's own request is in flight. The
+ * handler refuses a message onto a terminal Task, which would tell the caller an
+ * answer the run already took was not. A reply the agent did not take keeps the
+ * refusal — one onto a Task already closed, or one a cancel beat.
+ */
+async function answerEnded(
+  agent: TenantAgent,
+  identity: GatekeeperIdentity,
+  taskId: string,
+  taken: boolean
+): Promise<Task | null> {
+  if (!taken) return null;
+  const task = await agent.resolveAgent(identity).getTask(taskId);
+  return task && TERMINAL_STATES.has(task.status?.state) ? task : null;
 }
 
 /**
@@ -744,9 +778,11 @@ export function createA2AWorker<TEnv extends object>(
           toJsonRpcError(new RequestMalformedError(continuation.refused))
         );
       }
-      if (continuation) {
-        const refused = await recordReply(agent, identity, continuation);
-        if (refused) return jsonRpcErrorResponse(body, refused.error);
+      const recorded = continuation
+        ? await recordReply(agent, identity, continuation)
+        : null;
+      if (recorded && "error" in recorded) {
+        return jsonRpcErrorResponse(body, recorded.error);
       }
 
       const handler = new DefaultRequestHandler(
@@ -781,6 +817,24 @@ export function createA2AWorker<TEnv extends object>(
       // Streaming is not advertised; reject async generators outright.
       if (Symbol.asyncIterator in result) {
         return new Response("streaming not supported", { status: 501 });
+      }
+      if (continuation && recorded && "error" in result) {
+        const ended = await answerEnded(
+          agent,
+          identity,
+          continuation.taskId,
+          recorded.taken
+        );
+        if (ended) {
+          return Response.json(
+            {
+              jsonrpc: "2.0",
+              id: result.id,
+              result: { task: Task.toJSON(ended) }
+            },
+            { headers: extensionHeaders(context) }
+          );
+        }
       }
       return Response.json(result, { headers: extensionHeaders(context) });
     }
