@@ -790,8 +790,8 @@ describe("the host's own bookkeeping", () => {
         optionId: "option_1"
       });
       expect(instance.runs.wasAnswered(question.requestId)).toBe(false);
-      // The gatekeeper's retry.
-      await instance.answerTask({
+      // The gatekeeper's retry: not taken again, and it relays the one that was.
+      const taken = await instance.answerTask({
         taskId: task.id,
         messageId: "m-retry",
         reply: {
@@ -800,6 +800,7 @@ describe("the host's own bookkeeping", () => {
           answer: { answeredBy: "spec", optionId: "option_1" }
         }
       });
+      expect(taken).toBe(false);
     });
 
     const done = await harness.waitForTerminal(task.id);

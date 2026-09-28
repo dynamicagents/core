@@ -87,7 +87,7 @@ const handler = createA2AWorker<TestEnv>({
             return null;
           },
           async answerTask() {
-            return null;
+            return false;
           }
         }) as never
     }
@@ -277,7 +277,7 @@ describe("replying to a question through the harness", () => {
             },
             async answerTask(input: { taskId: string }) {
               replies.push(input);
-              return buildSubmittedTask(input.taskId, "ctx-1");
+              return true;
             }
           }) as never
       }

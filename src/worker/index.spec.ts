@@ -90,7 +90,7 @@ declare class SpecAgent implements TaskAgent {
     taskId: string;
     messageId: string;
     reply: HumanReply;
-  }): Promise<PlainTask | null>;
+  }): Promise<boolean>;
 }
 
 interface TestEnv extends A2ASecretsEnv {
@@ -896,10 +896,15 @@ describe("a message on an existing task", () => {
   /**
    * A tenant whose one Task is parked on a question, recording what reaches it.
    * `ends` has the answer settle the Task, as a pipeline that returns on it
-   * does; `closed` starts the Task already completed.
+   * does; `beaten` has a cancel land between the edge's read and the answer;
+   * `closed` starts the Task already completed.
    */
   function parkedTenant(
-    options: { recording?: "throws"; answer?: "ends"; closed?: true } = {}
+    options: {
+      recording?: "throws";
+      answer?: "ends" | "beaten";
+      closed?: true;
+    } = {}
   ) {
     const answered: unknown[] = [];
     // What the handler last wrote, so a read after its own write sees it — a
@@ -930,8 +935,14 @@ describe("a message on an existing task", () => {
           throw new Error("Durable Object reset");
         }
         answered.push(input);
+        if (options.answer === "beaten") {
+          stored = {
+            ...stored,
+            status: testStatus(TaskState.TASK_STATE_CANCELED)
+          };
+        }
         // A closed task has no question to answer, and changes nothing.
-        if (options.closed) return structuredClone(stored);
+        if (options.closed || options.answer === "beaten") return false;
         // Resumed, as the Durable Object resumes it: the handler loads the
         // Task after this, and answers with what it finds.
         stored = {
@@ -942,7 +953,7 @@ describe("a message on an existing task", () => {
               : TaskState.TASK_STATE_WORKING
           )
         };
-        return structuredClone(stored);
+        return true;
       }
     };
     const handler = createA2AWorker({
@@ -1037,6 +1048,16 @@ describe("a message on an existing task", () => {
     const res = await call(onto(answer));
     const body = await res.json<{ error?: { message: string } }>();
 
+    expect(body.error?.message).toMatch(/terminal state/);
+  });
+
+  it("refuses an answer a cancel beat, though the task was open when it arrived", async () => {
+    const { call, answered } = parkedTenant({ answer: "beaten" });
+
+    const res = await call(onto(answer));
+    const body = await res.json<{ error?: { message: string } }>();
+
+    expect(answered).toHaveLength(1);
     expect(body.error?.message).toMatch(/terminal state/);
   });
 

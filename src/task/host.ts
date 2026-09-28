@@ -215,16 +215,19 @@ export abstract class TaskHost<
    *
    * The resume owes the relay, so a failed send is retried and the start-up
    * sweep finishes one an eviction cut.
+   *
+   * Returns whether this reply was taken — resumed on, or an expiry queued —
+   * decided by the guarded write, so a cancel landing first makes it false.
    */
   async answerTask(input: {
     taskId: string;
     messageId: string;
     reply: HumanReply;
-  }): Promise<PlainTask | null> {
+  }): Promise<boolean> {
     await ensureStarted(this);
     const { taskId, messageId, reply } = input;
     const row = this.ledger.row(taskId);
-    if (!row) return null;
+    if (!row) return false;
     // An answer an earlier call resumed on and never relayed goes first.
     if (row.answer) await this.deliverAnswer({ taskId });
     const request = row.request;
@@ -233,11 +236,11 @@ export abstract class TaskHost<
         taskId,
         requestId: reply.requestId
       });
-      return this.ledger.get(taskId);
+      return false;
     }
     if (reply.kind === "timeout") {
       await this.queue("expireTask", { taskId, requestId: reply.requestId });
-      return this.ledger.get(taskId);
+      return true;
     }
     const { optionId, text } = reply.answer;
     const offered = offeredOptions(request);
@@ -246,7 +249,7 @@ export abstract class TaskHost<
         "[host] a reply picks an option the question never offered",
         { taskId, requestId: reply.requestId, optionId }
       );
-      return this.ledger.get(taskId);
+      return false;
     }
     if (
       optionId === undefined &&
@@ -257,7 +260,7 @@ export abstract class TaskHost<
         "[host] a typed reply to a question that takes only its options",
         { taskId, requestId: reply.requestId }
       );
-      return this.ledger.get(taskId);
+      return false;
     }
     const owed: OwedAnswer = {
       id: `answer:${messageId}`,
@@ -272,7 +275,7 @@ export abstract class TaskHost<
       return true;
     });
     if (resumed) await this.deliverAnswer({ taskId });
-    return this.ledger.get(taskId);
+    return resumed;
   }
 
   // --- what the workflow calls from its steps ----------------------------------

@@ -411,14 +411,14 @@ function readContinuation(rpcBody: {
  * the message id, so an answer that does arrive twice records once.
  *
  * The handler then loads the Task this has already resumed, so what the caller
- * is answered with is the Task as the reply left it. `open` says whether the
- * Task was still open when the reply was recorded: see {@link answerEnded}.
+ * is answered with is the Task as the reply left it. `taken` is the agent's
+ * word on whether this reply was: see {@link answerEnded}.
  */
 async function recordReply(
   agent: TenantAgent,
   identity: GatekeeperIdentity,
   continuation: Continuation
-): Promise<{ error: { code: number; message: string } } | { open: boolean }> {
+): Promise<{ error: { code: number; message: string } } | { taken: boolean }> {
   const stub = agent.resolveAgent(identity);
   const { contextId, ...answer } = continuation;
   try {
@@ -436,8 +436,7 @@ async function recordReply(
         )
       };
     }
-    await stub.answerTask(answer);
-    return { open: task ? !TERMINAL_STATES.has(task.status?.state) : false };
+    return { taken: await stub.answerTask(answer) };
   } catch (err) {
     console.error("[worker] could not record a reply", {
       taskId: continuation.taskId,
@@ -464,16 +463,16 @@ const TERMINAL_STATES: ReadonlySet<TaskState | undefined> = new Set([
  * A reply can end its Task before the handler loads it: a pipeline that returns
  * on the answer settles the Task while the reply's own request is in flight. The
  * handler refuses a message onto a terminal Task, which would tell the caller an
- * answer the run already took was not. A Task already closed when the reply
- * arrived keeps the refusal: nothing took that answer.
+ * answer the run already took was not. A reply the agent did not take keeps the
+ * refusal — one onto a Task already closed, or one a cancel beat.
  */
 async function answerEnded(
   agent: TenantAgent,
   identity: GatekeeperIdentity,
   taskId: string,
-  open: boolean
+  taken: boolean
 ): Promise<Task | null> {
-  if (!open) return null;
+  if (!taken) return null;
   const task = await agent.resolveAgent(identity).getTask(taskId);
   return task && TERMINAL_STATES.has(task.status?.state) ? task : null;
 }
@@ -824,7 +823,7 @@ export function createA2AWorker<TEnv extends object>(
           agent,
           identity,
           continuation.taskId,
-          recorded.open
+          recorded.taken
         );
         if (ended) {
           return Response.json(
