@@ -21,7 +21,7 @@ import {
 } from "../testing/harness.js";
 import { TEST_TENANT } from "../testing/auth.js";
 import { requireArtifactsStub } from "../artifacts/binding.js";
-import { refusedApprovalText, unrecordedApprovalText } from "./tools.js";
+import { UNAPPROVABLE_ARTIFACT, unrecordedApprovalText } from "./tools.js";
 import { SESSION_TRANSCRIPT_KIND } from "../artifacts/transcript.js";
 import type { StepJob, TaskParams } from "../workflow/types.js";
 import worker, {
@@ -400,6 +400,10 @@ describe("asking the caller to approve an artifact", () => {
     expect(question.prompt).toMatch(
       new RegExp(`^Approve this\\?\\n\\nhttps?://[^/]+/a/${token}$`)
     );
+    expect(question.artifact).toEqual({
+      id: token,
+      url: question.prompt.split("\n\n").at(-1)
+    });
   });
 
   it("locks an approved artifact, and tells the model", async () => {
@@ -509,8 +513,8 @@ describe("asking the caller to approve an artifact", () => {
   });
 
   /**
-   * Nothing is parked, and the job does not end on the call: the model is told
-   * in a turn of its own, and carries on from there.
+   * Nothing is parked, and the turn does not end on the call: the call fails,
+   * and the model reads why and carries on in the same turn.
    */
   it.each([
     ["one it does not know", async () => "Q".repeat(40)],
@@ -531,7 +535,7 @@ describe("asking the caller to approve an artifact", () => {
     const done = await harness.waitForTerminal(accepted.id);
 
     expect(done.state).toBe("TASK_STATE_COMPLETED");
-    expect(done.text).toBe(refusedApprovalText(artifact));
+    expect(done.text).toContain(UNAPPROVABLE_ARTIFACT);
     expect(
       harness.callbacks.some(
         (c) =>

@@ -238,10 +238,12 @@ that does not.
 calling tools, and its last words are its reply. On top of that, core gives the model
 `ask_user` — the job parks, the host asks the caller, and the answer is the job's
 next turn — and `search_history` over the conversation's own full-text index. An
-`ask_user` naming an `artifact` is an approval of it: the caller gets its link with
-Approve, Reject and a typed comment, the answer is recorded on the artifact, and
-approving it locks it. Which artifacts a model may ask about is `approvalArtifact`'s
-to say — by default, any that is not locked.
+`ask_user` naming an `artifact` is an approval of it: the question carries the
+artifact's id and link, the caller answers Approve, Reject or with a typed comment,
+the answer is filed on the artifact, and approving it locks it. Which artifacts a
+model may ask about is `mayAskApproval`'s to say — by default, any that is not
+locked — and it is checked when the model calls `ask_user`, so a refusal is an
+error the model reads in the same turn.
 `check_back` is opt-in: `check_back: this.checkBackTool()` in `getTools()` lets the
 model put a job down and pick it up later, as a scheduled wake rather than a wait
 inside the turn. A turn runs inside the object's alarm, which the runtime stops after

@@ -39,13 +39,6 @@ export interface PluginContext<Env = Cloudflare.Env> {
    * building tools — it belongs to the turn.
    */
   runtime(): Record<string, unknown> | undefined;
-  /**
-   * This deployment's public origin, for a link a plugin hands out — an
-   * artifact's, say. `undefined` until a turn has carried it here, and always
-   * in a sub-agent, which no turn reaches with one; a `prepare`, which runs on
-   * the parent, can pass it on through what it returns.
-   */
-  selfOrigin(): string | undefined;
 }
 
 /** A plugin's prompt block. `label` defaults to the plugin's name. */

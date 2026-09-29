@@ -1,4 +1,4 @@
-import { tool, type Tool } from "ai";
+import { tool, type StopCondition, type Tool, type ToolSet } from "ai";
 import {
   HITL_APPROVE_OPTION_ID,
   HITL_REJECT_OPTION_ID
@@ -93,12 +93,47 @@ export function unrecordedApprovalText(text: string): string {
 }
 
 /**
- * What the model reads when it asked for an approval of an artifact the agent
- * would not put to anyone: one it does not know, or one already locked.
+ * What the model reads when it names an artifact the agent will not put to the
+ * person: one it does not know, or one already locked.
  */
-export function refusedApprovalText(artifact: string): string {
-  return `Nothing was asked: \`${artifact}\` is not an artifact you can ask the person to approve — it is unknown here, or already approved. Ask again with the id you were given for it, or ask without one.`;
+export const UNAPPROVABLE_ARTIFACT =
+  "Not an artifact you can ask the person to approve: it is unknown here, or already approved. Ask with the id you were given for it, or ask without one.";
+
+/**
+ * `ask_user` as an agent offers it, with `artifact` checked when the model
+ * calls it. A refused one fails the call, and the model reads the error and
+ * carries on in the same turn; see {@link askedUser}.
+ *
+ * Here rather than in {@link askUserInputSchema}: the check is async, and the
+ * turn's outcome is read with that schema synchronously.
+ */
+export function askUserToolFor(
+  mayAskApproval: (id: string) => Promise<boolean>
+): typeof askUserTool {
+  return {
+    ...askUserTool,
+    inputSchema: askUserInputSchema.extend({
+      artifact: askUserInputSchema.shape.artifact.refine(
+        async (id) => id === undefined || (await mayAskApproval(id)),
+        { message: UNAPPROVABLE_ARTIFACT }
+      )
+    })
+  };
 }
+
+/**
+ * Whether the step asked the person something: an `ask_user` call that parsed.
+ * `hasToolCall` also counts one that did not, which ends the turn with nothing
+ * asked and its error unread by the model.
+ */
+export const askedUser: StopCondition<ToolSet> = ({ steps }) =>
+  steps
+    .at(-1)
+    ?.toolCalls.some(
+      (call) =>
+        call.toolName === ASK_USER_TOOL_NAME &&
+        !("invalid" in call && call.invalid === true)
+    ) ?? false;
 
 // --- check_back --------------------------------------------------------------
 

@@ -37,6 +37,7 @@ import {
   type HitlRequestData
 } from "@dynamicagents/g2a-protocol";
 import { SelfOrigin } from "../a2a/self-origin.js";
+import { fileApproval } from "../artifacts/approval.js";
 import {
   assertArtifactsBound,
   requireArtifactsStub
@@ -54,7 +55,7 @@ import { isTerminalState, TASK_RETENTION_MS } from "../ledger.js";
 import { reportEventType } from "../workflow/keys.js";
 import type { StepAnswer, StepJob } from "../workflow/types.js";
 import { ensureStarted } from "./lifecycle.js";
-import { latestStepJobId, readTurn, type PendingAsk } from "./outcome.js";
+import { latestStepJobId, readTurn } from "./outcome.js";
 import { StepJobs, type JobRow } from "./step-jobs.js";
 import type {
   SubAgentSettleContext,
@@ -71,9 +72,9 @@ import {
   CHECK_BACK_DESCRIPTION,
   CHECK_BACK_TOOL_NAME,
   approvalAnswerText,
-  askUserTool,
+  askedUser,
+  askUserToolFor,
   checkBackInputSchema,
-  refusedApprovalText,
   searchHistoryTool,
   unrecordedApprovalText,
   SEARCH_HISTORY_TOOL_NAME
@@ -284,7 +285,7 @@ export abstract class StepAgent<
       tools[Cls.spec.name] = this.subAgentTool(Cls);
     }
     // Last, so a plugin cannot shadow the tools the lifecycle reads.
-    tools[ASK_USER_TOOL_NAME] = askUserTool;
+    tools[ASK_USER_TOOL_NAME] = askUserToolFor((id) => this.mayAskApproval(id));
     tools[SEARCH_HISTORY_TOOL_NAME] = searchHistoryTool(async (query, limit) =>
       (await this.session.search(query, { limit })).map((hit) => ({
         role: hit.role,
@@ -339,7 +340,7 @@ export abstract class StepAgent<
     const closed = stepJobId !== undefined && this.ledger.closed(stepJobId);
     return {
       stopWhen: [
-        hasToolCall(ASK_USER_TOOL_NAME),
+        askedUser,
         hasToolCall(CHECK_BACK_TOOL_NAME),
         ...(stepJobId === undefined
           ? []
@@ -516,16 +517,17 @@ export abstract class StepAgent<
     const request = this.ledger.row(stepJobId)?.request;
     if (!request) return;
     let text: string;
-    if (request.artifact !== undefined) {
-      const said = approvalAnswerText(answer);
-      text = (await this.#recordApproval(
-        request.artifact,
-        request.requestId,
-        answer,
-        said
-      ))
-        ? said
-        : unrecordedApprovalText(said);
+    if (request.artifact) {
+      // Filed before the job resumes, so an answer the workflow delivers again
+      // finds its note by the key and reads as filed, and a throw here leaves
+      // the answer to be delivered again.
+      text = approvalAnswerText(answer);
+      const filed = await fileApproval(this.env, request.artifact.id, {
+        key: request.requestId,
+        text,
+        approved: answer.optionId === HITL_APPROVE_OPTION_ID
+      });
+      if (!filed) text = unrecordedApprovalText(text);
     } else {
       const option = request.options?.find((o) => o.id === answer.optionId);
       text = [option?.label ?? answer.optionId, answer.text]
@@ -537,30 +539,6 @@ export abstract class StepAgent<
     ) {
       await this.submitAnswer({ stepJobId });
     }
-  }
-
-  /**
-   * Put an approval's answer on the artifact it was about, locking an approved
-   * one in the same call: what the person approved is what stays behind the
-   * link. Answers whether it was recorded — `false` when another answer locked
-   * the artifact first, or it is gone.
-   *
-   * Before the job resumes, so a retry of this answer — the workflow's delivery
-   * is at-least-once — finds its note by the key and reads as recorded, and a
-   * throw here leaves the answer to be delivered again.
-   */
-  async #recordApproval(
-    token: string,
-    requestId: string,
-    answer: StepAnswer,
-    text: string
-  ): Promise<boolean> {
-    const recorded = await requireArtifactsStub(this.env).addEntry(
-      token,
-      { label: "approval", text, key: requestId },
-      answer.optionId === HITL_APPROVE_OPTION_ID ? { lock: "approved" } : {}
-    );
-    return recorded !== null;
   }
 
   /**
@@ -733,26 +711,29 @@ export abstract class StepAgent<
     // turn recovered after an eviction is exactly when this runs on one.
     const outcome = readTurn(await this.getMessages(), stepJobId);
 
-    if (outcome.ask?.artifact !== undefined) {
-      await this.#askApproval(stepJobId, outcome.ask, outcome.ask.artifact);
-      return;
-    }
-
     if (outcome.ask) {
-      const request: HitlRequestData = {
-        type: HITL_REQUEST_TYPE,
-        requestId: `${stepJobId}:${outcome.ask.toolCallId}`,
-        requestKind: "choice",
-        prompt: outcome.ask.question,
-        ...(outcome.ask.options
-          ? {
-              options: outcome.ask.options.map((label, i) => ({
-                id: `option_${i + 1}`,
-                label
-              }))
-            }
-          : { allowFreeform: true })
-      };
+      const requestId = `${stepJobId}:${outcome.ask.toolCallId}`;
+      const request: HitlRequestData =
+        outcome.ask.artifact !== undefined
+          ? this.#approval(
+              requestId,
+              outcome.ask.question,
+              outcome.ask.artifact
+            )
+          : {
+              type: HITL_REQUEST_TYPE,
+              requestId,
+              requestKind: "choice",
+              prompt: outcome.ask.question,
+              ...(outcome.ask.options
+                ? {
+                    options: outcome.ask.options.map((label, i) => ({
+                      id: `option_${i + 1}`,
+                      label
+                    }))
+                  }
+                : { allowFreeform: true })
+            };
       const n = this.ledger.park(stepJobId, request);
       if (n !== null) await this.#queueReport(stepJobId, n);
       return;
@@ -771,55 +752,41 @@ export abstract class StepAgent<
   }
 
   /**
-   * Park on an approval of an artifact: the question with its link, Approve and
-   * Reject, and a typed answer for a comment. The token stays in the ledger for
-   * the answer to act on — see {@link answerStepJob}.
+   * An approval of an artifact: Approve, Reject, or a comment typed out. The
+   * prompt carries the link too, for a gatekeeper that renders no link of its
+   * own.
    *
-   * An artifact this agent will not put to anyone is answered to the model
-   * instead, as a turn of its own, and nothing is parked: a question with a dead
-   * link wastes the person's time, and a job that ended on the call would read
-   * the question as its reply.
+   * The artifact was checked when the model named it — see
+   * {@link mayAskApproval} — and the origin is known while a job is open:
+   * `onStart` notes each open job's.
    */
-  async #askApproval(
-    stepJobId: string,
-    ask: PendingAsk,
+  #approval(
+    requestId: string,
+    question: string,
     artifact: string
-  ): Promise<void> {
-    const token = await this.approvalArtifact(artifact);
-    const origin = this.#origin.peek();
-    if (token === undefined || origin === undefined) {
-      if (
-        this.ledger.owe(stepJobId, {
-          id: `refused:${ask.toolCallId}`,
-          text: refusedApprovalText(artifact)
-        })
-      ) {
-        await this.submitAnswer({ stepJobId });
-      }
-      return;
-    }
-    const request: HitlRequestData = {
+  ): HitlRequestData {
+    const url = artifactViewerUrl(this.#origin.require(), artifact);
+    return {
       type: HITL_REQUEST_TYPE,
-      requestId: `${stepJobId}:${ask.toolCallId}`,
+      requestId,
       requestKind: "approval",
-      prompt: `${ask.question}\n\n${artifactViewerUrl(origin, token)}`,
-      allowFreeform: true
+      prompt: `${question}\n\n${url}`,
+      allowFreeform: true,
+      artifact: { id: artifact, url }
     };
-    const n = this.ledger.park(stepJobId, request, token);
-    if (n !== null) await this.#queueReport(stepJobId, n);
   }
 
   /**
-   * The token of the artifact `id` names, if the model may ask the person to
-   * approve it — `undefined` otherwise, and the model is told so.
+   * Whether the model may ask the person to approve the artifact `id`. It is
+   * asked when the model calls `ask_user`, and a `false` fails that call.
    *
-   * By default, any artifact this deployment holds that is not locked: the
-   * token is the only authority an artifact has, and a model holding it was
-   * handed it. An agent that should approve only what it made narrows this.
+   * By default, any artifact this deployment holds that is not locked: the id is
+   * the only authority an artifact has, and a model holding one was handed it.
+   * An agent that should ask only about what it made narrows this.
    */
-  protected async approvalArtifact(id: string): Promise<string | undefined> {
+  protected async mayAskApproval(id: string): Promise<boolean> {
     const artifact = await requireArtifactsStub(this.env).artifactState(id);
-    return artifact && !artifact.locked ? id : undefined;
+    return artifact !== null && !artifact.locked;
   }
 
   /**
@@ -1320,8 +1287,7 @@ export abstract class StepAgent<
       agentName: this.name,
       callerKey: () => this.callerKey(),
       workspace: () => this.workspace,
-      runtime: () => undefined,
-      selfOrigin: () => this.#origin.peek()
+      runtime: () => undefined
     };
   }
 
