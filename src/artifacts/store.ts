@@ -173,12 +173,23 @@ const upgrade: SchemaUpgrade = (sql, from) => {
   if (from < 2) sql.exec("ALTER TABLE artifacts ADD COLUMN locked_at INTEGER");
 };
 
+/** Runs `fn` as one transaction: the object's `ctx.storage.transactionSync`. */
+export type Atomically = (fn: () => void) => void;
+
 /** Test seams for {@link ensureArtifactSchema}. */
 export interface ArtifactSchemaOptions {
   /** The steps to run. Defaults to {@link upgrade}. */
   steps?: SchemaUpgrade;
   /** The version to end at. Defaults to {@link CURRENT_SCHEMA_VERSION}. */
   target?: number;
+  /**
+   * What the steps and the version they reach are written in. A step that
+   * throws after an earlier one ran would otherwise leave that one's `ALTER
+   * TABLE` behind under the old version, and every later wake-up would fail
+   * running it again. Defaults to running them as they are, which only a spec
+   * does.
+   */
+  atomically?: Atomically;
 }
 
 /**
@@ -199,7 +210,8 @@ export function ensureArtifactSchema(
   sql: SqlStorage,
   {
     steps = upgrade,
-    target = CURRENT_SCHEMA_VERSION
+    target = CURRENT_SCHEMA_VERSION,
+    atomically = (fn) => fn()
   }: ArtifactSchemaOptions = {}
 ): number {
   for (const statement of DDL) sql.exec(statement);
@@ -215,12 +227,14 @@ export function ensureArtifactSchema(
       `artifacts store is at schema version ${from} on disk but this build ` +
         `writes ${target} — downgrade is not supported`
     );
-  steps(sql, from);
-  sql.exec(
-    `INSERT INTO schema_meta (id, version) VALUES (1, ?)
-     ON CONFLICT (id) DO UPDATE SET version = excluded.version`,
-    target
-  );
+  atomically(() => {
+    steps(sql, from);
+    sql.exec(
+      `INSERT INTO schema_meta (id, version) VALUES (1, ?)
+       ON CONFLICT (id) DO UPDATE SET version = excluded.version`,
+      target
+    );
+  });
   return from;
 }
 
@@ -310,13 +324,15 @@ export interface ArtifactStore {
  * Bind the queries to one object's SQLite.
  *
  * `now` is a parameter so the retention sweep is testable without waiting a
- * month; production passes `Date.now`.
+ * month; production passes `Date.now`. `atomically` is the object's
+ * `transactionSync`, for the schema upgrade — see {@link ArtifactSchemaOptions}.
  */
 export function makeArtifactStore(
   sql: SqlStorage,
-  now: () => number
+  now: () => number,
+  atomically?: Atomically
 ): ArtifactStore {
-  ensureArtifactSchema(sql);
+  ensureArtifactSchema(sql, atomically ? { atomically } : {});
 
   const rowTo = (row: ArtifactRow): Artifact => ({
     token: row.token,

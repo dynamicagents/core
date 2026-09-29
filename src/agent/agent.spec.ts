@@ -525,6 +525,14 @@ describe("asking the caller to approve an artifact", () => {
         await requireArtifactsStub(testEnv).lock(token, "approved");
         return token;
       }
+    ],
+    [
+      "one already settled",
+      async () => {
+        const token = await plan();
+        await requireArtifactsStub(testEnv).settle(token, "completed");
+        return token;
+      }
     ]
   ])("tells the model it cannot ask about %s", async (_label, make) => {
     const { harness } = harnessFor("approve-refused");

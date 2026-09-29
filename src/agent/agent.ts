@@ -780,13 +780,16 @@ export abstract class StepAgent<
    * Whether the model may ask the person to approve the artifact `id`. It is
    * asked when the model calls `ask_user`, and a `false` fails that call.
    *
-   * By default, any artifact this deployment holds that is not locked: the id is
+   * By default, any artifact this deployment holds that is still open: the id is
    * the only authority an artifact has, and a model holding one was handed it.
-   * An agent that should ask only about what it made narrows this.
+   * Open rather than unlocked, because a settled artifact's link has stopped
+   * streaming — an answer filed on it would not reach a page already showing it
+   * — and a lock settles. An agent that should ask only about what it made
+   * narrows this.
    */
   protected async mayAskApproval(id: string): Promise<boolean> {
     const artifact = await requireArtifactsStub(this.env).artifactState(id);
-    return artifact !== null && !artifact.locked;
+    return artifact !== null && artifact.status === null;
   }
 
   /**

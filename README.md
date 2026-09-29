@@ -241,8 +241,8 @@ next turn — and `search_history` over the conversation's own full-text index. 
 `ask_user` naming an `artifact` is an approval of it: the question carries the
 artifact's id and link, the caller answers Approve, Reject or with a typed comment,
 the answer is filed on the artifact, and approving it locks it. Which artifacts a
-model may ask about is `mayAskApproval`'s to say — by default, any that is not
-locked — and it is checked when the model calls `ask_user`, so a refusal is an
+model may ask about is `mayAskApproval`'s to say — by default, any still open —
+and it is checked when the model calls `ask_user`, so a refusal is an
 error the model reads in the same turn.
 `check_back` is opt-in: `check_back: this.checkBackTool()` in `getTools()` lets the
 model put a job down and pick it up later, as a scheduled wake rather than a wait

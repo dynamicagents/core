@@ -84,20 +84,22 @@ export function approvalAnswerText(answer: {
 }
 
 /**
- * An approval's answer that did not reach its artifact: another answer locked
- * it first, or it is gone. The person's answer stands, but it changed nothing,
- * and the model is not told otherwise.
+ * An approval's answer that did not reach its artifact: it was locked first —
+ * by another answer, or by whatever else locks it — or it is gone. The person's
+ * answer stands, but it changed nothing, and the model is not told otherwise.
  */
 export function unrecordedApprovalText(text: string): string {
-  return `${text}\n\nThis answer was not recorded, so it changed nothing: the artifact was already locked by another answer, or it is gone.`;
+  return `${text}\n\nThis answer was not recorded, so it changed nothing: the artifact is locked, or gone.`;
 }
 
 /**
  * What the model reads when it names an artifact the agent will not put to the
- * person: one it does not know, or one already locked.
+ * person. It says why only as far as the agent can know: a closed artifact may
+ * have been approved, failed or finished, and saying which would invite the
+ * model to act on a decision nobody made.
  */
 export const UNAPPROVABLE_ARTIFACT =
-  "Not an artifact you can ask the person to approve: it is unknown here, or already approved. Ask with the id you were given for it, or ask without one.";
+  "Not an artifact you can ask the person to approve: it is unknown here, not one you may ask about, or no longer open. Ask with the id you were given for it, or ask without one.";
 
 /**
  * `ask_user` as an agent offers it, with `artifact` checked when the model

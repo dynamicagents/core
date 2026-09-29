@@ -108,8 +108,10 @@ export class Artifacts extends DurableObject {
   private readonly watchers = new Map<string, Set<Watcher>>();
 
   private get store(): ArtifactStore {
-    return (this._store ??= makeArtifactStore(this.ctx.storage.sql, () =>
-      this.now()
+    return (this._store ??= makeArtifactStore(
+      this.ctx.storage.sql,
+      () => this.now(),
+      (fn) => this.ctx.storage.transactionSync(fn)
     ));
   }
 

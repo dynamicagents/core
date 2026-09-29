@@ -96,6 +96,44 @@ describe("the artifacts schema version", () => {
     expect(found.column).toEqual([]);
   });
 
+  /**
+   * A step that throws after another has run. In one transaction, the earlier
+   * `ALTER TABLE` is undone with it, and the retry runs both again rather than
+   * failing on the column the first attempt left behind.
+   */
+  it("leaves nothing of an upgrade that failed, so a retry runs it whole", async () => {
+    const next = CURRENT_SCHEMA_VERSION + 1;
+    const found = await runInDurableObject(
+      ns.get(ns.idFromName(`store:atomic:${crypto.randomUUID()}`)),
+      (_instance, state) => {
+        const sql = state.storage.sql;
+        const atomically = (fn: () => void) =>
+          state.storage.transactionSync(fn);
+        makeArtifactStore(sql, () => 1_000);
+        let broken = true;
+        const steps = (db: SqlStorage, from: number) => {
+          if (from < next) {
+            db.exec("ALTER TABLE artifacts ADD COLUMN trial TEXT");
+            if (broken) throw new Error("the next step failed");
+          }
+        };
+        let thrown: string | undefined;
+        try {
+          ensureArtifactSchema(sql, { steps, target: next, atomically });
+        } catch (error) {
+          thrown = (error as Error).message;
+        }
+        const afterFailure = recorded(sql);
+        broken = false;
+        ensureArtifactSchema(sql, { steps, target: next, atomically });
+        return { thrown, afterFailure, version: recorded(sql) };
+      }
+    );
+    expect(found.thrown).toBe("the next step failed");
+    expect(found.afterFailure).toBe(CURRENT_SCHEMA_VERSION);
+    expect(found.version).toBe(next);
+  });
+
   it("gives a store that has never been opened every step from zero", async () => {
     const found = await withSql("from-zero", (sql) => {
       const steps = vi.fn();
