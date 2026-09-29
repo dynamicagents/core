@@ -484,7 +484,7 @@ async function answerEnded(
  * const handler = createA2AWorker({
  *   manifest: hostManifest,
  *   tenants: {
- *     reactive: { manifest, resolveAgent: getAgent }
+ *     generic: { manifest, resolveAgent: getAgent }
  *   }
  * });
  * export default { fetch: handler } satisfies ExportedHandler<Env>;

@@ -5,8 +5,8 @@ import { workersAIModel } from "./workers-ai.js";
 
 describe("gateway log fields", () => {
   it("leaves out what a call site does not know", () => {
-    expect(gatewayLogFields({ agent: "reactive", taskId: "" })).toEqual({
-      metadata: { agent: "reactive" }
+    expect(gatewayLogFields({ agent: "generic", taskId: "" })).toEqual({
+      metadata: { agent: "generic" }
     });
   });
 

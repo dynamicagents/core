@@ -6,14 +6,14 @@ import type { TaskAgent } from "../a2a/agent-stub.js";
  * One agent's wiring, declared once.
  *
  * ```ts
- * export const reactive = defineAgent({
- *   tenant: "reactive",
+ * export const generic = defineAgent({
+ *   tenant: "generic",
  *   manifest,
- *   agent: (env: Env) => env.Reactive
+ *   agent: (env: Env) => env.Generic
  * });
  *
  * export default {
- *   fetch: createA2AWorker<Env>({ manifest: hostManifest, agents: [reactive] })
+ *   fetch: createA2AWorker<Env>({ manifest: hostManifest, agents: [generic] })
  * };
  * ```
  *
