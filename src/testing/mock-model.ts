@@ -61,6 +61,11 @@ export function askUser(question: string, options?: string[]): MockStep {
   return call("ask_user", { question, ...(options ? { options } : {}) });
 }
 
+/** A step that asks the person to approve an artifact, through `ask_user`. */
+export function askApproval(question: string, artifact: string): MockStep {
+  return call("ask_user", { question, artifact });
+}
+
 /** What a scripted rule is shown of the call it answers. */
 export interface ModelTurnView {
   /** The last user message's text — what the turn is about. */

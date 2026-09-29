@@ -98,6 +98,10 @@ function parentRule(view: ModelTurnView): MockStep {
       ? { text: "asked" }
       : call("ask_user", { question: ask, options: ["Yes", "No"] });
   }
+  const artifact = after(text, "approve-artifact:");
+  if (artifact !== undefined) {
+    return call("ask_user", { question: "Approve this?", artifact });
+  }
   const wait = after(text, "wait:");
   if (wait !== undefined) {
     return answered

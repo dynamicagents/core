@@ -1,4 +1,8 @@
 import { tool, type Tool } from "ai";
+import {
+  HITL_APPROVE_OPTION_ID,
+  HITL_REJECT_OPTION_ID
+} from "@dynamicagents/g2a-protocol";
 import { z } from "zod";
 
 /**
@@ -33,6 +37,11 @@ export const askUserInputSchema = z.object({
     .optional()
     .describe(
       "Answers they can pick from, when the question has a short list of them. Leave out to have them type an answer."
+    ),
+  artifact: nonBlank("artifact")
+    .optional()
+    .describe(
+      "The id of something you made for them to approve, such as a plan. They get its link with your question, and answer Approve, Reject, or with a comment; `options` is not used. Approving it locks it, so it cannot change afterwards."
     )
 });
 
@@ -45,13 +54,42 @@ export const askUserInputSchema = z.object({
  * Think's documented pattern. `needsApproval` would count as pending and park
  * the submission instead, which is a different lifecycle.
  */
-export const askUserTool: Tool<{ question: string; options?: string[] }> = tool(
-  {
-    description:
-      "Ask the person you are working for a question, and stop. Their answer arrives as their next message, and you continue from there. Use it when you cannot go on well without a decision or a fact only they have — not to announce what you are about to do, and not to confirm what you already know.",
-    inputSchema: askUserInputSchema
-  }
-);
+export const askUserTool: Tool<{
+  question: string;
+  options?: string[];
+  artifact?: string;
+}> = tool({
+  description:
+    "Ask the person you are working for a question, and stop. Their answer arrives as their next message, and you continue from there. Use it when you cannot go on well without a decision or a fact only they have — not to announce what you are about to do, and not to confirm what you already know.",
+  inputSchema: askUserInputSchema
+});
+
+/**
+ * What the model reads when the person answered an approval: which way they
+ * went, and anything they typed. A typed answer with neither is a comment on
+ * the thing they were shown.
+ */
+export function approvalAnswerText(answer: {
+  optionId?: string;
+  text?: string;
+}): string {
+  const verdict =
+    answer.optionId === HITL_APPROVE_OPTION_ID
+      ? "Approved."
+      : answer.optionId === HITL_REJECT_OPTION_ID
+        ? "Rejected."
+        : undefined;
+  if (!verdict) return `Comment: ${answer.text ?? ""}`.trim();
+  return answer.text ? `${verdict}\n\n${answer.text}` : verdict;
+}
+
+/**
+ * What the model reads when it asked for an approval of an artifact the agent
+ * would not put to anyone: one it does not know, or one already locked.
+ */
+export function refusedApprovalText(artifact: string): string {
+  return `Nothing was asked: \`${artifact}\` is not an artifact you can ask the person to approve — it is unknown here, or already approved. Ask again with the id you were given for it, or ask without one.`;
+}
 
 // --- check_back --------------------------------------------------------------
 

@@ -71,17 +71,18 @@ describe("the artifacts schema version", () => {
   });
 
   it("runs the steps a store recorded below the target has not had", async () => {
+    const next = CURRENT_SCHEMA_VERSION + 1;
     const found = await withSql("upgrade", (sql) => {
-      // A store at 1, the way production leaves one.
+      // A store at the current version, the way production leaves one.
       makeArtifactStore(sql, () => 1_000);
       const steps = vi.fn((db: SqlStorage, from: number) => {
-        if (from < 2) db.exec("ALTER TABLE artifacts ADD COLUMN trial TEXT");
+        if (from < next) db.exec("ALTER TABLE artifacts ADD COLUMN trial TEXT");
       });
-      ensureArtifactSchema(sql, { steps, target: 2 });
+      ensureArtifactSchema(sql, { steps, target: next });
       const afterUpgrade = recorded(sql);
       // And again, as a wake-up would: the `ALTER TABLE` is what throws if the
       // recorded version failed to hold the step back.
-      ensureArtifactSchema(sql, { steps, target: 2 });
+      ensureArtifactSchema(sql, { steps, target: next });
       return {
         calls: steps.mock.calls.map(([, from]) => from),
         afterUpgrade,
@@ -90,8 +91,8 @@ describe("the artifacts schema version", () => {
       };
     });
     expect(found.calls).toEqual([CURRENT_SCHEMA_VERSION]);
-    expect(found.afterUpgrade).toBe(2);
-    expect(found.version).toBe(2);
+    expect(found.afterUpgrade).toBe(next);
+    expect(found.version).toBe(next);
     expect(found.column).toEqual([]);
   });
 
@@ -106,8 +107,9 @@ describe("the artifacts schema version", () => {
   });
 
   it("refuses a database written by a newer build", async () => {
+    const newer = CURRENT_SCHEMA_VERSION + 1;
     const thrown = await withSql("downgrade", (sql) => {
-      ensureArtifactSchema(sql, { steps: () => {}, target: 2 });
+      ensureArtifactSchema(sql, { steps: () => {}, target: newer });
       try {
         ensureArtifactSchema(sql);
         return null;
@@ -115,6 +117,35 @@ describe("the artifacts schema version", () => {
         return (error as Error).message;
       }
     });
-    expect(thrown).toMatch(/schema version 2 .* downgrade is not supported/);
+    expect(thrown).toMatch(
+      new RegExp(`schema version ${newer} .* downgrade is not supported`)
+    );
+  });
+
+  /**
+   * The real step, against a store the way version 1 left it: rows written
+   * before `lock` existed read as unlocked, and take a lock.
+   */
+  it("brings a version 1 store up to `lock`, keeping its artifacts open", async () => {
+    const found = await withSql("v1", (sql) => {
+      ensureArtifactSchema(sql, { steps: () => {}, target: 1 });
+      sql.exec(
+        `INSERT INTO artifacts (token, kind, source_key, created_at)
+         VALUES ('old', 'kind', NULL, 1000)`
+      );
+      const store = makeArtifactStore(sql, () => 1_000);
+      const before = store.get("old");
+      const locked = store.lock("old", "approved");
+      return {
+        version: recorded(sql),
+        before,
+        after: store.get("old"),
+        locked
+      };
+    });
+    expect(found.version).toBe(CURRENT_SCHEMA_VERSION);
+    expect(found.before?.locked).toBe(false);
+    expect(found.locked).toBe(true);
+    expect(found.after).toMatchObject({ locked: true, status: "approved" });
   });
 });

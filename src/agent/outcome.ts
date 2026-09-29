@@ -16,6 +16,8 @@ export interface PendingAsk {
   toolCallId: string;
   question: string;
   options?: string[];
+  /** The artifact the question asks the person to approve. */
+  artifact?: string;
 }
 
 export interface TurnOutcome {
@@ -132,7 +134,8 @@ function pendingAsk(parts: Part[]): PendingAsk | undefined {
     return {
       toolCallId: call.toolCallId ?? "",
       question: input.data.question,
-      ...(input.data.options ? { options: input.data.options } : {})
+      ...(input.data.options ? { options: input.data.options } : {}),
+      ...(input.data.artifact ? { artifact: input.data.artifact } : {})
     };
   }
   return undefined;

@@ -9,6 +9,7 @@ import {
 import { parseArtifactPath } from "./path.js";
 import {
   makeArtifactStore,
+  type ArtifactEntry,
   type ArtifactEntryInput,
   type ArtifactStore
 } from "./store.js";
@@ -30,9 +31,11 @@ import {
  * ## Two doors, and only one of them is open
  *
  * **Ingest is RPC**, reached through the binding — {@link createArtifact},
- * {@link addEntry}, {@link settle}. There is no HTTP route that writes, so a
- * write is authenticated by being inside the Worker at all, and the token it
- * carries is an argument rather than a credential.
+ * {@link addEntry}, {@link settle}, {@link lock}. There is no HTTP route that
+ * writes, so a write is authenticated by being inside the Worker at all, and the
+ * token it carries is an argument rather than a credential. {@link readArtifact}
+ * is the same door read back, for a Worker that wrote an artifact and needs what
+ * it holds.
  *
  * **Reads are the token**, over {@link fetch}. The token is unguessable and
  * derived from nothing (see {@link file://./store.ts mintArtifactToken}), so it
@@ -63,6 +66,17 @@ import {
  * because the send can fail: a note that opened the artifact is not a link
  * anybody received. See {@link Artifacts.announce}.
  */
+/** What {@link Artifacts.readArtifact} answers. */
+export interface ArtifactContents {
+  kind: string;
+  /** The status it settled or locked in, or `null` while it is still open. */
+  status: string | null;
+  /** Whether it refuses new notes. */
+  locked: boolean;
+  /** Every note, oldest first. */
+  entries: ArtifactEntry[];
+}
+
 export interface RecordedNote {
   sequence: number;
   announced: boolean;
@@ -122,7 +136,7 @@ export class Artifacts extends DurableObject {
   /**
    * Append one note and wake everyone watching — or `null` when the token names
    * nothing, which is what a caller sees when retention swept the artifact out
-   * from under it.
+   * from under it, or when the artifact is locked.
    *
    * The token is required for the reason a read needs one, not because ingest
    * is guarded: it names the artifact, and a writer that cannot name it has no
@@ -176,6 +190,36 @@ export class Artifacts extends DurableObject {
     const event: SettledEvent = { status };
     this.broadcast(token, sseFrame(ARTIFACT_EVENTS.settled, event), "close");
     return true;
+  }
+
+  /**
+   * Settle this artifact in `status` and refuse every note after it — see
+   * {@link file://./store.ts ArtifactStore.lock}. Ends every stream on it, as a
+   * settle does. Returns whether it applied.
+   */
+  async lock(token: string, status: string): Promise<boolean> {
+    if (!this.store.lock(token, status)) return false;
+    const event: SettledEvent = { status };
+    this.broadcast(token, sseFrame(ARTIFACT_EVENTS.settled, event), "close");
+    return true;
+  }
+
+  /**
+   * Everything one artifact holds, or `null` when the token names nothing.
+   *
+   * Over the binding rather than the stream: the stream holds a live artifact's
+   * connection open by design, and a Worker reading back what it wrote needs an
+   * answer, not a subscription.
+   */
+  async readArtifact(token: string): Promise<ArtifactContents | null> {
+    const artifact = this.store.get(token);
+    if (artifact === null) return null;
+    return {
+      kind: artifact.kind,
+      status: artifact.status,
+      locked: artifact.locked,
+      entries: this.store.entries(token)
+    };
   }
 
   // --- reads, over the token ------------------------------------------------

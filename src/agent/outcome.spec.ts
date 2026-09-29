@@ -92,6 +92,26 @@ describe("reading a turn", () => {
     });
   });
 
+  it("carries the artifact a question asks the person to approve", () => {
+    const outcome = readTurn(
+      [
+        user("u1", "t1"),
+        assistant("a1", [
+          toolPart("ask_user", "input-available", {
+            question: "Approve the plan?",
+            artifact: "plan-token"
+          })
+        ])
+      ],
+      "t1"
+    );
+    expect(outcome.ask).toEqual({
+      toolCallId: "call-ask_user",
+      question: "Approve the plan?",
+      artifact: "plan-token"
+    });
+  });
+
   it("does not park on a question its own schema would refuse", () => {
     for (const input of [
       { question: "   " },

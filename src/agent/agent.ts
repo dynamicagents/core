@@ -32,11 +32,16 @@ import {
 } from "ai";
 import type { TaskState } from "@a2a-js/sdk";
 import {
+  HITL_APPROVE_OPTION_ID,
   HITL_REQUEST_TYPE,
   type HitlRequestData
 } from "@dynamicagents/g2a-protocol";
 import { SelfOrigin } from "../a2a/self-origin.js";
-import { assertArtifactsBound } from "../artifacts/binding.js";
+import {
+  assertArtifactsBound,
+  requireArtifactsStub
+} from "../artifacts/binding.js";
+import { artifactViewerUrl } from "../artifacts/path.js";
 import { transcribeNote } from "../artifacts/transcript.js";
 import {
   PluginSetupError,
@@ -49,7 +54,7 @@ import { isTerminalState, TASK_RETENTION_MS } from "../ledger.js";
 import { reportEventType } from "../workflow/keys.js";
 import type { StepAnswer, StepJob } from "../workflow/types.js";
 import { ensureStarted } from "./lifecycle.js";
-import { latestStepJobId, readTurn } from "./outcome.js";
+import { latestStepJobId, readTurn, type PendingAsk } from "./outcome.js";
 import { StepJobs, type JobRow } from "./step-jobs.js";
 import type {
   SubAgentSettleContext,
@@ -65,8 +70,10 @@ import {
   ASK_USER_TOOL_NAME,
   CHECK_BACK_DESCRIPTION,
   CHECK_BACK_TOOL_NAME,
+  approvalAnswerText,
   askUserTool,
   checkBackInputSchema,
+  refusedApprovalText,
   searchHistoryTool,
   SEARCH_HISTORY_TOOL_NAME
 } from "./tools.js";
@@ -507,14 +514,49 @@ export abstract class StepAgent<
     await ensureStarted(this);
     const request = this.ledger.row(stepJobId)?.request;
     if (!request) return;
-    const option = request.options?.find((o) => o.id === answer.optionId);
-    const text = [option?.label ?? answer.optionId, answer.text]
-      .filter((part): part is string => Boolean(part))
-      .join("\n\n");
+    let text: string;
+    if (request.artifact !== undefined) {
+      text = approvalAnswerText(answer);
+      await this.#recordApproval(
+        request.artifact,
+        request.requestId,
+        answer,
+        text
+      );
+    } else {
+      const option = request.options?.find((o) => o.id === answer.optionId);
+      text = [option?.label ?? answer.optionId, answer.text]
+        .filter((part): part is string => Boolean(part))
+        .join("\n\n");
+    }
     if (
       this.ledger.resume(stepJobId, { id: `answer:${request.requestId}`, text })
     ) {
       await this.submitAnswer({ stepJobId });
+    }
+  }
+
+  /**
+   * Put an approval's answer on the artifact it was about, and lock an approved
+   * one: what the person approved is what stays behind the link. Before the job
+   * resumes, so a retry of this answer — the workflow's delivery is
+   * at-least-once — finds the note by its key and the lock already held, and a
+   * throw here leaves the answer to be delivered again.
+   */
+  async #recordApproval(
+    token: string,
+    requestId: string,
+    answer: StepAnswer,
+    text: string
+  ): Promise<void> {
+    const artifacts = requireArtifactsStub(this.env);
+    await artifacts.addEntry(token, {
+      label: "approval",
+      text,
+      key: requestId
+    });
+    if (answer.optionId === HITL_APPROVE_OPTION_ID) {
+      await artifacts.lock(token, "approved");
     }
   }
 
@@ -688,6 +730,11 @@ export abstract class StepAgent<
     // turn recovered after an eviction is exactly when this runs on one.
     const outcome = readTurn(await this.getMessages(), stepJobId);
 
+    if (outcome.ask?.artifact !== undefined) {
+      await this.#askApproval(stepJobId, outcome.ask, outcome.ask.artifact);
+      return;
+    }
+
     if (outcome.ask) {
       const request: HitlRequestData = {
         type: HITL_REQUEST_TYPE,
@@ -718,6 +765,58 @@ export abstract class StepAgent<
       reply: outcome.reply
     });
     if (n !== null) await this.#queueReport(stepJobId, n);
+  }
+
+  /**
+   * Park on an approval of an artifact: the question with its link, Approve and
+   * Reject, and a typed answer for a comment. The token stays in the ledger for
+   * the answer to act on — see {@link answerStepJob}.
+   *
+   * An artifact this agent will not put to anyone is answered to the model
+   * instead, as a turn of its own, and nothing is parked: a question with a dead
+   * link wastes the person's time, and a job that ended on the call would read
+   * the question as its reply.
+   */
+  async #askApproval(
+    stepJobId: string,
+    ask: PendingAsk,
+    artifact: string
+  ): Promise<void> {
+    const token = await this.approvalArtifact(artifact);
+    const origin = this.#origin.peek();
+    if (token === undefined || origin === undefined) {
+      if (
+        this.ledger.owe(stepJobId, {
+          id: `refused:${ask.toolCallId}`,
+          text: refusedApprovalText(artifact)
+        })
+      ) {
+        await this.submitAnswer({ stepJobId });
+      }
+      return;
+    }
+    const request: HitlRequestData = {
+      type: HITL_REQUEST_TYPE,
+      requestId: `${stepJobId}:${ask.toolCallId}`,
+      requestKind: "approval",
+      prompt: `${ask.question}\n\n${artifactViewerUrl(origin, token)}`,
+      allowFreeform: true
+    };
+    const n = this.ledger.park(stepJobId, request, token);
+    if (n !== null) await this.#queueReport(stepJobId, n);
+  }
+
+  /**
+   * The token of the artifact `id` names, if the model may ask the person to
+   * approve it — `undefined` otherwise, and the model is told so.
+   *
+   * By default, any artifact this deployment holds that is not locked: the
+   * token is the only authority an artifact has, and a model holding it was
+   * handed it. An agent that should approve only what it made narrows this.
+   */
+  protected async approvalArtifact(id: string): Promise<string | undefined> {
+    const artifact = await requireArtifactsStub(this.env).readArtifact(id);
+    return artifact && !artifact.locked ? id : undefined;
   }
 
   /**
@@ -1218,7 +1317,8 @@ export abstract class StepAgent<
       agentName: this.name,
       callerKey: () => this.callerKey(),
       workspace: () => this.workspace,
-      runtime: () => undefined
+      runtime: () => undefined,
+      selfOrigin: () => this.#origin.peek()
     };
   }
 

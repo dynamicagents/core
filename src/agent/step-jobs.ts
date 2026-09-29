@@ -60,6 +60,13 @@ export interface FollowUp {
   text: string;
 }
 
+/**
+ * A question as the job parked it: what went on the wire, and the artifact an
+ * approval is about, which stays here — the answer acts on it, and a person
+ * reads it by the link in the prompt.
+ */
+export type ParkedRequest = HitlRequestData & { artifact?: string };
+
 /** One job's row. */
 export interface JobRow {
   stepJobId: string;
@@ -71,7 +78,7 @@ export interface JobRow {
   job: StepJob | null;
   submissionId: string | null;
   /** The question the job is parked on, or `null` when it is not parked. */
-  request: HitlRequestData | null;
+  request: ParkedRequest | null;
   /** An answer the job resumed on, whose turn is not yet submitted. */
   answer: FollowUp | null;
 }
@@ -253,12 +260,17 @@ export class StepJobs {
    * same write. Only from `working`: a job asks again only after an answer has
    * resumed it, so a park run twice finds it parked and owes nothing twice.
    */
-  park(stepJobId: string, request: HitlRequestData): number | null {
+  park(
+    stepJobId: string,
+    request: HitlRequestData,
+    artifact?: string
+  ): number | null {
     this.#ensure();
+    const parked: ParkedRequest = artifact ? { ...request, artifact } : request;
     return this.transaction(() => {
       const rows = this.sql<{ step_job_id: string }>`
         UPDATE da_step_jobs
-        SET state = 'input-required', request_json = ${JSON.stringify(request)},
+        SET state = 'input-required', request_json = ${JSON.stringify(parked)},
             updated_at = ${Date.now()}
         WHERE step_job_id = ${stepJobId} AND state = 'working'
         RETURNING step_job_id`;
@@ -281,6 +293,23 @@ export class StepJobs {
         SET state = 'working', request_json = NULL,
             answer_json = ${JSON.stringify(answer)}, updated_at = ${Date.now()}
         WHERE step_job_id = ${stepJobId} AND state = 'input-required'
+        RETURNING step_job_id`.length > 0
+    );
+  }
+
+  /**
+   * Owe a working job a turn that answers no question — a question it asked
+   * that could not be put to anyone. Answers whether this call did; a job
+   * already owing a turn keeps that one.
+   */
+  owe(stepJobId: string, turn: FollowUp): boolean {
+    this.#ensure();
+    return (
+      this.sql<{ step_job_id: string }>`
+        UPDATE da_step_jobs
+        SET answer_json = ${JSON.stringify(turn)}, updated_at = ${Date.now()}
+        WHERE step_job_id = ${stepJobId} AND state = 'working'
+          AND answer_json IS NULL
         RETURNING step_job_id`.length > 0
     );
   }
@@ -654,7 +683,7 @@ function projectJob(row: StoredJob): JobRow {
     job: row.job_json ? (JSON.parse(row.job_json) as StepJob) : null,
     submissionId: row.submission_id,
     request: row.request_json
-      ? (JSON.parse(row.request_json) as HitlRequestData)
+      ? (JSON.parse(row.request_json) as ParkedRequest)
       : null,
     answer: row.answer_json ? (JSON.parse(row.answer_json) as FollowUp) : null
   };

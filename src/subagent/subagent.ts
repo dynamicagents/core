@@ -150,7 +150,8 @@ export abstract class SubAgent<
         return key;
       },
       workspace: () => this.workspace,
-      runtime: () => turn()?.runtime
+      runtime: () => turn()?.runtime,
+      selfOrigin: () => undefined
     };
   }
 

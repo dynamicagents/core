@@ -25,7 +25,7 @@
  * because that is the behaviour the link exists to replace.
  */
 
-export { Artifacts, type RecordedNote } from "./do.js";
+export { Artifacts, type ArtifactContents, type RecordedNote } from "./do.js";
 
 export {
   ARTIFACTS_BINDING,
