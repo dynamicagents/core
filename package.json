@@ -118,7 +118,7 @@
   },
   "dependencies": {
     "@a2a-js/sdk": "^1.2.0",
-    "@dynamicagents/g2a-protocol": "^0.4.1",
+    "@dynamicagents/g2a-protocol": "^0.4.2",
     "jose": "^6.2.12",
     "zod": "^4.6.5"
   },
