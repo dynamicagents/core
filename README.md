@@ -237,7 +237,13 @@ that does not.
 **A job spans turns.** It ends the way every Think turn does, when the model stops
 calling tools, and its last words are its reply. On top of that, core gives the model
 `ask_user` — the job parks, the host asks the caller, and the answer is the job's
-next turn — and `search_history` over the conversation's own full-text index.
+next turn — and `search_history` over the conversation's own full-text index. An
+`ask_user` naming an `artifact` is an approval of it: the question carries the
+artifact's id and link, the caller answers Approve, Reject or with a typed comment,
+the answer is filed on the artifact, and approving it locks it. Which artifacts a
+model may ask about is `mayAskApproval`'s to say — by default, any still open —
+and it is checked when the model calls `ask_user`, so a refusal is an
+error the model reads in the same turn.
 `check_back` is opt-in: `check_back: this.checkBackTool()` in `getTools()` lets the
 model put a job down and pick it up later, as a scheduled wake rather than a wait
 inside the turn. A turn runs inside the object's alarm, which the runtime stops after
@@ -356,7 +362,8 @@ next note, rather than suppressed by a rule that knew nothing but which note cam
 first.
 
 An artifact is a **kind**, a long random **token**, an append-only list of labelled
-notes, a settle status, and whether its link has been delivered. The token is id and authorization in one — derived from
+notes, a settle status, whether its link has been delivered, and whether it is
+**locked** — refusing every note after the one somebody acted on. The token is id and authorization in one — derived from
 nothing, so a link is the whole of what a reader needs and anyone holding one can
 read it. `session-transcript` is the first kind and the object holds no code for
 it; ingest is RPC over the binding and never a route, so a write is authenticated

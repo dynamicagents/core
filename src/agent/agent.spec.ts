@@ -21,6 +21,7 @@ import {
 } from "../testing/harness.js";
 import { TEST_TENANT } from "../testing/auth.js";
 import { requireArtifactsStub } from "../artifacts/binding.js";
+import { UNAPPROVABLE_ARTIFACT, unrecordedApprovalText } from "./tools.js";
 import { SESSION_TRANSCRIPT_KIND } from "../artifacts/transcript.js";
 import type { StepJob, TaskParams } from "../workflow/types.js";
 import worker, {
@@ -370,6 +371,185 @@ describe("asking the caller", () => {
     const failed = await harness.waitForTerminal(accepted.id);
     expect(failed.state).toBe("TASK_STATE_FAILED");
     expect(failed.text).toBe(COPY.questionExpired);
+  });
+});
+
+describe("asking the caller to approve an artifact", () => {
+  /** An open artifact holding one note, as a plan is before anyone approves it. */
+  async function plan(): Promise<string> {
+    const artifacts = requireArtifactsStub(testEnv);
+    const token = await artifacts.createArtifact("plan");
+    await artifacts.addEntry(token, { label: "plan", text: "the plan" });
+    return token;
+  }
+
+  it("parks on an approval carrying the artifact's link", async () => {
+    const { harness } = harnessFor("approve-park");
+    using _ = harness.interceptGatekeeper();
+    const token = await plan();
+
+    const accepted = await harness.send(`approve-artifact:${token}`);
+    const [parked] = await harness.waitForState(
+      accepted.id,
+      "TASK_STATE_INPUT_REQUIRED"
+    );
+    const question = questionOf(parked);
+    expect(question.requestKind).toBe("approval");
+    expect(question.options).toBeUndefined();
+    expect(question.allowFreeform).toBe(true);
+    expect(question.prompt).toMatch(
+      new RegExp(`^Approve this\\?\\n\\nhttps?://[^/]+/a/${token}$`)
+    );
+    expect(question.artifact).toEqual({
+      id: token,
+      url: question.prompt.split("\n\n").at(-1)
+    });
+  });
+
+  it("locks an approved artifact, and tells the model", async () => {
+    const { harness } = harnessFor("approve-yes");
+    using _ = harness.interceptGatekeeper();
+    const token = await plan();
+
+    const accepted = await harness.send(`approve-artifact:${token}`);
+    const [parked] = await harness.waitForState(
+      accepted.id,
+      "TASK_STATE_INPUT_REQUIRED"
+    );
+    await harness.answer(accepted.id, questionOf(parked).requestId, {
+      optionId: "approve"
+    });
+
+    expect((await harness.waitForTerminal(accepted.id)).text).toBe("Approved.");
+    expect(
+      await requireArtifactsStub(testEnv).readArtifact(token)
+    ).toMatchObject({
+      status: "approved",
+      locked: true,
+      entries: [
+        { label: "plan", text: "the plan" },
+        { label: "approval", text: "Approved." }
+      ]
+    });
+  });
+
+  it("records a rejection and a comment without locking", async () => {
+    const { harness } = harnessFor("approve-no");
+    using _ = harness.interceptGatekeeper();
+    const token = await plan();
+
+    const rejected = await harness.send(`approve-artifact:${token}`);
+    const [first] = await harness.waitForState(
+      rejected.id,
+      "TASK_STATE_INPUT_REQUIRED"
+    );
+    await harness.answer(rejected.id, questionOf(first).requestId, {
+      optionId: "reject"
+    });
+    expect((await harness.waitForTerminal(rejected.id)).text).toBe("Rejected.");
+
+    const commented = await harness.send(`approve-artifact:${token}`);
+    const [second] = await harness.waitForState(
+      commented.id,
+      "TASK_STATE_INPUT_REQUIRED"
+    );
+    await harness.answer(commented.id, questionOf(second).requestId, {
+      text: "leave the tests alone"
+    });
+    expect((await harness.waitForTerminal(commented.id)).text).toBe(
+      "Comment: leave the tests alone"
+    );
+
+    expect(
+      await requireArtifactsStub(testEnv).readArtifact(token)
+    ).toMatchObject({
+      status: null,
+      locked: false,
+      entries: [
+        { label: "plan" },
+        { label: "approval", text: "Rejected." },
+        { label: "approval", text: "Comment: leave the tests alone" }
+      ]
+    });
+  });
+
+  /**
+   * Two questions can be parked on one artifact. The first approval locks it,
+   * and the second answer reaches nothing — which the model is told, rather
+   * than read "Approved." for an approval that did not take.
+   */
+  it("tells the model an answer that another answer overtook", async () => {
+    const { harness } = harnessFor("approve-race");
+    using _ = harness.interceptGatekeeper();
+    const token = await plan();
+
+    const first = await harness.send(`approve-artifact:${token}`);
+    const [a] = await harness.waitForState(
+      first.id,
+      "TASK_STATE_INPUT_REQUIRED"
+    );
+    const second = await harness.send(`approve-artifact:${token}`);
+    const [b] = await harness.waitForState(
+      second.id,
+      "TASK_STATE_INPUT_REQUIRED"
+    );
+
+    await harness.answer(first.id, questionOf(a).requestId, {
+      optionId: "approve"
+    });
+    expect((await harness.waitForTerminal(first.id)).text).toBe("Approved.");
+
+    await harness.answer(second.id, questionOf(b).requestId, {
+      optionId: "reject"
+    });
+    expect((await harness.waitForTerminal(second.id)).text).toBe(
+      unrecordedApprovalText("Rejected.")
+    );
+    expect(
+      (await requireArtifactsStub(testEnv).readArtifact(token))?.entries.map(
+        (entry) => entry.text
+      )
+    ).toEqual(["the plan", "Approved."]);
+  });
+
+  /**
+   * Nothing is parked, and the turn does not end on the call: the call fails,
+   * and the model reads why and carries on in the same turn.
+   */
+  it.each([
+    ["one it does not know", async () => "Q".repeat(40)],
+    [
+      "one already locked",
+      async () => {
+        const token = await plan();
+        await requireArtifactsStub(testEnv).lock(token, "approved");
+        return token;
+      }
+    ],
+    [
+      "one already settled",
+      async () => {
+        const token = await plan();
+        await requireArtifactsStub(testEnv).settle(token, "completed");
+        return token;
+      }
+    ]
+  ])("tells the model it cannot ask about %s", async (_label, make) => {
+    const { harness } = harnessFor("approve-refused");
+    using _ = harness.interceptGatekeeper();
+    const artifact = await make();
+
+    const accepted = await harness.send(`approve-artifact:${artifact}`);
+    const done = await harness.waitForTerminal(accepted.id);
+
+    expect(done.state).toBe("TASK_STATE_COMPLETED");
+    expect(done.text).toContain(UNAPPROVABLE_ARTIFACT);
+    expect(
+      harness.callbacks.some(
+        (c) =>
+          c.taskId === accepted.id && c.state === "TASK_STATE_INPUT_REQUIRED"
+      )
+    ).toBe(false);
   });
 });
 

@@ -62,7 +62,9 @@ h1 { font-size: 1.05rem; font-weight: 600; margin: 0; letter-spacing: .01em; }
   color: var(--muted);
 }
 .status[data-state="live"] { color: var(--accent); border-color: var(--accent); }
-.status[data-state="completed"] { color: var(--ok); border-color: var(--ok); }
+.status[data-state="completed"], .status[data-state="approved"] {
+  color: var(--ok); border-color: var(--ok);
+}
 .status[data-state="failed"], .status[data-state="rejected"] {
   color: var(--bad); border-color: var(--bad);
 }

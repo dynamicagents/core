@@ -1,4 +1,8 @@
-import { tool, type Tool } from "ai";
+import { tool, type StopCondition, type Tool, type ToolSet } from "ai";
+import {
+  HITL_APPROVE_OPTION_ID,
+  HITL_REJECT_OPTION_ID
+} from "@dynamicagents/g2a-protocol";
 import { z } from "zod";
 
 /**
@@ -33,6 +37,11 @@ export const askUserInputSchema = z.object({
     .optional()
     .describe(
       "Answers they can pick from, when the question has a short list of them. Leave out to have them type an answer."
+    ),
+  artifact: nonBlank("artifact")
+    .optional()
+    .describe(
+      "The id of something you made for them to approve, such as a plan. They get its link with your question, and answer Approve, Reject, or with a comment; `options` is not used. Approving it locks it, so it cannot change afterwards."
     )
 });
 
@@ -45,13 +54,88 @@ export const askUserInputSchema = z.object({
  * Think's documented pattern. `needsApproval` would count as pending and park
  * the submission instead, which is a different lifecycle.
  */
-export const askUserTool: Tool<{ question: string; options?: string[] }> = tool(
-  {
-    description:
-      "Ask the person you are working for a question, and stop. Their answer arrives as their next message, and you continue from there. Use it when you cannot go on well without a decision or a fact only they have — not to announce what you are about to do, and not to confirm what you already know.",
-    inputSchema: askUserInputSchema
-  }
-);
+export const askUserTool: Tool<{
+  question: string;
+  options?: string[];
+  artifact?: string;
+}> = tool({
+  description:
+    "Ask the person you are working for a question, and stop. Their answer arrives as their next message, and you continue from there. Use it when you cannot go on well without a decision or a fact only they have — not to announce what you are about to do, and not to confirm what you already know.",
+  inputSchema: askUserInputSchema
+});
+
+/**
+ * What the model reads when the person answered an approval: which way they
+ * went, and anything they typed. A typed answer with neither is a comment on
+ * the thing they were shown.
+ */
+export function approvalAnswerText(answer: {
+  optionId?: string;
+  text?: string;
+}): string {
+  const verdict =
+    answer.optionId === HITL_APPROVE_OPTION_ID
+      ? "Approved."
+      : answer.optionId === HITL_REJECT_OPTION_ID
+        ? "Rejected."
+        : undefined;
+  if (!verdict) return `Comment: ${answer.text ?? ""}`.trim();
+  return answer.text ? `${verdict}\n\n${answer.text}` : verdict;
+}
+
+/**
+ * An approval's answer that did not reach its artifact: it was locked first —
+ * by another answer, or by whatever else locks it — or it is gone. The person's
+ * answer stands, but it changed nothing, and the model is not told otherwise.
+ */
+export function unrecordedApprovalText(text: string): string {
+  return `${text}\n\nThis answer was not recorded, so it changed nothing: the artifact is locked, or gone.`;
+}
+
+/**
+ * What the model reads when it names an artifact the agent will not put to the
+ * person. It says why only as far as the agent can know: a closed artifact may
+ * have been approved, failed or finished, and saying which would invite the
+ * model to act on a decision nobody made.
+ */
+export const UNAPPROVABLE_ARTIFACT =
+  "Not an artifact you can ask the person to approve: it is unknown here, not one you may ask about, or no longer open. Ask with the id you were given for it, or ask without one.";
+
+/**
+ * `ask_user` as an agent offers it, with `artifact` checked when the model
+ * calls it. A refused one fails the call, and the model reads the error and
+ * carries on in the same turn; see {@link askedUser}.
+ *
+ * Here rather than in {@link askUserInputSchema}: the check is async, and the
+ * turn's outcome is read with that schema synchronously.
+ */
+export function askUserToolFor(
+  mayAskApproval: (id: string) => Promise<boolean>
+): typeof askUserTool {
+  return {
+    ...askUserTool,
+    inputSchema: askUserInputSchema.extend({
+      artifact: askUserInputSchema.shape.artifact.refine(
+        async (id) => id === undefined || (await mayAskApproval(id)),
+        { message: UNAPPROVABLE_ARTIFACT }
+      )
+    })
+  };
+}
+
+/**
+ * Whether the step asked the person something: an `ask_user` call that parsed.
+ * `hasToolCall` also counts one that did not, which ends the turn with nothing
+ * asked and its error unread by the model.
+ */
+export const askedUser: StopCondition<ToolSet> = ({ steps }) =>
+  steps
+    .at(-1)
+    ?.toolCalls.some(
+      (call) =>
+        call.toolName === ASK_USER_TOOL_NAME &&
+        !("invalid" in call && call.invalid === true)
+    ) ?? false;
 
 // --- check_back --------------------------------------------------------------
 

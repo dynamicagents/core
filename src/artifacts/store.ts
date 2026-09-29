@@ -72,6 +72,8 @@ export interface Artifact {
   status: string | null;
   /** Whether its link has been delivered — see {@link ArtifactStore.announce}. */
   announced: boolean;
+  /** Whether it takes no more notes — see {@link ArtifactStore.lock}. */
+  locked: boolean;
 }
 
 /**
@@ -153,7 +155,7 @@ const DDL = [
  * {@link ARTIFACT_RETENTION_MS}, so a deployment changing shape meets months of
  * rows it cannot drop and has to know which shape they are in.
  */
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 
 /** Move a store recorded at `from` up to the shape this build expects. */
 export type SchemaUpgrade = (sql: SqlStorage, from: number) => void;
@@ -166,10 +168,13 @@ export type SchemaUpgrade = (sql: SqlStorage, from: number) => void;
  * honest: a column written into the `CREATE TABLE` *and* into a step is added
  * twice on a fresh store, and the `ALTER TABLE` is what fails.
  */
-const upgrade: SchemaUpgrade = () => {
-  // Version 1 is what the DDL creates, so there is nothing to move yet. The
-  // first added column goes here as `if (from < 2) sql.exec("ALTER TABLE …")`.
+const upgrade: SchemaUpgrade = (sql, from) => {
+  // 2: `lock`, for an artifact that must not change after somebody acted on it.
+  if (from < 2) sql.exec("ALTER TABLE artifacts ADD COLUMN locked_at INTEGER");
 };
+
+/** Runs `fn` as one transaction: the object's `ctx.storage.transactionSync`. */
+export type Atomically = (fn: () => void) => void;
 
 /** Test seams for {@link ensureArtifactSchema}. */
 export interface ArtifactSchemaOptions {
@@ -177,6 +182,14 @@ export interface ArtifactSchemaOptions {
   steps?: SchemaUpgrade;
   /** The version to end at. Defaults to {@link CURRENT_SCHEMA_VERSION}. */
   target?: number;
+  /**
+   * What the steps and the version they reach are written in. A step that
+   * throws after an earlier one ran would otherwise leave that one's `ALTER
+   * TABLE` behind under the old version, and every later wake-up would fail
+   * running it again. Defaults to running them as they are, which only a spec
+   * does.
+   */
+  atomically?: Atomically;
 }
 
 /**
@@ -189,15 +202,16 @@ export interface ArtifactSchemaOptions {
  * free rather than merely safe.
  *
  * `steps` and `target` are parameters for the reason `now` is one in
- * {@link makeArtifactStore}: with a single version declared there is no upgrade
- * to exercise, and the branch the first added column will land on has to be
- * covered before somebody writes it.
+ * {@link makeArtifactStore}: a store written at an older version is not
+ * something a spec can otherwise produce, and each step has to be run against
+ * one.
  */
 export function ensureArtifactSchema(
   sql: SqlStorage,
   {
     steps = upgrade,
-    target = CURRENT_SCHEMA_VERSION
+    target = CURRENT_SCHEMA_VERSION,
+    atomically = (fn) => fn()
   }: ArtifactSchemaOptions = {}
 ): number {
   for (const statement of DDL) sql.exec(statement);
@@ -213,12 +227,14 @@ export function ensureArtifactSchema(
       `artifacts store is at schema version ${from} on disk but this build ` +
         `writes ${target} — downgrade is not supported`
     );
-  steps(sql, from);
-  sql.exec(
-    `INSERT INTO schema_meta (id, version) VALUES (1, ?)
-     ON CONFLICT (id) DO UPDATE SET version = excluded.version`,
-    target
-  );
+  atomically(() => {
+    steps(sql, from);
+    sql.exec(
+      `INSERT INTO schema_meta (id, version) VALUES (1, ?)
+       ON CONFLICT (id) DO UPDATE SET version = excluded.version`,
+      target
+    );
+  });
   return from;
 }
 
@@ -231,6 +247,7 @@ type ArtifactRow = {
   created_at: number;
   status: string | null;
   announced_at: number | null;
+  locked_at: number | null;
 };
 
 type EntryRow = {
@@ -262,7 +279,9 @@ export interface ArtifactStore {
    *
    * Accepted after a settle too. Settling ends the *stream*, not the log: a
    * late note is a caller getting its own ordering wrong, and recording it is
-   * better than dropping it, though no live reader will see it.
+   * better than dropping it, though no live reader will see it. A **locked**
+   * artifact is the exception, and answers `null` too — except to a replay its
+   * key catches, which returns the note as before.
    */
   append(token: string, entry: ArtifactEntryInput): AppendResult | null;
   /**
@@ -285,6 +304,16 @@ export interface ArtifactStore {
    * tell the transition from a repeat of it.
    */
   settle(token: string, status: string): boolean;
+  /**
+   * Settle this artifact in `status` and refuse every note after it. Returns
+   * whether it applied — `false` for an unknown token and for one already
+   * locked.
+   *
+   * For an artifact somebody has acted on: what was approved must be what
+   * stays behind the link. Settling alone cannot say that, because a settled
+   * artifact still records a late note — see {@link append}.
+   */
+  lock(token: string, status: string): boolean;
   /** Notes after `afterSequence`, oldest first. Zero reads the whole log. */
   entries(token: string, afterSequence?: number): ArtifactEntry[];
   /** Delete every artifact past {@link ARTIFACT_RETENTION_MS}, and its notes. */
@@ -295,20 +324,23 @@ export interface ArtifactStore {
  * Bind the queries to one object's SQLite.
  *
  * `now` is a parameter so the retention sweep is testable without waiting a
- * month; production passes `Date.now`.
+ * month; production passes `Date.now`. `atomically` is the object's
+ * `transactionSync`, for the schema upgrade — see {@link ArtifactSchemaOptions}.
  */
 export function makeArtifactStore(
   sql: SqlStorage,
-  now: () => number
+  now: () => number,
+  atomically?: Atomically
 ): ArtifactStore {
-  ensureArtifactSchema(sql);
+  ensureArtifactSchema(sql, atomically ? { atomically } : {});
 
   const rowTo = (row: ArtifactRow): Artifact => ({
     token: row.token,
     kind: row.kind,
     createdAt: row.created_at,
     status: row.status,
-    announced: row.announced_at !== null
+    announced: row.announced_at !== null,
+    locked: row.locked_at !== null
   });
 
   const rowToEntry = (row: EntryRow): ArtifactEntry => ({
@@ -330,7 +362,7 @@ export function makeArtifactStore(
   const get = (token: string): Artifact | null => {
     const row = sql
       .exec<ArtifactRow>(
-        `SELECT token, kind, created_at, status, announced_at
+        `SELECT token, kind, created_at, status, announced_at, locked_at
            FROM artifacts WHERE token = ?`,
         token
       )
@@ -397,6 +429,7 @@ export function makeArtifactStore(
         if (prior)
           return { entry: rowToEntry(prior), appended: false, announced };
       }
+      if (artifact.locked) return null;
       const sequence =
         sql
           .exec<{ next: number }>(
@@ -441,6 +474,21 @@ export function makeArtifactStore(
         "UPDATE artifacts SET status = ?, settled_at = ? WHERE token = ?",
         status,
         now(),
+        token
+      );
+      return true;
+    },
+
+    lock(token, status) {
+      const artifact = get(token);
+      if (artifact === null || artifact.locked) return false;
+      const at = now();
+      sql.exec(
+        `UPDATE artifacts SET status = ?, settled_at = COALESCE(settled_at, ?),
+           locked_at = ? WHERE token = ?`,
+        status,
+        at,
+        at,
         token
       );
       return true;

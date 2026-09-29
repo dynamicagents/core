@@ -32,11 +32,17 @@ import {
 } from "ai";
 import type { TaskState } from "@a2a-js/sdk";
 import {
+  HITL_APPROVE_OPTION_ID,
   HITL_REQUEST_TYPE,
   type HitlRequestData
 } from "@dynamicagents/g2a-protocol";
 import { SelfOrigin } from "../a2a/self-origin.js";
-import { assertArtifactsBound } from "../artifacts/binding.js";
+import { fileApproval } from "../artifacts/approval.js";
+import {
+  assertArtifactsBound,
+  requireArtifactsStub
+} from "../artifacts/binding.js";
+import { artifactViewerUrl } from "../artifacts/path.js";
 import { transcribeNote } from "../artifacts/transcript.js";
 import {
   PluginSetupError,
@@ -65,9 +71,12 @@ import {
   ASK_USER_TOOL_NAME,
   CHECK_BACK_DESCRIPTION,
   CHECK_BACK_TOOL_NAME,
-  askUserTool,
+  approvalAnswerText,
+  askedUser,
+  askUserToolFor,
   checkBackInputSchema,
   searchHistoryTool,
+  unrecordedApprovalText,
   SEARCH_HISTORY_TOOL_NAME
 } from "./tools.js";
 
@@ -276,7 +285,7 @@ export abstract class StepAgent<
       tools[Cls.spec.name] = this.subAgentTool(Cls);
     }
     // Last, so a plugin cannot shadow the tools the lifecycle reads.
-    tools[ASK_USER_TOOL_NAME] = askUserTool;
+    tools[ASK_USER_TOOL_NAME] = askUserToolFor((id) => this.mayAskApproval(id));
     tools[SEARCH_HISTORY_TOOL_NAME] = searchHistoryTool(async (query, limit) =>
       (await this.session.search(query, { limit })).map((hit) => ({
         role: hit.role,
@@ -331,7 +340,7 @@ export abstract class StepAgent<
     const closed = stepJobId !== undefined && this.ledger.closed(stepJobId);
     return {
       stopWhen: [
-        hasToolCall(ASK_USER_TOOL_NAME),
+        askedUser,
         hasToolCall(CHECK_BACK_TOOL_NAME),
         ...(stepJobId === undefined
           ? []
@@ -507,10 +516,24 @@ export abstract class StepAgent<
     await ensureStarted(this);
     const request = this.ledger.row(stepJobId)?.request;
     if (!request) return;
-    const option = request.options?.find((o) => o.id === answer.optionId);
-    const text = [option?.label ?? answer.optionId, answer.text]
-      .filter((part): part is string => Boolean(part))
-      .join("\n\n");
+    let text: string;
+    if (request.artifact) {
+      // Filed before the job resumes, so an answer the workflow delivers again
+      // finds its note by the key and reads as filed, and a throw here leaves
+      // the answer to be delivered again.
+      text = approvalAnswerText(answer);
+      const filed = await fileApproval(this.env, request.artifact.id, {
+        key: request.requestId,
+        text,
+        approved: answer.optionId === HITL_APPROVE_OPTION_ID
+      });
+      if (!filed) text = unrecordedApprovalText(text);
+    } else {
+      const option = request.options?.find((o) => o.id === answer.optionId);
+      text = [option?.label ?? answer.optionId, answer.text]
+        .filter((part): part is string => Boolean(part))
+        .join("\n\n");
+    }
     if (
       this.ledger.resume(stepJobId, { id: `answer:${request.requestId}`, text })
     ) {
@@ -689,20 +712,28 @@ export abstract class StepAgent<
     const outcome = readTurn(await this.getMessages(), stepJobId);
 
     if (outcome.ask) {
-      const request: HitlRequestData = {
-        type: HITL_REQUEST_TYPE,
-        requestId: `${stepJobId}:${outcome.ask.toolCallId}`,
-        requestKind: "choice",
-        prompt: outcome.ask.question,
-        ...(outcome.ask.options
-          ? {
-              options: outcome.ask.options.map((label, i) => ({
-                id: `option_${i + 1}`,
-                label
-              }))
-            }
-          : { allowFreeform: true })
-      };
+      const requestId = `${stepJobId}:${outcome.ask.toolCallId}`;
+      const request: HitlRequestData =
+        outcome.ask.artifact !== undefined
+          ? this.#approval(
+              requestId,
+              outcome.ask.question,
+              outcome.ask.artifact
+            )
+          : {
+              type: HITL_REQUEST_TYPE,
+              requestId,
+              requestKind: "choice",
+              prompt: outcome.ask.question,
+              ...(outcome.ask.options
+                ? {
+                    options: outcome.ask.options.map((label, i) => ({
+                      id: `option_${i + 1}`,
+                      label
+                    }))
+                  }
+                : { allowFreeform: true })
+            };
       const n = this.ledger.park(stepJobId, request);
       if (n !== null) await this.#queueReport(stepJobId, n);
       return;
@@ -718,6 +749,47 @@ export abstract class StepAgent<
       reply: outcome.reply
     });
     if (n !== null) await this.#queueReport(stepJobId, n);
+  }
+
+  /**
+   * An approval of an artifact: Approve, Reject, or a comment typed out. The
+   * prompt carries the link too, for a gatekeeper that renders no link of its
+   * own.
+   *
+   * The artifact was checked when the model named it — see
+   * {@link mayAskApproval} — and the origin is known while a job is open:
+   * `onStart` notes each open job's.
+   */
+  #approval(
+    requestId: string,
+    question: string,
+    artifact: string
+  ): HitlRequestData {
+    const url = artifactViewerUrl(this.#origin.require(), artifact);
+    return {
+      type: HITL_REQUEST_TYPE,
+      requestId,
+      requestKind: "approval",
+      prompt: `${question}\n\n${url}`,
+      allowFreeform: true,
+      artifact: { id: artifact, url }
+    };
+  }
+
+  /**
+   * Whether the model may ask the person to approve the artifact `id`. It is
+   * asked when the model calls `ask_user`, and a `false` fails that call.
+   *
+   * By default, any artifact this deployment holds that is still open: the id is
+   * the only authority an artifact has, and a model holding one was handed it.
+   * Open rather than unlocked, because a settled artifact's link has stopped
+   * streaming — an answer filed on it would not reach a page already showing it
+   * — and a lock settles. An agent that should ask only about what it made
+   * narrows this.
+   */
+  protected async mayAskApproval(id: string): Promise<boolean> {
+    const artifact = await requireArtifactsStub(this.env).artifactState(id);
+    return artifact !== null && artifact.status === null;
   }
 
   /**

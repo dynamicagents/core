@@ -247,6 +247,157 @@ describe("Artifacts — settling", () => {
   });
 });
 
+describe("Artifacts — locking", () => {
+  it("refuses every note after it, and settles in its status", async () => {
+    const artifacts = fresh("lock");
+    const token = await artifacts.createArtifact("plan");
+    await artifacts.addEntry(token, { label: "plan", text: "the plan" });
+
+    expect(await artifacts.lock(token, "approved")).toBe(true);
+    expect(await artifacts.lock(token, "rejected")).toBe(false);
+    expect(
+      await artifacts.addEntry(token, { label: "plan", text: "a new plan" })
+    ).toBeNull();
+    expect(await artifacts.readArtifact(token)).toMatchObject({
+      status: "approved",
+      locked: true,
+      entries: [{ sequence: 1, text: "the plan" }]
+    });
+  });
+
+  /**
+   * The write that goes with a lock — the answer that approved it — is recorded
+   * first, and a retry of it must find its note rather than the lock.
+   */
+  it("still answers a replay its key catches", async () => {
+    const artifacts = fresh("lock-replay");
+    const token = await artifacts.createArtifact("plan");
+    const first = await artifacts.addEntry(token, {
+      label: "approval",
+      text: "Approved.",
+      key: "answer"
+    });
+    await artifacts.lock(token, "approved");
+
+    expect(
+      await artifacts.addEntry(token, {
+        label: "approval",
+        text: "Approved.",
+        key: "answer"
+      })
+    ).toEqual(first);
+  });
+
+  it("locks a settled artifact too, in the status it is given", async () => {
+    const artifacts = fresh("lock-settled");
+    const token = await artifacts.createArtifact("plan");
+    await artifacts.settle(token, "completed");
+
+    expect(await artifacts.lock(token, "failed")).toBe(true);
+    expect(await artifacts.readArtifact(token)).toMatchObject({
+      status: "failed",
+      locked: true
+    });
+  });
+
+  it("ends a live stream, as a settle does", async () => {
+    const artifacts = fresh("lock-stream");
+    const token = await artifacts.createArtifact("plan");
+    const stream = frames(await artifacts.fetch(eventsRequest(token)));
+    expect((await stream.next())?.event).toBe("ready");
+
+    await artifacts.lock(token, "approved");
+    expect(await stream.next()).toMatchObject({
+      event: "settled",
+      data: { status: "approved" }
+    });
+    expect(await stream.next()).toBeNull();
+  });
+
+  /**
+   * The note that decides an artifact and the lock land in one call, so no
+   * other writer can lock it between them and leave this note standing on an
+   * artifact it did not decide.
+   */
+  it("locks with the note that decides it, in one call", async () => {
+    const artifacts = fresh("lock-with-note");
+    const token = await artifacts.createArtifact("plan");
+    const stream = frames(await artifacts.fetch(eventsRequest(token)));
+    expect((await stream.next())?.event).toBe("ready");
+
+    const decided = await artifacts.addEntry(
+      token,
+      { label: "approval", text: "Approved.", key: "a" },
+      { lock: "approved" }
+    );
+    expect(decided).not.toBeNull();
+    expect((await stream.next())?.event).toBe("entry");
+    expect(await stream.next()).toMatchObject({
+      event: "settled",
+      data: { status: "approved" }
+    });
+
+    // The replay is recorded; another answer is not.
+    expect(
+      await artifacts.addEntry(
+        token,
+        { label: "approval", text: "Approved.", key: "a" },
+        { lock: "approved" }
+      )
+    ).toEqual(decided);
+    expect(
+      await artifacts.addEntry(
+        token,
+        { label: "approval", text: "Approved.", key: "b" },
+        { lock: "approved" }
+      )
+    ).toBeNull();
+  });
+
+  it("refuses a token that names nothing", async () => {
+    const artifacts = fresh("lock-unknown");
+    expect(await artifacts.lock("Q".repeat(40), "approved")).toBe(false);
+  });
+});
+
+describe("Artifacts — reading one back", () => {
+  it("answers its kind, status and every note, oldest first", async () => {
+    const artifacts = fresh("read");
+    const token = await artifacts.createArtifact("plan");
+    await artifacts.addEntry(token, { label: "plan", text: "one" });
+    await artifacts.addEntry(token, { label: "caller", text: "two" });
+
+    expect(await artifacts.readArtifact(token)).toMatchObject({
+      kind: "plan",
+      status: null,
+      locked: false,
+      entries: [
+        { sequence: 1, label: "plan", text: "one" },
+        { sequence: 2, label: "caller", text: "two" }
+      ]
+    });
+  });
+
+  it("answers null for a token that names nothing", async () => {
+    const artifacts = fresh("read-unknown");
+    expect(await artifacts.readArtifact("Q".repeat(40))).toBeNull();
+  });
+
+  it("answers its state alone, without the notes", async () => {
+    const artifacts = fresh("state");
+    const token = await artifacts.createArtifact("plan");
+    await artifacts.addEntry(token, { label: "plan", text: "one" });
+    await artifacts.lock(token, "approved");
+
+    expect(await artifacts.artifactState(token)).toEqual({
+      kind: "plan",
+      status: "approved",
+      locked: true
+    });
+    expect(await artifacts.artifactState("Q".repeat(40))).toBeNull();
+  });
+});
+
 describe("Artifacts — retention", () => {
   /**
    * Lazily, on the next write, and never on an alarm: a deletion nobody is

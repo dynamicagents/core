@@ -35,6 +35,7 @@ export {
 } from "./vcr-shared.js";
 
 export {
+  askApproval,
   askUser,
   call,
   inspectingModel,
