@@ -30,7 +30,7 @@ import {
  * more than once.
  *
  * ```ts
- * const harness = createAgentHarness({ worker, env, tenant: "reactive" });
+ * const harness = createAgentHarness({ worker, env, tenant: "generic" });
  * using _ = harness.interceptGatekeeper();
  *
  * const accepted = await harness.send("what's the weather?");
