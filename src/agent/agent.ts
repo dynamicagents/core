@@ -75,6 +75,7 @@ import {
   checkBackInputSchema,
   refusedApprovalText,
   searchHistoryTool,
+  unrecordedApprovalText,
   SEARCH_HISTORY_TOOL_NAME
 } from "./tools.js";
 
@@ -516,13 +517,15 @@ export abstract class StepAgent<
     if (!request) return;
     let text: string;
     if (request.artifact !== undefined) {
-      text = approvalAnswerText(answer);
-      await this.#recordApproval(
+      const said = approvalAnswerText(answer);
+      text = (await this.#recordApproval(
         request.artifact,
         request.requestId,
         answer,
-        text
-      );
+        said
+      ))
+        ? said
+        : unrecordedApprovalText(said);
     } else {
       const option = request.options?.find((o) => o.id === answer.optionId);
       text = [option?.label ?? answer.optionId, answer.text]
@@ -537,10 +540,13 @@ export abstract class StepAgent<
   }
 
   /**
-   * Put an approval's answer on the artifact it was about, and lock an approved
-   * one: what the person approved is what stays behind the link. Before the job
-   * resumes, so a retry of this answer — the workflow's delivery is
-   * at-least-once — finds the note by its key and the lock already held, and a
+   * Put an approval's answer on the artifact it was about, locking an approved
+   * one in the same call: what the person approved is what stays behind the
+   * link. Answers whether it was recorded — `false` when another answer locked
+   * the artifact first, or it is gone.
+   *
+   * Before the job resumes, so a retry of this answer — the workflow's delivery
+   * is at-least-once — finds its note by the key and reads as recorded, and a
    * throw here leaves the answer to be delivered again.
    */
   async #recordApproval(
@@ -548,16 +554,13 @@ export abstract class StepAgent<
     requestId: string,
     answer: StepAnswer,
     text: string
-  ): Promise<void> {
-    const artifacts = requireArtifactsStub(this.env);
-    await artifacts.addEntry(token, {
-      label: "approval",
-      text,
-      key: requestId
-    });
-    if (answer.optionId === HITL_APPROVE_OPTION_ID) {
-      await artifacts.lock(token, "approved");
-    }
+  ): Promise<boolean> {
+    const recorded = await requireArtifactsStub(this.env).addEntry(
+      token,
+      { label: "approval", text, key: requestId },
+      answer.optionId === HITL_APPROVE_OPTION_ID ? { lock: "approved" } : {}
+    );
+    return recorded !== null;
   }
 
   /**
@@ -815,7 +818,7 @@ export abstract class StepAgent<
    * handed it. An agent that should approve only what it made narrows this.
    */
   protected async approvalArtifact(id: string): Promise<string | undefined> {
-    const artifact = await requireArtifactsStub(this.env).readArtifact(id);
+    const artifact = await requireArtifactsStub(this.env).artifactState(id);
     return artifact && !artifact.locked ? id : undefined;
   }
 

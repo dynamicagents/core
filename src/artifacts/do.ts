@@ -66,13 +66,17 @@ import {
  * because the send can fail: a note that opened the artifact is not a link
  * anybody received. See {@link Artifacts.announce}.
  */
-/** What {@link Artifacts.readArtifact} answers. */
-export interface ArtifactContents {
+/** What {@link Artifacts.artifactState} answers. */
+export interface ArtifactState {
   kind: string;
   /** The status it settled or locked in, or `null` while it is still open. */
   status: string | null;
   /** Whether it refuses new notes. */
   locked: boolean;
+}
+
+/** What {@link Artifacts.readArtifact} answers. */
+export interface ArtifactContents extends ArtifactState {
   /** Every note, oldest first. */
   entries: ArtifactEntry[];
 }
@@ -138,16 +142,26 @@ export class Artifacts extends DurableObject {
    * nothing, which is what a caller sees when retention swept the artifact out
    * from under it, or when the artifact is locked.
    *
+   * `lock` locks it in that status once the note is in, in the same call: no
+   * other write lands between the two, so a note that decides an artifact is
+   * never one another writer has already overtaken. A replay its key catches
+   * locks nothing new.
+   *
    * The token is required for the reason a read needs one, not because ingest
    * is guarded: it names the artifact, and a writer that cannot name it has no
    * business appending to it.
    */
   async addEntry(
     token: string,
-    entry: ArtifactEntryInput
+    entry: ArtifactEntryInput,
+    options: { lock?: string } = {}
   ): Promise<RecordedNote | null> {
     const recorded = this.store.append(token, entry);
     if (recorded === null) return null;
+    const locked =
+      options.lock !== undefined &&
+      recorded.appended &&
+      this.store.lock(token, options.lock);
     // Only a note that was actually written is sent on. A replay the entry key
     // caught has already reached everyone watching, under this same event id,
     // and sending it again would render it twice.
@@ -156,6 +170,10 @@ export class Artifacts extends DurableObject {
         token,
         sseFrame(ARTIFACT_EVENTS.entry, recorded.entry, recorded.entry.sequence)
       );
+    }
+    if (locked) {
+      const event: SettledEvent = { status: options.lock! };
+      this.broadcast(token, sseFrame(ARTIFACT_EVENTS.settled, event), "close");
     }
     return {
       sequence: recorded.entry.sequence,
@@ -202,6 +220,20 @@ export class Artifacts extends DurableObject {
     const event: SettledEvent = { status };
     this.broadcast(token, sseFrame(ARTIFACT_EVENTS.settled, event), "close");
     return true;
+  }
+
+  /**
+   * One artifact's state without its notes, or `null` when the token names
+   * nothing — for a check that needs no more than that, however long the log.
+   */
+  async artifactState(token: string): Promise<ArtifactState | null> {
+    const artifact = this.store.get(token);
+    if (artifact === null) return null;
+    return {
+      kind: artifact.kind,
+      status: artifact.status,
+      locked: artifact.locked
+    };
   }
 
   /**

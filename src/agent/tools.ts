@@ -84,6 +84,15 @@ export function approvalAnswerText(answer: {
 }
 
 /**
+ * An approval's answer that did not reach its artifact: another answer locked
+ * it first, or it is gone. The person's answer stands, but it changed nothing,
+ * and the model is not told otherwise.
+ */
+export function unrecordedApprovalText(text: string): string {
+  return `${text}\n\nThis answer was not recorded, so it changed nothing: the artifact was already locked by another answer, or it is gone.`;
+}
+
+/**
  * What the model reads when it asked for an approval of an artifact the agent
  * would not put to anyone: one it does not know, or one already locked.
  */

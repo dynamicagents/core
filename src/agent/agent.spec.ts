@@ -21,7 +21,7 @@ import {
 } from "../testing/harness.js";
 import { TEST_TENANT } from "../testing/auth.js";
 import { requireArtifactsStub } from "../artifacts/binding.js";
-import { refusedApprovalText } from "./tools.js";
+import { refusedApprovalText, unrecordedApprovalText } from "./tools.js";
 import { SESSION_TRANSCRIPT_KIND } from "../artifacts/transcript.js";
 import type { StepJob, TaskParams } from "../workflow/types.js";
 import worker, {
@@ -467,6 +467,45 @@ describe("asking the caller to approve an artifact", () => {
         { label: "approval", text: "Comment: leave the tests alone" }
       ]
     });
+  });
+
+  /**
+   * Two questions can be parked on one artifact. The first approval locks it,
+   * and the second answer reaches nothing — which the model is told, rather
+   * than read "Approved." for an approval that did not take.
+   */
+  it("tells the model an answer that another answer overtook", async () => {
+    const { harness } = harnessFor("approve-race");
+    using _ = harness.interceptGatekeeper();
+    const token = await plan();
+
+    const first = await harness.send(`approve-artifact:${token}`);
+    const [a] = await harness.waitForState(
+      first.id,
+      "TASK_STATE_INPUT_REQUIRED"
+    );
+    const second = await harness.send(`approve-artifact:${token}`);
+    const [b] = await harness.waitForState(
+      second.id,
+      "TASK_STATE_INPUT_REQUIRED"
+    );
+
+    await harness.answer(first.id, questionOf(a).requestId, {
+      optionId: "approve"
+    });
+    expect((await harness.waitForTerminal(first.id)).text).toBe("Approved.");
+
+    await harness.answer(second.id, questionOf(b).requestId, {
+      optionId: "reject"
+    });
+    expect((await harness.waitForTerminal(second.id)).text).toBe(
+      unrecordedApprovalText("Rejected.")
+    );
+    expect(
+      (await requireArtifactsStub(testEnv).readArtifact(token))?.entries.map(
+        (entry) => entry.text
+      )
+    ).toEqual(["the plan", "Approved."]);
   });
 
   /**

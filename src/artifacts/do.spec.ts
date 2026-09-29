@@ -314,6 +314,46 @@ describe("Artifacts — locking", () => {
     expect(await stream.next()).toBeNull();
   });
 
+  /**
+   * The note that decides an artifact and the lock land in one call, so no
+   * other writer can lock it between them and leave this note standing on an
+   * artifact it did not decide.
+   */
+  it("locks with the note that decides it, in one call", async () => {
+    const artifacts = fresh("lock-with-note");
+    const token = await artifacts.createArtifact("plan");
+    const stream = frames(await artifacts.fetch(eventsRequest(token)));
+    expect((await stream.next())?.event).toBe("ready");
+
+    const decided = await artifacts.addEntry(
+      token,
+      { label: "approval", text: "Approved.", key: "a" },
+      { lock: "approved" }
+    );
+    expect(decided).not.toBeNull();
+    expect((await stream.next())?.event).toBe("entry");
+    expect(await stream.next()).toMatchObject({
+      event: "settled",
+      data: { status: "approved" }
+    });
+
+    // The replay is recorded; another answer is not.
+    expect(
+      await artifacts.addEntry(
+        token,
+        { label: "approval", text: "Approved.", key: "a" },
+        { lock: "approved" }
+      )
+    ).toEqual(decided);
+    expect(
+      await artifacts.addEntry(
+        token,
+        { label: "approval", text: "Approved.", key: "b" },
+        { lock: "approved" }
+      )
+    ).toBeNull();
+  });
+
   it("refuses a token that names nothing", async () => {
     const artifacts = fresh("lock-unknown");
     expect(await artifacts.lock("Q".repeat(40), "approved")).toBe(false);
@@ -341,6 +381,20 @@ describe("Artifacts — reading one back", () => {
   it("answers null for a token that names nothing", async () => {
     const artifacts = fresh("read-unknown");
     expect(await artifacts.readArtifact("Q".repeat(40))).toBeNull();
+  });
+
+  it("answers its state alone, without the notes", async () => {
+    const artifacts = fresh("state");
+    const token = await artifacts.createArtifact("plan");
+    await artifacts.addEntry(token, { label: "plan", text: "one" });
+    await artifacts.lock(token, "approved");
+
+    expect(await artifacts.artifactState(token)).toEqual({
+      kind: "plan",
+      status: "approved",
+      locked: true
+    });
+    expect(await artifacts.artifactState("Q".repeat(40))).toBeNull();
   });
 });
 
