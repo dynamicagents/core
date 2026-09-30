@@ -259,15 +259,17 @@ describe("a one-step task", () => {
     const done = await harness.waitForTerminal(accepted.id);
     expect(done.text).toBe("considered");
 
-    const stored = await runInDurableObject(
+    const replies = await runInDurableObject(
       stub(),
       async (instance: TestAgent) =>
-        (await instance.getMessages()).flatMap((m) =>
-          m.parts.map((p) => p.type)
-        )
+        (await instance.getMessages())
+          .filter((m) => m.role === "assistant")
+          .flatMap((m) => m.parts)
     );
-    expect(stored).toContain("text");
-    expect(stored).not.toContain("reasoning");
+    expect(replies).toContainEqual(
+      expect.objectContaining({ type: "text", text: "considered" })
+    );
+    expect(replies.map((p) => p.type)).not.toContain("reasoning");
   });
 });
 
