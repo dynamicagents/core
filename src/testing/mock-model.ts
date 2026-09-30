@@ -31,6 +31,8 @@ const USAGE = {
 
 /** One model step. */
 export interface MockStep {
+  /** Reasoning, streamed before anything else, as a reasoning model's is. */
+  reasoning?: string;
   /** Assistant text. Alongside tool calls, it is what the model says first. */
   text?: string;
   /** Tool calls in this step (finish reason `tool-calls`). */
@@ -190,6 +192,12 @@ function chunksOf(step: MockStep, n: number): StreamPart[] {
     });
     return chunks;
   }
+  if (step.reasoning) {
+    const id = `r${n}`;
+    chunks.push({ type: "reasoning-start", id });
+    chunks.push({ type: "reasoning-delta", id, delta: step.reasoning });
+    chunks.push({ type: "reasoning-end", id });
+  }
   if (step.text) {
     const id = `t${n}`;
     chunks.push({ type: "text-start", id });
@@ -226,6 +234,8 @@ type GenerateResult = Awaited<ReturnType<MockLanguageModelV3["doGenerate"]>>;
 function generateOf(step: MockStep, n: number): GenerateResult {
   if (step.error !== undefined) throw new Error(step.error);
   const content: GenerateResult["content"] = [];
+  if (step.reasoning !== undefined)
+    content.push({ type: "reasoning", text: step.reasoning });
   if (step.text !== undefined) content.push({ type: "text", text: step.text });
   (step.calls ?? []).forEach((c, index) =>
     content.push({

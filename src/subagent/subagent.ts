@@ -6,19 +6,14 @@ import {
   type ThinkSession
 } from "@cloudflare/think";
 import type { ContextConfig } from "agents/context";
-import { createCompactFunction } from "agents/sessions";
-import {
-  generateText,
-  type LanguageModel,
-  type ToolSet,
-  type UIMessage
-} from "ai";
+import { type LanguageModel, type ToolSet, type UIMessage } from "ai";
 import type { AgentPlugin, PluginContext } from "../contract/plugin.js";
 import {
   assemblePlugins,
   type AssembledPlugins
 } from "../contract/assemble.js";
 import type { SubAgentSpec } from "../contract/subagent.js";
+import { compaction, SEND_REASONING } from "../agent/history.js";
 import { readRunSummary } from "../agent/outcome.js";
 
 /**
@@ -63,6 +58,8 @@ export abstract class SubAgent<
   override maxSteps = Infinity;
   override chatRecovery = { maxRecoveryWork: Infinity };
   override contextOverflow = { reactive: true };
+  /** A turn's reasoning is not stored — see `../agent/history.ts`. */
+  override sendReasoning = SEND_REASONING;
 
   /**
    * Compaction for a sub-agent is opt-in: most runs are short, and one whose
@@ -105,13 +102,7 @@ export abstract class SubAgent<
       return session;
     return session
       .onCompaction(
-        createCompactFunction({
-          summarize: (prompt) =>
-            generateText({ model: this.compactionModel(), prompt }).then(
-              (r) => r.text
-            ),
-          keepRecentTokens: this.keepRecentTokens
-        })
+        compaction(() => this.compactionModel(), this.keepRecentTokens)
       )
       .compactAfter(this.compactAfterTokens);
   }

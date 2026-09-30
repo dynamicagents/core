@@ -20,9 +20,7 @@ import {
   type AgentToolRunInfo
 } from "agents";
 import type { ContextConfig } from "agents/context";
-import { createCompactFunction } from "agents/sessions";
 import {
-  generateText,
   hasToolCall,
   tool,
   type LanguageModel,
@@ -54,6 +52,7 @@ import type { CoreEnv } from "../env.js";
 import { isTerminalState, TASK_RETENTION_MS } from "../ledger.js";
 import { reportEventType } from "../workflow/keys.js";
 import type { StepAnswer, StepJob } from "../workflow/types.js";
+import { compaction, SEND_REASONING } from "./history.js";
 import { ensureStarted } from "./lifecycle.js";
 import { latestStepJobId, readTurn } from "./outcome.js";
 import { StepJobs, type JobRow } from "./step-jobs.js";
@@ -161,6 +160,8 @@ export abstract class StepAgent<
   override maxSteps = Infinity;
   override chatRecovery = { maxRecoveryWork: Infinity };
   override contextOverflow = { reactive: true };
+  /** A turn's reasoning is not stored — see `./history.ts`. */
+  override sendReasoning = SEND_REASONING;
 
   /**
    * The job ledger. Not `tasks`: every `Agent` already has `this.tasks`, the
@@ -246,13 +247,7 @@ export abstract class StepAgent<
   override configureSession(session: ThinkSession): ThinkSession {
     return session
       .onCompaction(
-        createCompactFunction({
-          summarize: (prompt) =>
-            generateText({ model: this.compactionModel(), prompt }).then(
-              (r) => r.text
-            ),
-          keepRecentTokens: this.keepRecentTokens
-        })
+        compaction(() => this.compactionModel(), this.keepRecentTokens)
       )
       .compactAfter(this.compactAfterTokens);
   }

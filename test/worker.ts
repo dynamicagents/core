@@ -92,6 +92,10 @@ function parentRule(view: ModelTurnView): MockStep {
   }
 
   const answered = view.answered;
+  const reason = after(text, "reason:");
+  if (reason !== undefined) {
+    return { reasoning: "weighing it up", text: reason };
+  }
   const ask = after(text, "ask:");
   if (ask !== undefined) {
     return answered
