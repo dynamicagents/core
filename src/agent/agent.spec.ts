@@ -249,6 +249,26 @@ describe("a one-step task", () => {
     const { host } = harnessFor("cold");
     await expect(host.getTask("no-such-task")).resolves.toBeNull();
   });
+
+  /** Stored reasoning is counted toward compaction and read by nobody. */
+  it("stores what the model said, and none of its reasoning", async () => {
+    const { harness, stub } = harnessFor("reasoning");
+    using _ = harness.interceptGatekeeper();
+
+    const accepted = await harness.send("reason:considered");
+    const done = await harness.waitForTerminal(accepted.id);
+    expect(done.text).toBe("considered");
+
+    const stored = await runInDurableObject(
+      stub(),
+      async (instance: TestAgent) =>
+        (await instance.getMessages()).flatMap((m) =>
+          m.parts.map((p) => p.type)
+        )
+    );
+    expect(stored).toContain("text");
+    expect(stored).not.toContain("reasoning");
+  });
 });
 
 describe("cancellation", () => {
