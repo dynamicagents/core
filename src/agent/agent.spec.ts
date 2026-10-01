@@ -273,6 +273,53 @@ describe("a one-step task", () => {
   });
 });
 
+/**
+ * The pre-tool-call flush — see `onChunk` in `src/agent/agent.ts` — read where a
+ * caller reads it, as working callbacks. It hangs off `ai`'s streamed text part,
+ * whose `text` the hook buffers, so a release that renames or regroups that part
+ * takes every progress line with it while the turn still settles correctly and
+ * the suite stays green. Nothing but a spec that streams a real turn sees it.
+ */
+describe("what the model says before a tool call", () => {
+  it("reaches the caller while the tool is still running", async () => {
+    const { harness } = harnessFor("flush");
+    using _ = harness.interceptGatekeeper();
+
+    const accepted = await harness.send("narrate:3");
+    // Streamed in several deltas, and joined and trimmed into one line.
+    await until(
+      "the first sentence",
+      () => working(harness, accepted.id),
+      (texts) => texts.includes("First, waiting.")
+    );
+    // The point of the flush: the tool it preceded has not returned yet, so
+    // `onStepEnd` would still be seconds away.
+    expect(terminals(harness, accepted.id)).toHaveLength(0);
+
+    const done = await harness.waitForTerminal(accepted.id);
+    expect(done.text).toBe("narrated");
+    // A step resets the buffer, so the next step's sentence goes on its own and
+    // the first is not repeated. The turn's reply is not a progress line.
+    expect(working(harness, accepted.id)).toEqual([
+      "First, waiting.",
+      "Then marking."
+    ]);
+  });
+
+  it("is flushed once a step, on the first tool call", async () => {
+    const { harness, debug } = harnessFor("flush-latch");
+    using _ = harness.interceptGatekeeper();
+
+    const accepted = await harness.send("twocalls");
+    const done = await harness.waitForTerminal(accepted.id);
+    expect(done.text).toBe("both ran");
+    expect((await debug(accepted.id)).marks).toBe(2);
+    // Said between the two calls, and dropped: a step pushes one line, or a
+    // model that narrates every call of a parallel step floods the caller.
+    expect(working(harness, accepted.id)).toEqual(["Before the first."]);
+  });
+});
+
 describe("cancellation", () => {
   it("cancels a turn that is still running, and never calls back as done", async () => {
     const { harness, debug, host, settled } = harnessFor("cancel");

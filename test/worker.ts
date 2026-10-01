@@ -149,6 +149,30 @@ function parentRule(view: ModelTurnView): MockStep {
   if (text === "whoami") {
     return answered ? { text: lastToolOutput(view) } : call("test_whoami", {});
   }
+  // Two steps, each saying something before its tool call, and the first
+  // sentence in several deltas: what the pre-call flush is read through.
+  const narrate = after(text, "narrate:");
+  if (narrate !== undefined) {
+    const out = lastToolOutput(view);
+    if (out === "marked") return { text: "narrated" };
+    if (out.includes("waited")) return call("test_mark", {}, "Then marking.");
+    return call("test_wait", { seconds: Number(narrate) }, [
+      "  First, ",
+      "waiting.\n"
+    ]);
+  }
+  // One step, two calls, a sentence before each: only the first is flushed.
+  if (text === "twocalls") {
+    return answered
+      ? { text: "both ran" }
+      : {
+          text: "Before the first.",
+          calls: [
+            { toolName: "test_mark", input: {} },
+            { toolName: "test_mark", input: {}, text: "Before the second." }
+          ]
+        };
+  }
   const checkback = after(text, "checkback:");
   if (checkback !== undefined) {
     return answered
