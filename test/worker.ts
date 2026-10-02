@@ -150,26 +150,31 @@ function parentRule(view: ModelTurnView): MockStep {
     return answered ? { text: lastToolOutput(view) } : call("test_whoami", {});
   }
   // Two steps, each saying something before its tool call, and the first
-  // sentence in several deltas: what the pre-call flush is read through.
+  // sentence in several deltas: what the pre-call flush is read through. The
+  // first call parks in `test_hold`, so the spec reads that sentence with the
+  // step provably still open.
   const narrate = after(text, "narrate:");
   if (narrate !== undefined) {
     const out = lastToolOutput(view);
     if (out === "marked") return { text: "narrated" };
-    if (out.includes("waited")) return call("test_mark", {}, "Then marking.");
-    return call("test_wait", { seconds: Number(narrate) }, [
-      "  First, ",
-      "waiting.\n"
-    ]);
+    if (out.includes("held")) return call("test_mark", {}, "Then marking.");
+    return call("test_hold", { key: narrate }, ["  First, ", "waiting.\n"]);
   }
-  // One step, two calls, a sentence before each: only the first is flushed.
-  if (text === "twocalls") {
+  // One step, two calls, a sentence before each: only the first is flushed. The
+  // last call parks, so the step stays open while the spec reads what arrived.
+  const twocalls = after(text, "twocalls:");
+  if (twocalls !== undefined) {
     return answered
       ? { text: "both ran" }
       : {
           text: "Before the first.",
           calls: [
             { toolName: "test_mark", input: {} },
-            { toolName: "test_mark", input: {}, text: "Before the second." }
+            {
+              toolName: "test_hold",
+              input: { key: twocalls },
+              text: "Before the second."
+            }
           ]
         };
   }
@@ -316,6 +321,16 @@ export class TestAgent extends StepAgent<TestEnv> {
   /** just-bash in an agent that never shells out is dead weight. */
   override workspaceBash = false as const;
 
+  /** A parked `test_hold`, by key, with the resolve that frees it. */
+  readonly #holding = new Map<string, () => void>();
+  /**
+   * Keys released before any turn parked on them. Without this latch a release
+   * that wins the race against the tool call is simply lost, and the turn it
+   * was meant to free parks until the object dies — a hang where the hold is
+   * there to buy certainty.
+   */
+  readonly #releasedHolds = new Set<string>();
+
   getModel(): ThinkModel {
     return scriptedModel(parentRule);
   }
@@ -347,8 +362,51 @@ export class TestAgent extends StepAgent<TestEnv> {
           this.sql`INSERT INTO test_marks VALUES (${Date.now()})`;
           return "marked";
         }
+      }),
+      test_hold: tool({
+        description: "Wait in this turn until the caller releases it.",
+        inputSchema: z.object({ key: z.string() }),
+        execute: ({ key }, { abortSignal }) => this.#hold(key, abortSignal)
       })
     };
+  }
+
+  /**
+   * Park the turn until {@link releaseHold}, so a spec holds a step open for as
+   * long as it needs rather than racing a sleep: what the pre-tool-call flush
+   * is read through in `src/agent/agent.spec.ts`. Abort-aware like
+   * {@link waitTool}, so a canceled turn does not stay parked.
+   */
+  #hold(key: string, signal?: AbortSignal): Promise<{ held: string }> {
+    if (this.#releasedHolds.delete(key)) return Promise.resolve({ held: key });
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) return reject(new Error("aborted"));
+      const onAbort = () => {
+        this.#holding.delete(key);
+        reject(new Error("aborted"));
+      };
+      this.#holding.set(key, () => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve({ held: key });
+      });
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  /** The keys parked in `test_hold` right now. */
+  async debugHolding(): Promise<string[]> {
+    return [...this.#holding.keys()];
+  }
+
+  /** Free a parked `test_hold`, or the next turn that parks on that key. */
+  async releaseHold(key: string): Promise<void> {
+    const free = this.#holding.get(key);
+    if (!free) {
+      this.#releasedHolds.add(key);
+      return;
+    }
+    this.#holding.delete(key);
+    free();
   }
 
   /** A retry is told so: the scripted model keys on the `retry:` prefix. */
