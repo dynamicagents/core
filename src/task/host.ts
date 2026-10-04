@@ -15,7 +15,6 @@ import { taskStateLabel, type PlainTask } from "../a2a/task.js";
 import type { GatekeeperIdentity } from "../a2a/verify.js";
 import { assertArtifactsBound } from "../artifacts/binding.js";
 import { settleTranscript } from "../artifacts/transcript.js";
-import { ensureStarted } from "../agent/lifecycle.js";
 import type { CoreEnv } from "../env.js";
 import { isTerminalState, TASK_RETENTION_MS } from "../ledger.js";
 import { answerEventType } from "../workflow/keys.js";
@@ -68,6 +67,8 @@ interface DeliveryJob {
  *    never wrote.
  *  - **Both workflow callbacks repeat**, because the SDK runs them as steps, so
  *    both are guarded.
+ *  - **Every RPC entry point is a native `async` method**, so `onStart` has run
+ *    before it does — see {@link file://../agent/agent.ts StepAgent}.
  */
 export abstract class TaskHost<
   Env extends Cloudflare.Env & CoreEnv = Cloudflare.Env & CoreEnv
@@ -142,7 +143,6 @@ export abstract class TaskHost<
    * `messageId`: a redelivery finds the row bound and returns it.
    */
   async acceptTask(turn: AcceptedTurn): Promise<PlainTask> {
-    await ensureStarted(this);
     const row = this.ledger.accept({
       messageId: turn.messageId,
       taskId: turn.taskId,
@@ -174,13 +174,11 @@ export abstract class TaskHost<
   }
 
   async getTask(taskId: string): Promise<PlainTask | null> {
-    await ensureStarted(this);
     await this.#reconcile(taskId);
     return this.ledger.get(taskId);
   }
 
   async listTasks(query: TaskListQuery): Promise<TaskListPage> {
-    await ensureStarted(this);
     return this.ledger.list(query);
   }
 
@@ -191,7 +189,6 @@ export abstract class TaskHost<
    * the run either way.
    */
   async saveTask(task: Task): Promise<boolean> {
-    await ensureStarted(this);
     if (task.status?.state === TaskState.TASK_STATE_CANCELED) {
       return (await this.#cancel(task.id, task)) !== null;
     }
@@ -199,7 +196,6 @@ export abstract class TaskHost<
   }
 
   async cancelTask(taskId: string): Promise<PlainTask | null> {
-    await ensureStarted(this);
     return this.#cancel(taskId);
   }
 
@@ -224,7 +220,6 @@ export abstract class TaskHost<
     messageId: string;
     reply: HumanReply;
   }): Promise<boolean> {
-    await ensureStarted(this);
     const { taskId, messageId, reply } = input;
     const row = this.ledger.row(taskId);
     if (!row) return false;
@@ -289,7 +284,6 @@ export abstract class TaskHost<
     taskId: string,
     job: { stepJobId: string; binding: string }
   ): Promise<boolean> {
-    await ensureStarted(this);
     const row = this.ledger.row(taskId);
     if (!row || isTerminalState(row.state)) return false;
     this.runs.note(taskId, job);
@@ -302,7 +296,6 @@ export abstract class TaskHost<
    * answered question back.
    */
   async park(taskId: string, request: HitlRequestData): Promise<ParkOutcome> {
-    await ensureStarted(this);
     const row = this.ledger.row(taskId);
     if (!row || isTerminalState(row.state)) return "closed";
     if (this.runs.wasAnswered(request.requestId)) return "parked";
@@ -325,7 +318,6 @@ export abstract class TaskHost<
    * arrive never fails the work that wrote it.
    */
   async progress(taskId: string, text: string, key: string): Promise<void> {
-    await ensureStarted(this);
     const row = this.ledger.row(taskId);
     if (!row || isTerminalState(row.state)) return;
     await this.#channel(taskId)?.working(text, key);
@@ -373,7 +365,6 @@ export abstract class TaskHost<
 
   /** A start an eviction cut short, run again from the recorded params. */
   async resumeStart(payload: { taskId: string }): Promise<void> {
-    await ensureStarted(this);
     const row = this.ledger.row(payload.taskId);
     if (!row || row.state !== "submitted" || row.bound) return;
     await this.#start(payload.taskId);
@@ -381,7 +372,6 @@ export abstract class TaskHost<
 
   /** Relay the answer a resumed task owes its workflow, then clear it. */
   async deliverAnswer(payload: { taskId: string }): Promise<void> {
-    await ensureStarted(this);
     const row = this.ledger.row(payload.taskId);
     if (!row?.answer) return;
     const { id, requestId, ...answer } = row.answer;
@@ -406,7 +396,6 @@ export abstract class TaskHost<
     taskId: string;
     requestId: string;
   }): Promise<void> {
-    await ensureStarted(this);
     const row = this.ledger.row(payload.taskId);
     if (!row || row.request?.requestId !== payload.requestId) return;
     const failed = buildFailedTask(
@@ -425,7 +414,6 @@ export abstract class TaskHost<
    * answer, or to another question — is neither sent nor acknowledged.
    */
   async deliverTask(job: DeliveryJob): Promise<void> {
-    await ensureStarted(this);
     const row = this.ledger.row(job.taskId);
     if (!row?.push || row.deliveryKey !== job.key) return;
     await createPushChannel(this.env.A2A_SIGNING_KEY, row.push).deliver(
@@ -439,7 +427,6 @@ export abstract class TaskHost<
    * first and both are owed in one write, so this finishes either.
    */
   async runSettleHooks(payload: { taskId: string }): Promise<void> {
-    await ensureStarted(this);
     const row = this.ledger.row(payload.taskId);
     if (!row?.hooksPending) return;
     if (row.stopPending) await this.#stopRun(payload.taskId);
@@ -448,7 +435,6 @@ export abstract class TaskHost<
 
   /** The end-of-task notice, to one agent that ran a job for the task. */
   async notifyStepAgent(job: NoticeJob): Promise<void> {
-    await ensureStarted(this);
     await (
       await this.#stepAgent(job.binding)
     ).stepTaskSettled(job.taskId, job.state);
@@ -467,7 +453,6 @@ export abstract class TaskHost<
    * what is past the window.
    */
   async retainTasks(): Promise<void> {
-    await ensureStarted(this);
     for (const taskId of this.ledger.openBound()) await this.#reconcile(taskId);
     this.ledger.sweep(Date.now() - TASK_RETENTION_MS);
     this.runs.sweep();
@@ -586,7 +571,6 @@ export abstract class TaskHost<
 
   /** A stop that failed, tried again. Throws, so the queue retries it. */
   async finishStop(payload: { taskId: string }): Promise<void> {
-    await ensureStarted(this);
     if (!this.ledger.row(payload.taskId)?.stopPending) return;
     if (!(await this.#tryStopRun(payload.taskId))) {
       throw new Error(`the run of task ${payload.taskId} is not stopped yet`);
