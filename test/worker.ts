@@ -191,7 +191,11 @@ function parentRule(view: ModelTurnView): MockStep {
   return { text: after(text, "echo:") ?? text };
 }
 
-/** A sub-agent's script: `sleep:N` sleeps in a tool, narrating first. */
+/**
+ * A sub-agent's script: `sleep:N` sleeps in a tool, narrating first. `cut:N`
+ * says `step k.` and parks in `child_park`, N times, then answers: a spec
+ * evicts the object at each park.
+ */
 function childRule(view: ModelTurnView): MockStep {
   const text = view.lastUserText;
   if (text === "fail") return { error: "child told to fail" };
@@ -201,7 +205,36 @@ function childRule(view: ModelTurnView): MockStep {
       ? { text: `child did: sleep:${sleep}` }
       : call("child_sleep", { seconds: Number(sleep) }, `working on ${text}`);
   }
+  // Read off the run's own message: a recovery asks with a prompt of its own.
+  const cut = userTexts(view)
+    .map((said) => after(said, "cut:"))
+    .find((n) => n !== undefined);
+  if (cut !== undefined) {
+    const said = stepsSaid(view);
+    return said < Number(cut)
+      ? call("child_park", {}, `step ${said + 1}.`)
+      : { text: "the answer." };
+  }
   return { text: `child did: ${text}` };
+}
+
+function userTexts(view: ModelTurnView): string[] {
+  return view.prompt
+    .filter((message) => message.role === "user")
+    .flatMap((message) => message.content)
+    .flatMap((part) => (part.type === "text" ? [part.text.trim()] : []));
+}
+
+/**
+ * How many `step k.` the assistant has said. Counted from its text, not its
+ * tool results: a cut can lose the call that followed one.
+ */
+function stepsSaid(view: ModelTurnView): number {
+  return view.prompt
+    .filter((message) => message.role === "assistant")
+    .flatMap((message) => message.content)
+    .filter((part) => part.type === "text" && /^step \d+\.$/.test(part.text))
+    .length;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -276,7 +309,30 @@ abstract class TestSubAgentBase extends SubAgent<TestEnv> {
           await sleep(seconds * 1000, abortSignal);
           return { slept: seconds };
         }
+      }),
+      child_park: tool({
+        description: "Work until the object is evicted.",
+        inputSchema: z.object({}),
+        execute: async (_input, { abortSignal }) => {
+          this.sql`CREATE TABLE IF NOT EXISTS test_parks (at INTEGER)`;
+          this.sql`INSERT INTO test_parks VALUES (${Date.now()})`;
+          await sleep(60_000, abortSignal);
+          return { parked: true };
+        }
       })
+    };
+  }
+
+  /** How often this run parked in `child_park`, and the messages it wrote. */
+  async debugRun(): Promise<{ parks: number; assistantMessages: number }> {
+    this.sql`CREATE TABLE IF NOT EXISTS test_parks (at INTEGER)`;
+    return {
+      parks:
+        this.sql<{ n: number }>`SELECT COUNT(*) AS n FROM test_parks`[0]?.n ??
+        0,
+      assistantMessages: (await this.getMessages()).filter(
+        (m) => m.role === "assistant"
+      ).length
     };
   }
 }
@@ -307,7 +363,12 @@ export interface JobDebug {
     open: boolean;
     settled: boolean;
   }[];
-  runs: { runId: string; status: string }[];
+  runs: {
+    runId: string;
+    status: string;
+    parks: number;
+    assistantMessages: number;
+  }[];
   reports: StepReportDebug[];
   /** Every run a spec's `settle` released, on this object. */
   released: { runId: string; status: string }[];
@@ -446,7 +507,8 @@ export class TestAgent extends StepAgent<TestEnv> {
       const inspection = await child.inspectAgentToolRun(work.workId);
       runs.push({
         runId: work.workId,
-        status: inspection?.status ?? "unknown"
+        status: inspection?.status ?? "unknown",
+        ...(await child.debugRun())
       });
     }
     const debug: JobDebug = {

@@ -855,6 +855,37 @@ describe("a detached sub-agent", () => {
     expect(reportsOf(settled)).toEqual(["completed"]);
     expect(state.reports[0].report.reply).toContain("late but real");
   });
+
+  it("reports a run the runtime cut twice whole, though its turn is two messages", async () => {
+    const { harness, stub, debug } = harnessFor("bg-cut");
+    using _ = harness.interceptGatekeeper();
+
+    const accepted = await harness.send("bgdelegate:cut:2");
+    for (const n of [1, 2]) {
+      await until(
+        `the run's park ${n}`,
+        () => debug(accepted.id),
+        (d) => (d.runs[0]?.parks ?? 0) >= n
+      );
+      // The abort rejects the call that made it.
+      await runInDurableObject(stub(), (_instance, state) => {
+        state.abort("cut");
+      }).catch(() => {});
+    }
+    // Reading the run wakes the evicted child to recover. Left alone, it waits
+    // for the parent's next reconcile, and those come further apart each time.
+    await until(
+      "the run to finish",
+      () => debug(accepted.id),
+      (d) => d.runs[0]?.status === "completed"
+    );
+
+    const done = await harness.waitForTerminal(accepted.id);
+    expect(done.text).toContain("step 1.\nstep 2.\nthe answer.");
+    // The reason `SubAgent` reads the summary itself: Think's own is the first
+    // message alone, "step 1.". Were this one message, Think's would do.
+    expect((await debug(accepted.id)).runs[0].assistantMessages).toBe(2);
+  });
 });
 
 describe("a turn the runtime cuts", () => {
