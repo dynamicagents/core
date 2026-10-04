@@ -6,9 +6,10 @@ import { ASK_USER_TOOL_NAME, askUserInputSchema } from "./tools.js";
  *
  * Think has no "final reply" tool: a turn ends when the model stops calling
  * tools, and what the caller gets is what the assistant said. Which messages
- * count is the part worth writing down — a recovered turn is **two or more**
- * assistant messages (the persisted partial, then the continuation), so the
- * turn is every assistant message after the user message that started it.
+ * count is the part worth writing down — Think extends the interrupted message
+ * when it recovers a turn, but writes any other continuation as an assistant
+ * message of its own, so the turn is every assistant message after the user
+ * message that started it.
  */
 
 /** A question the turn ended on, still waiting for its answer. */
@@ -64,8 +65,8 @@ export function readTurn(
 /**
  * A sub-agent run's result, as its parent receives it: Think's own summary
  * rule — every text part, a line apart — read across the whole turn. Think
- * stops at the first assistant message with text, which after a recovery is
- * the partial, and drops the continuation that holds the answer.
+ * stops at the first assistant message with text, and drops a continuation
+ * written as a message of its own.
  */
 export function readRunSummary(messages: UIMessage[]): string {
   let start = messages.length;

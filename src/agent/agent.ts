@@ -53,7 +53,6 @@ import { isTerminalState, TASK_RETENTION_MS } from "../ledger.js";
 import { reportEventType } from "../workflow/keys.js";
 import type { StepAnswer, StepJob } from "../workflow/types.js";
 import { compaction, SEND_REASONING } from "./history.js";
-import { ensureStarted } from "./lifecycle.js";
 import { latestStepJobId, readTurn } from "./outcome.js";
 import { StepJobs, type JobRow } from "./step-jobs.js";
 import type {
@@ -136,6 +135,11 @@ interface A2AConfig {
  * A subclass supplies the model and the compaction values; core ships no
  * prompt copy. A subclass that overrides a Think hook this class implements
  * calls `super`.
+ *
+ * Every method a caller reaches over RPC is a native `async` method, and an
+ * override keeps it one: agents starts the lifecycle — Think's session, and
+ * the submission ledger under it — before such a method entered from outside
+ * the agent, and never before a synchronous one.
  */
 export abstract class StepAgent<
   Env extends Cloudflare.Env & CoreEnv = Cloudflare.Env & CoreEnv
@@ -464,7 +468,6 @@ export abstract class StepAgent<
    * left a canceled row, and starts nothing.
    */
   async startStepJob(job: StepJob): Promise<void> {
-    await ensureStarted(this);
     this.#origin.note(job.jku);
     const existing = this.ledger.row(job.stepJobId);
     if (existing && isTerminalState(existing.state)) {
@@ -508,7 +511,6 @@ export abstract class StepAgent<
    * turn. A repeat finds the question already taken and does nothing.
    */
   async answerStepJob(stepJobId: string, answer: StepAnswer): Promise<void> {
-    await ensureStarted(this);
     const request = this.ledger.row(stepJobId)?.request;
     if (!request) return;
     let text: string;
@@ -541,7 +543,6 @@ export abstract class StepAgent<
    * submits again under the same idempotency key, or finds it cleared.
    */
   async submitAnswer(payload: { stepJobId: string }): Promise<void> {
-    await ensureStarted(this);
     const row = this.ledger.row(payload.stepJobId);
     if (!row?.answer) return;
     if (!isTerminalState(row.state)) {
@@ -562,7 +563,6 @@ export abstract class StepAgent<
    * agent that picks the task up again decides what becomes of the work.
    */
   async cancelStepJob(stepJobId: string): Promise<void> {
-    await ensureStarted(this);
     if (!this.ledger.row(stepJobId)) {
       this.ledger.tombstone(stepJobId);
       return;
@@ -578,7 +578,6 @@ export abstract class StepAgent<
    * open: a stop that failed runs it when its retry holds.
    */
   async stepTaskSettled(taskId: string, state: TaskState): Promise<void> {
-    await ensureStarted(this);
     for (const stepJobId of this.ledger.openJobsOf(taskId)) {
       await this.#cancel(stepJobId);
     }
@@ -588,7 +587,6 @@ export abstract class StepAgent<
 
   /** Owed settle hooks whose work has stopped, run from the queue. */
   async runTaskHooks(): Promise<void> {
-    await ensureStarted(this);
     await this.#runDueTaskHooks();
   }
 
@@ -629,7 +627,6 @@ export abstract class StepAgent<
     n: number;
     resend?: boolean;
   }): Promise<void> {
-    await ensureStarted(this);
     const { stepJobId, n } = payload;
     const owed = this.ledger.report(stepJobId, n);
     const job = this.ledger.job(stepJobId);
@@ -872,7 +869,6 @@ export abstract class StepAgent<
 
   /** A stop of a job's work that failed, tried again. Throws, so it retries. */
   async finishStopWork(payload: { stepJobId: string }): Promise<void> {
-    await ensureStarted(this);
     if (!this.ledger.closed(payload.stepJobId)) return;
     if (!(await this.#tryStopWork(payload.stepJobId))) {
       throw new Error(
@@ -1098,7 +1094,6 @@ export abstract class StepAgent<
     run: AgentToolRunInfo,
     result: AgentToolLifecycleResult
   ): Promise<void> {
-    await ensureStarted(this);
     if (result.status === "interrupted" && result.childStillRunning) return;
     const work = this.ledger.work(run.runId);
     if (!work || this.ledger.closed(work.stepJobId)) return;
@@ -1116,7 +1111,6 @@ export abstract class StepAgent<
    * is a no-op. A job that closed meanwhile owes it nothing.
    */
   async submitFollowUp(payload: { workId: string }): Promise<void> {
-    await ensureStarted(this);
     const work = this.ledger.work(payload.workId);
     const followUp = this.ledger.followUp(payload.workId);
     if (!work || !followUp) return;
@@ -1170,7 +1164,6 @@ export abstract class StepAgent<
 
   /** The wake `check_back` scheduled: the same follow-up as a finished run. */
   async onCheckBack(wake: CheckBackWake): Promise<void> {
-    await ensureStarted(this);
     if (this.ledger.closed(wake.stepJobId)) return;
     this.ledger.beginFollowUp(wake.workId, {
       id: `wake:${wake.workId}`,
@@ -1222,7 +1215,6 @@ export abstract class StepAgent<
    * transcript dedupes on the note's key. Throws, so the queue retries.
    */
   async replayNotes(job: NotesJob): Promise<void> {
-    await ensureStarted(this);
     const work = this.ledger.work(job.runId);
     const Cls = work && this.#subAgent(work.name);
     if (!work || !Cls) return;

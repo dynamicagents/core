@@ -23,5 +23,3 @@ export {
   askUserTool,
   checkBackInputSchema
 } from "./tools.js";
-
-export { ensureStarted } from "./lifecycle.js";
