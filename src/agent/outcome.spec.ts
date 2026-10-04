@@ -31,7 +31,7 @@ const toolPart = (
   }) as UIMessage["parts"][number];
 
 describe("reading a turn", () => {
-  it("reads every assistant message after the task's message — a recovered turn is several", () => {
+  it("reads every assistant message after the task's message — a continuation is one of its own", () => {
     const outcome = readTurn(
       [
         user("u1", "t1"),
@@ -148,7 +148,7 @@ describe("reading a turn", () => {
 });
 
 describe("reading a sub-agent run's result", () => {
-  it("reads a recovered run whole: the partial, then the continuation", () => {
+  it("reads a run whole across a continuation written as its own message", () => {
     const summary = readRunSummary([
       user("u1", "t1", "fix the tests"),
       assistant("a1", [
