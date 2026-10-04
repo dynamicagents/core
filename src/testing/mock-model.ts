@@ -33,10 +33,19 @@ const USAGE = {
 export interface MockStep {
   /** Reasoning, streamed before anything else, as a reasoning model's is. */
   reasoning?: string;
-  /** Assistant text. Alongside tool calls, it is what the model says first. */
-  text?: string;
-  /** Tool calls in this step (finish reason `tool-calls`). */
-  calls?: { toolName: string; input?: unknown }[];
+  /**
+   * Assistant text. Alongside tool calls, it is what the model says first. An
+   * array streams one `text-delta` per element, which is how a provider sends a
+   * sentence: whatever reads the stream has to join them back.
+   */
+  text?: string | string[];
+  /**
+   * Tool calls in this step (finish reason `tool-calls`). A call's own `text`
+   * streams immediately before that call — the only way to put text *after* a
+   * tool call within one step, which a provider does and `text` above cannot
+   * express.
+   */
+  calls?: { toolName: string; input?: unknown; text?: string | string[] }[];
   /** Fail the step with a stream error instead — the failed-turn path. */
   error?: string;
 }
@@ -50,7 +59,7 @@ export function reply(text: string): MockStep {
 export function call(
   toolName: string,
   input: unknown = {},
-  text?: string
+  text?: string | string[]
 ): MockStep {
   return {
     ...(text !== undefined ? { text } : {}),
@@ -198,15 +207,11 @@ function chunksOf(step: MockStep, n: number): StreamPart[] {
     chunks.push({ type: "reasoning-delta", id, delta: step.reasoning });
     chunks.push({ type: "reasoning-end", id });
   }
-  if (step.text) {
-    const id = `t${n}`;
-    chunks.push({ type: "text-start", id });
-    chunks.push({ type: "text-delta", id, delta: step.text });
-    chunks.push({ type: "text-end", id });
-  }
+  pushText(chunks, step.text, `t${n}`);
   const calls = step.calls ?? [];
   calls.forEach((c, index) => {
     const id = `c${n}-${index}-${crypto.randomUUID().slice(0, 8)}`;
+    pushText(chunks, c.text, `t${n}-${index}`);
     const input = JSON.stringify(c.input ?? {});
     chunks.push({ type: "tool-input-start", id, toolName: c.toolName });
     chunks.push({ type: "tool-input-delta", id, delta: input });
@@ -229,6 +234,24 @@ function chunksOf(step: MockStep, n: number): StreamPart[] {
   return chunks;
 }
 
+/** One text part, as one `text-delta` per element. Nothing for no text. */
+function pushText(
+  chunks: StreamPart[],
+  text: string | string[] | undefined,
+  id: string
+): void {
+  const deltas = (Array.isArray(text) ? text : [text ?? ""]).filter(
+    (delta) => delta !== ""
+  );
+  if (deltas.length === 0) return;
+  chunks.push({ type: "text-start", id });
+  for (const delta of deltas) chunks.push({ type: "text-delta", id, delta });
+  chunks.push({ type: "text-end", id });
+}
+
+const joined = (text: string | string[]): string =>
+  Array.isArray(text) ? text.join("") : text;
+
 type GenerateResult = Awaited<ReturnType<MockLanguageModelV3["doGenerate"]>>;
 
 function generateOf(step: MockStep, n: number): GenerateResult {
@@ -236,15 +259,18 @@ function generateOf(step: MockStep, n: number): GenerateResult {
   const content: GenerateResult["content"] = [];
   if (step.reasoning !== undefined)
     content.push({ type: "reasoning", text: step.reasoning });
-  if (step.text !== undefined) content.push({ type: "text", text: step.text });
-  (step.calls ?? []).forEach((c, index) =>
+  if (step.text !== undefined)
+    content.push({ type: "text", text: joined(step.text) });
+  (step.calls ?? []).forEach((c, index) => {
+    if (c.text !== undefined)
+      content.push({ type: "text", text: joined(c.text) });
     content.push({
       type: "tool-call",
       toolCallId: `g${n}-${index}`,
       toolName: c.toolName,
       input: JSON.stringify(c.input ?? {})
-    })
-  );
+    });
+  });
   return {
     content,
     finishReason: {

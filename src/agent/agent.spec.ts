@@ -65,7 +65,20 @@ function harnessFor(label: string, binding: AgentBinding = "TEST_AGENT") {
     JSON.parse(await stub().debugJob(stepJobId)) as JobDebug;
   const settled = async (taskId: string): Promise<number[]> =>
     JSON.parse(await stub().debugSettled(taskId)) as number[];
-  return { harness, agent, stub, host, debug, jobDebug, settled };
+  /** The keys the agent has parked in `test_hold`, and the release for one. */
+  const holding = (): Promise<string[]> => stub().debugHolding();
+  const release = (key: string): Promise<void> => stub().releaseHold(key);
+  return {
+    harness,
+    agent,
+    stub,
+    host,
+    debug,
+    jobDebug,
+    settled,
+    holding,
+    release
+  };
 }
 
 const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -270,6 +283,76 @@ describe("a one-step task", () => {
       expect.objectContaining({ type: "text", text: "considered" })
     );
     expect(replies.map((p) => p.type)).not.toContain("reasoning");
+  });
+});
+
+/**
+ * The pre-tool-call flush — see `onChunk` in `src/agent/agent.ts` — read where a
+ * caller reads it, as working callbacks. It hangs off `ai`'s streamed text part,
+ * whose `text` the hook buffers, so a release that renames or regroups that part
+ * takes every progress line with it while the turn still settles correctly and
+ * the suite stays green. Nothing but a spec that streams a real turn sees it.
+ *
+ * Both specs park the step's tool in `test_hold` and read the progress line
+ * before releasing it, so "the tool has not returned" is a fact the spec holds
+ * open rather than a duration it hopes to outlive: a flush moved to `onStepEnd`
+ * has nothing to push until the release, which the read never reaches.
+ */
+describe("what the model says before a tool call", () => {
+  it("reaches the caller while the tool is still running", async () => {
+    const { harness, holding, release } = harnessFor("flush");
+    using _ = harness.interceptGatekeeper();
+
+    const accepted = await harness.send("narrate:held");
+    await until("the step's tool to park", holding, (keys) =>
+      keys.includes("held")
+    );
+    // Streamed in several deltas, and joined and trimmed into one line.
+    await until(
+      "the first sentence",
+      () => working(harness, accepted.id),
+      (texts) => texts.includes("First, waiting.")
+    );
+    // The point of the flush, and what the hold is for: the call that sentence
+    // preceded is still in flight, so the step's end is waiting on this spec.
+    expect(await holding()).toContain("held");
+
+    await release("held");
+    const done = await harness.waitForTerminal(accepted.id);
+    expect(done.text).toBe("narrated");
+    // A step resets the buffer, so the next step's sentence goes on its own and
+    // the first is not repeated. The turn's reply is not a progress line.
+    expect(working(harness, accepted.id)).toEqual([
+      "First, waiting.",
+      "Then marking."
+    ]);
+  });
+
+  it("is flushed once a step, on the first tool call", async () => {
+    const { harness, debug, holding, release } = harnessFor("flush-latch");
+    using _ = harness.interceptGatekeeper();
+
+    const accepted = await harness.send("twocalls:held");
+    // The step's last call parks, so what follows reads an open step.
+    await until("the step's last call to park", holding, (keys) =>
+      keys.includes("held")
+    );
+    await until(
+      "the first sentence",
+      () => working(harness, accepted.id),
+      (texts) => texts.includes("Before the first.")
+    );
+    expect(await holding()).toContain("held");
+
+    await release("held");
+    const done = await harness.waitForTerminal(accepted.id);
+    expect(done.text).toBe("both ran");
+    // Said between the two calls, and dropped: a step pushes one line, or a
+    // model that narrates every call of a parallel step floods the caller. Read
+    // once the task has settled, so nothing is still on its way.
+    expect(working(harness, accepted.id)).toEqual(["Before the first."]);
+    // One call marked and the other parked, so the step really made both.
+    expect((await debug(accepted.id)).marks).toBe(1);
   });
 });
 
