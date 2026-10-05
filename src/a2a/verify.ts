@@ -35,8 +35,8 @@ import {
 /**
  * The wire contract — claim names, algorithm, identity shape — comes from
  * `@dynamicagents/g2a-protocol`, which the gatekeeper also depends on directly.
- * The gatekeeper is not an agent and must not import this package, so declaring
- * the contract on each side is the alternative — and it drifts silently: the two
+ * A gatekeeper has to mint against it without taking on this runtime, so the
+ * alternative is declaring the contract on each side — and it drifts silently: the two
  * land on different claim namespaces, verification reads an empty tenant, and
  * every request 401s with both builds green.
  *
