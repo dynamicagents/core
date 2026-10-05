@@ -10,9 +10,8 @@
  *
  * Claim names, the algorithm, the well-known paths, the audience rule, the
  * human-in-the-loop part names and the message text bound are a two-sided
- * contract with a token issuer, and the issuer — slack-gatekeeper — is not an
- * agent and must not import this package. They live in a zero-dependency
- * leaf both sides depend on, and are re-exported here so an agent's imports are
+ * contract with a token issuer — see {@link file://./verify.ts} for why that is
+ * a separate package. They are re-exported here so an agent's imports are
  * unchanged: `IDENTITY_CLAIM`, `TENANT_CLAIM`, `A2A_RPC_PATH` and
  * `GatekeeperIdentity` still come from `@dynamicagents/core/a2a`.
  *
