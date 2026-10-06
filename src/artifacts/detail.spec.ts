@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  ENTRY_DETAIL_MAX_CHARS,
   ENTRY_SECTION_MAX_CHARS,
   clipEntryBody,
   readEntryDetail
@@ -62,6 +63,31 @@ describe("readEntryDetail", () => {
       ],
       checklist: [{ text: "one", state: "done" }]
     });
+  });
+
+  it("drops a checklist nothing in which survived, rather than clearing", () => {
+    expect(
+      readEntryDetail({
+        title: "Todos",
+        checklist: [{ text: "x", state: "maybe" }]
+      })
+    ).toEqual({ title: "Todos" });
+  });
+
+  it("bounds the whole card, not only each section", () => {
+    const body = "s".repeat(ENTRY_SECTION_MAX_CHARS);
+    const detail = readEntryDetail({
+      ref: "r".repeat(10_000),
+      sections: Array.from({ length: 300 }, () => ({ label: "Output", body })),
+      checklist: [{ text: "after the budget", state: "pending" }]
+    });
+    const kept = detail?.sections ?? [];
+    expect(JSON.stringify(detail).length).toBeLessThan(
+      ENTRY_DETAIL_MAX_CHARS + 2_000
+    );
+    expect(kept.at(-1)?.body).toMatch(/^… \d+ sections elided …$/);
+    expect(detail?.ref?.length).toBeLessThanOrEqual(500);
+    expect(detail?.checklist).toBeUndefined();
   });
 
   it("keeps an empty checklist, which clears the pinned one", () => {

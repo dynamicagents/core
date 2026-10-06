@@ -61,6 +61,7 @@ export {
 } from "./store.js";
 
 export {
+  ENTRY_DETAIL_MAX_CHARS,
   ENTRY_SECTION_MAX_CHARS,
   clipEntryBody,
   readEntryDetail,

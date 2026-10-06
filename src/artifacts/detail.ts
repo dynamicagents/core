@@ -60,6 +60,17 @@ export interface ArtifactEntryDetail {
 export const ENTRY_SECTION_MAX_CHARS = 8 * 1024;
 
 /**
+ * The most of all a card's bodies and checklist together, in characters. A
+ * section's own ceiling bounds one body and not how many there are, and the
+ * whole card is the one SQLite value; past this the remaining sections are
+ * named as elided and the checklist's remaining items dropped.
+ */
+export const ENTRY_DETAIL_MAX_CHARS = 64 * 1024;
+
+/** The most of a one-line field — a ref, a title, a label, an item — kept. */
+const LINE_MAX_CHARS = 500;
+
+/**
  * `text` cut to `max` characters, keeping its head and its tail.
  *
  * Both ends because both carry the news: a command's first lines say what it
@@ -103,6 +114,13 @@ function str(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
 }
 
+function line(value: unknown): string | undefined {
+  const text = str(value);
+  return text && text.length > LINE_MAX_CHARS
+    ? `${text.slice(0, LINE_MAX_CHARS - 1)}…`
+    : text;
+}
+
 /**
  * A detail as this store keeps it, from whatever arrived — or `undefined` when
  * nothing usable did.
@@ -111,7 +129,8 @@ function str(value: unknown): string | undefined {
  * `unknown` by the time a parent reads it, and the store's own column is JSON.
  * What is malformed is dropped field by field, never thrown: a card that lost
  * its checklist is still a card, and a note is never worth losing over its
- * detail.
+ * detail. What is too large is cut to {@link ENTRY_DETAIL_MAX_CHARS} for the
+ * same reason: a write past a SQLite value throws, and takes the note with it.
  */
 export function readEntryDetail(
   value: unknown
@@ -119,39 +138,57 @@ export function readEntryDetail(
   const raw = record(value);
   if (!raw) return undefined;
   const detail: ArtifactEntryDetail = {};
-  const ref = str(raw.ref);
+  const ref = line(raw.ref);
   if (ref) detail.ref = ref;
   const status = str(raw.status);
   if (status && STATUSES.has(status)) detail.status = status as EntryStatus;
-  const title = str(raw.title);
+  const title = line(raw.title);
   if (title) detail.title = title;
+  let budget = ENTRY_DETAIL_MAX_CHARS;
   if (Array.isArray(raw.sections)) {
     const sections: EntrySection[] = [];
+    let elided = 0;
     for (const item of raw.sections) {
       const section = record(item);
       if (!section || typeof section.body !== "string") continue;
+      const body = clipEntryBody(section.body);
+      if (body.length > budget) {
+        elided++;
+        continue;
+      }
+      budget -= body.length;
       const format = str(section.format);
       sections.push({
-        label: typeof section.label === "string" ? section.label : "",
-        body: clipEntryBody(section.body),
+        label: line(section.label) ?? "",
+        body,
         ...(format && FORMATS.has(format)
           ? { format: format as EntrySectionFormat }
           : {})
       });
     }
+    if (elided > 0)
+      sections.push({
+        label: "",
+        body: `… ${elided} section${elided === 1 ? "" : "s"} elided …`
+      });
     if (sections.length > 0) detail.sections = sections;
   }
   if (Array.isArray(raw.checklist)) {
     const checklist: ChecklistItem[] = [];
     for (const item of raw.checklist) {
       const entry = record(item);
-      const text = entry && str(entry.text);
+      const text = entry && line(entry.text);
       const state = entry && str(entry.state);
       if (!text || !state || !STATES.has(state)) continue;
+      if (text.length > budget) break;
+      budget -= text.length;
       checklist.push({ text, state: state as ChecklistState });
     }
-    // Kept when empty: a list cleared is news, and the pinned one must go.
-    detail.checklist = checklist;
+    // An empty list is kept, because a list cleared is news and the pinned one
+    // must go — but only one that arrived empty. A list nothing in which
+    // survived is malformed, and must not read as a clear.
+    if (checklist.length > 0 || raw.checklist.length === 0)
+      detail.checklist = checklist;
   }
   return Object.keys(detail).length > 0 ? detail : undefined;
 }

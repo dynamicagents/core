@@ -164,6 +164,11 @@ details[open] > summary .chev { transform: rotate(90deg); }
 .title {
   flex: none; font: 600 .8rem ui-monospace, SFMono-Regular, Menlo, monospace;
 }
+.title:empty { display: none; }
+.sr {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap;
+}
 .summary-text {
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; color: var(--muted);
@@ -224,9 +229,12 @@ const SCRIPT = `
   // This page's clock minus the object's — see ReadyEvent.now.
   var skew = 0;
   var lastAt = 0;
-  // Every card by its ref, and the ones still running.
+  // Every card by its ref, for folding; the ones still running, by identity,
+  // since a card need not have a ref.
   var cards = Object.create(null);
-  var running = Object.create(null);
+  var running = new Set();
+  // A card's state in words, for a reader who cannot see the glyph.
+  var SPOKEN = { running: "running", ok: "done", error: "failed", stopped: "stopped" };
   // The run the last entry belonged to: its label, and the element it fills.
   var group = null;
 
@@ -449,16 +457,18 @@ const SCRIPT = `
   function setCardStatus(card, status, at) {
     card.status = status;
     card.root.dataset.status = status;
-    if (status === "running") running[card.ref] = card;
+    card.spoken.textContent = SPOKEN[status] || "";
+    if (status === "running") running.add(card);
     else {
-      delete running[card.ref];
+      running.delete(card);
       card.endAt = at;
     }
   }
 
-  function fill(card, detail) {
+  function fill(card, detail, before) {
+    var first = before ? card.body.firstChild : null;
     (detail.sections || []).forEach(function (part) {
-      card.body.append(section(part));
+      card.body.insertBefore(section(part), first);
     });
     if (detail.checklist) {
       card.body.append(checklist(detail.checklist));
@@ -476,17 +486,18 @@ const SCRIPT = `
       root: root,
       body: el("div", "card-body"),
       elapsed: el("span", "elapsed"),
+      spoken: el("span", "sr"),
+      title: el("span", "title", detail.title || ""),
+      text: el("span", "summary-text", entry.text),
       status: "",
       startAt: entry.at,
       endAt: null
     };
     var glyph = el("span", "glyph");
     glyph.setAttribute("aria-hidden", "true");
-    head.append(el("span", "chev", "▸"), glyph);
-    if (detail.title) head.append(el("span", "title", detail.title));
-    var text = el("span", "summary-text", entry.text);
-    text.title = entry.text;
-    head.append(text, card.elapsed, clock(entry.at));
+    card.text.title = entry.text;
+    head.append(el("span", "chev", "▸"), glyph, card.spoken, card.title);
+    head.append(card.text, card.elapsed, clock(entry.at));
     root.append(head, card.body);
     if (card.ref) cards[card.ref] = card;
     if (detail.status) setCardStatus(card, detail.status, entry.at);
@@ -497,8 +508,16 @@ const SCRIPT = `
 
   function merge(card, entry) {
     var detail = entry.detail;
-    if (detail.status) setCardStatus(card, detail.status, entry.at);
-    fill(card, detail);
+    // A call's half after its result — a write that failed live and landed on
+    // the replay. An ended card stays ended, and takes the call's head and its
+    // input, above the output it already shows.
+    var late =
+      detail.status === "running" && card.status !== "" && card.status !== "running";
+    if (late) {
+      if (detail.title) card.title.textContent = detail.title;
+      card.text.textContent = card.text.title = entry.text;
+    } else if (detail.status) setCardStatus(card, detail.status, entry.at);
+    fill(card, detail, late);
     tick(card);
   }
 
@@ -545,7 +564,7 @@ const SCRIPT = `
 
   setInterval(function () {
     if (!live) return;
-    for (var ref in running) tick(running[ref]);
+    running.forEach(tick);
     if (lastAt) {
       pulseEl.hidden = false;
       pulseEl.textContent =
@@ -579,11 +598,10 @@ const SCRIPT = `
     live = false;
     pulseEl.hidden = true;
     // A card still running when its artifact settled never got its result.
-    for (var ref in running) {
-      var card = running[ref];
+    running.forEach(function (card) {
       setCardStatus(card, "stopped", null);
       card.elapsed.textContent = "";
-    }
+    });
     setStatus(data.status, data.status);
     if (logEl.children.length === 0) noteEl.textContent = "Nothing was recorded.";
     stream.close();
