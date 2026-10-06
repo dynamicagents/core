@@ -61,6 +61,19 @@ export {
 } from "./store.js";
 
 export {
+  ENTRY_DETAIL_MAX_CHARS,
+  ENTRY_SECTION_MAX_CHARS,
+  clipEntryBody,
+  readEntryDetail,
+  type ArtifactEntryDetail,
+  type ChecklistItem,
+  type ChecklistState,
+  type EntrySection,
+  type EntrySectionFormat,
+  type EntryStatus
+} from "./detail.js";
+
+export {
   ARTIFACT_EVENTS,
   type ReadyEvent,
   type SettledEvent

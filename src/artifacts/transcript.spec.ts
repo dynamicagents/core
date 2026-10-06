@@ -244,6 +244,42 @@ describe("transcribeNote", () => {
     ).toBeNull();
   });
 
+  /**
+   * A card is one tool call. Posting those verbatim is what put one Slack
+   * message per Bash, Read and Edit in front of the person, so neither fallback
+   * does — while a card that is the first note still delivers the link.
+   */
+  describe("a note with a card", () => {
+    const CARD = { ref: "t1", status: "running" as const, title: "Bash" };
+
+    it("is never posted before this instance knows its origin", async () => {
+      const captured = poster();
+      await transcribeNote(
+        wired,
+        note({ origin: undefined, text: "npm test", detail: CARD }),
+        captured.post
+      );
+      expect(captured.posted).toEqual([]);
+    });
+
+    it("can be the note that delivers the link, and is recorded with its card", async () => {
+      const taskId = crypto.randomUUID();
+      const captured = poster();
+      await transcribeNote(
+        wired,
+        note({ taskId, text: "npm test", detail: CARD }),
+        captured.post
+      );
+      expect(captured.posted[0]).toMatch(LINK);
+      const token = await artifacts().tokenFor(SESSION_TRANSCRIPT_KIND, taskId);
+      const read = await artifacts().readArtifact(token!);
+      expect(read?.entries[0]).toMatchObject({
+        text: "npm test",
+        detail: CARD
+      });
+    });
+  });
+
   it("lets an unreachable store throw, so the step can retry", async () => {
     await expect(
       transcribeNote(broken, note({ text: "still said" }), poster().post)

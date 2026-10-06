@@ -451,7 +451,7 @@ describe("Artifacts — the event stream", () => {
     const stream = frames(await artifacts.fetch(eventsRequest(token)));
     expect(await stream.next()).toEqual({
       event: "ready",
-      data: { kind: KIND, status: null }
+      data: { kind: KIND, status: null, now: expect.any(Number) }
     });
     expect(await stream.next()).toMatchObject({
       event: "entry",
@@ -491,6 +491,42 @@ describe("Artifacts — the event stream", () => {
       "settled"
     ]);
     expect(events.at(-1)?.data).toEqual({ status: "failed" });
+  });
+
+  it("carries a card on its entry, live and replayed, shape-checked on the way in", async () => {
+    const artifacts = fresh("cards");
+    const token = await artifacts.createArtifact(KIND);
+    const stream = frames(await artifacts.fetch(eventsRequest(token)));
+    await stream.next();
+
+    await artifacts.addEntry(token, {
+      label: "a 0",
+      text: "npm test",
+      detail: {
+        ref: "t1",
+        status: "running",
+        title: "Bash",
+        sections: [
+          { label: "Input", body: "npm test", format: "code" },
+          // Malformed parts are dropped, the card is kept.
+          { label: "Output" } as never
+        ],
+        bogus: true
+      } as never
+    });
+    const card = {
+      ref: "t1",
+      status: "running",
+      title: "Bash",
+      sections: [{ label: "Input", body: "npm test", format: "code" }]
+    };
+    expect(await stream.next()).toMatchObject({
+      event: "entry",
+      data: { text: "npm test", detail: card }
+    });
+    expect((await artifacts.readArtifact(token))?.entries[0]?.detail).toEqual(
+      card
+    );
   });
 
   it("resumes after the sequence a reconnecting reader already has", async () => {

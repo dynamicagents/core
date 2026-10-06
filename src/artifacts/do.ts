@@ -302,7 +302,11 @@ export class Artifacts extends DurableObject {
     );
     this.seat(token, watcher);
 
-    const ready: ReadyEvent = { kind: artifact.kind, status: artifact.status };
+    const ready: ReadyEvent = {
+      kind: artifact.kind,
+      status: artifact.status,
+      now: this.now()
+    };
     const opening = [sseFrame(ARTIFACT_EVENTS.ready, ready)];
     for (const entry of this.store.entries(token, resumeFrom(lastEventId))) {
       opening.push(sseFrame(ARTIFACT_EVENTS.entry, entry, entry.sequence));

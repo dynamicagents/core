@@ -40,6 +40,7 @@ import {
   assertArtifactsBound,
   requireArtifactsStub
 } from "../artifacts/binding.js";
+import { readEntryDetail } from "../artifacts/detail.js";
 import { artifactViewerUrl } from "../artifacts/path.js";
 import { transcribeNote } from "../artifacts/transcript.js";
 import {
@@ -196,6 +197,8 @@ export abstract class StepAgent<
 
   /** Learned from the `jku` each job carries; never configured. */
   readonly #origin = new SelfOrigin();
+  /** Each task's transcript writes, chained — see {@link StepAgent.#note}. */
+  readonly #transcribing = new Map<string, Promise<void>>();
   #plugins?: AssembledPlugins<Env>;
   #buffered = "";
   #flushed = false;
@@ -1229,7 +1232,18 @@ export abstract class StepAgent<
     }
   }
 
-  /** A job's notes go on its task's transcript, and their lines to the host. */
+  /**
+   * A job's notes go on its task's transcript, and their lines to the host —
+   * one at a time per task, in the order they arrived.
+   *
+   * The SDK calls `onProgress` without awaiting the call before it, so a child
+   * that files two notes back to back — its narration and its first tool call
+   * — has them interleave at every await here. Both then read the link as
+   * unannounced and the thread gets it twice, and a tool's result can land on
+   * the transcript before its call. The chain is in memory because that is
+   * where the interleaving is: an object that loses it loses the calls with
+   * it, and the finish replay files whatever they had not.
+   */
   async #note(
     stepJobId: string,
     source: NoteSource,
@@ -1237,17 +1251,35 @@ export abstract class StepAgent<
   ): Promise<void> {
     const job = this.ledger.job(stepJobId);
     if (!job) return;
-    await transcribeNote(
-      this.env,
-      {
-        taskId: job.taskId,
-        origin: this.#origin.peek(),
-        source,
-        text: note.text,
-        key: note.key
-      },
-      (line) => this.#hostProgress(job, line, note.key)
+    const { taskId } = job;
+    const write = (this.#transcribing.get(taskId) ?? Promise.resolve()).then(
+      () =>
+        transcribeNote(
+          this.env,
+          {
+            taskId,
+            origin: this.#origin.peek(),
+            source,
+            text: note.text,
+            key: note.key,
+            ...(note.detail ? { detail: note.detail } : {})
+          },
+          (line) => this.#hostProgress(job, line, note.key)
+        )
     );
+    // The next note waits for this one, not on its outcome: a failure is this
+    // note's, and is thrown to whoever filed it.
+    const settled = write.then(
+      () => {},
+      () => {}
+    );
+    this.#transcribing.set(taskId, settled);
+    try {
+      await write;
+    } finally {
+      if (this.#transcribing.get(taskId) === settled)
+        this.#transcribing.delete(taskId);
+    }
   }
 
   // --- identity and helpers --------------------------------------------------
@@ -1424,11 +1456,15 @@ function sourceOf(run: AgentToolRunInfo): NoteSource {
   return { type: run.agentType, ordinal: run.displayOrder };
 }
 
+/** A milestone's note, or `null`. A malformed card is dropped, not the note. */
 function readNote(data: unknown): NoteData | null {
   const note = data as Partial<NoteData> | undefined;
-  return typeof note?.key === "string" &&
-    typeof note.text === "string" &&
-    note.text
-    ? { key: note.key, text: note.text }
-    : null;
+  if (
+    typeof note?.key !== "string" ||
+    typeof note.text !== "string" ||
+    !note.text
+  )
+    return null;
+  const detail = readEntryDetail(note.detail);
+  return { key: note.key, text: note.text, ...(detail ? { detail } : {}) };
 }

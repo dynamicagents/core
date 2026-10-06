@@ -186,4 +186,71 @@ describe("the artifacts schema version", () => {
     expect(found.locked).toBe(true);
     expect(found.after).toMatchObject({ locked: true, status: "approved" });
   });
+
+  /**
+   * The real step, against a store the way version 2 left it: an entry
+   * written before cards existed reads back as plain text, and the next one
+   * keeps its card.
+   */
+  it("brings a version 2 store up to cards, keeping its notes as text", async () => {
+    const found = await withSql("v2", (sql) => {
+      ensureArtifactSchema(sql, {
+        steps: (db, from) => {
+          if (from < 2)
+            db.exec("ALTER TABLE artifacts ADD COLUMN locked_at INTEGER");
+        },
+        target: 2
+      });
+      sql.exec(
+        `INSERT INTO artifacts (token, kind, source_key, created_at)
+         VALUES ('old', 'kind', NULL, 1000)`
+      );
+      sql.exec(
+        `INSERT INTO artifact_entries
+           (token, sequence, entry_key, label, body, created_at)
+         VALUES ('old', 1, 'k1', 'a 0', 'before', 1000)`
+      );
+      const store = makeArtifactStore(sql, () => 1_000);
+      const card = {
+        ref: "t1",
+        status: "running" as const,
+        title: "Bash",
+        sections: [
+          { label: "Input", body: "npm test", format: "code" as const }
+        ]
+      };
+      store.append("old", {
+        key: "k2",
+        label: "a 0",
+        text: "npm test",
+        detail: card
+      });
+      const replayed = store.append("old", {
+        key: "k2",
+        label: "a 0",
+        text: "npm test",
+        detail: card
+      });
+      return {
+        version: recorded(sql),
+        entries: store.entries("old"),
+        replayed: replayed?.entry
+      };
+    });
+    expect(found.version).toBe(CURRENT_SCHEMA_VERSION);
+    expect(found.entries[0]).toEqual({
+      sequence: 1,
+      label: "a 0",
+      text: "before",
+      at: 1000
+    });
+    expect(found.entries[1]?.detail).toEqual({
+      ref: "t1",
+      status: "running",
+      title: "Bash",
+      sections: [{ label: "Input", body: "npm test", format: "code" }]
+    });
+    // A replay its key catches returns the card it wrote the first time.
+    expect(found.replayed?.detail).toEqual(found.entries[1]?.detail);
+  });
 });
