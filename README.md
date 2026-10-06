@@ -367,8 +367,13 @@ notes, a settle status, whether its link has been delivered, and whether it is
 nothing, so a link is the whole of what a reader needs and anyone holding one can
 read it. `session-transcript` is the first kind and the object holds no code for
 it; ingest is RPC over the binding and never a route, so a write is authenticated
-by being inside the Worker. Artifacts age out on the same 30-day clock as the rest
-of a Task's state, swept lazily on the next write rather than by an alarm apiece.
+by being inside the Worker. A note may carry **one image** beside its text — PNG
+or JPEG, within `MAX_ARTIFACT_MEDIA_BYTES`, under a type checked against the bytes
+rather than taken on the caller's word, and the text is then its alt text. The
+bytes are fetched by URL from a third route under the same prefix, so an image
+never rides a read of the log, and SVG is refused rather than sanitized. Artifacts
+age out on the same 30-day clock as the rest of a Task's state, swept lazily on
+the next write rather than by an alarm apiece.
 
 ---
 

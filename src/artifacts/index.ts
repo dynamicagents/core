@@ -12,7 +12,8 @@
  *
  * - **The object** — {@link Artifacts}, one per deployment, bound as `ARTIFACTS`.
  * - **The routes** — {@link handleArtifactRoute}, one delegation from a Worker's
- *   `fetch`, serving the viewer page and the event stream behind it.
+ *   `fetch`, serving the viewer page, the event stream behind it, and the bytes
+ *   of any image an entry carries.
  * - **The emission** — {@link transcribeNote} and {@link settleTranscript},
  *   which core's `TaskHost` and `StepAgent` already call.
  *
@@ -46,6 +47,7 @@ export { handleArtifactRoute } from "./route.js";
 
 export {
   ARTIFACT_PATH_PREFIX,
+  artifactEntryUrl,
   artifactViewerUrl,
   parseArtifactPath,
   type ArtifactRoute
@@ -57,8 +59,18 @@ export {
   type AppendResult,
   type Artifact,
   type ArtifactEntry,
-  type ArtifactEntryInput
+  type ArtifactEntryInput,
+  type ArtifactMedia
 } from "./store.js";
+
+export {
+  ARTIFACT_MEDIA_TYPES,
+  ArtifactMediaTooLargeError,
+  ArtifactMediaTypeError,
+  artifactMediaExtension,
+  artifactMediaType,
+  MAX_ARTIFACT_MEDIA_BYTES
+} from "./media.js";
 
 export {
   ARTIFACT_EVENTS,

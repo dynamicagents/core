@@ -5,6 +5,11 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import type { Artifacts } from "./do.js";
 import {
+  ArtifactMediaTooLargeError,
+  ArtifactMediaTypeError,
+  MAX_ARTIFACT_MEDIA_BYTES
+} from "./media.js";
+import {
   CURRENT_SCHEMA_VERSION,
   ensureArtifactSchema,
   makeArtifactStore
@@ -40,6 +45,11 @@ const recorded = (sql: SqlStorage): number | null =>
   sql
     .exec<{ version: number }>("SELECT version FROM schema_meta WHERE id = 1")
     .toArray()[0]?.version ?? null;
+
+/** A PNG as far as the signature check is concerned, which is far enough. */
+const PNG = new Uint8Array([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01, 0x02
+]);
 
 describe("the artifacts schema version", () => {
   it("records the current version when the store is first opened", async () => {
@@ -185,5 +195,130 @@ describe("the artifacts schema version", () => {
     expect(found.before?.locked).toBe(false);
     expect(found.locked).toBe(true);
     expect(found.after).toMatchObject({ locked: true, status: "approved" });
+  });
+
+  /**
+   * The step that adds media, against a store the way version 2 left it: an
+   * entry written before images existed reads back without one, and an image is
+   * filed beside it afterwards.
+   *
+   * Version 2's own `ALTER TABLE` is spelled here because a store in that shape
+   * is not something this build can produce — {@link upgrade} runs every branch
+   * below the target, so asking for target 2 with the real steps would add the
+   * media columns too and then the v3 step would meet them.
+   */
+  it("brings a version 2 store up to media, keeping the entries on it", async () => {
+    const found = await withSql("v2", (sql) => {
+      ensureArtifactSchema(sql, {
+        steps: (db, from) => {
+          if (from < 2)
+            db.exec("ALTER TABLE artifacts ADD COLUMN locked_at INTEGER");
+        },
+        target: 2
+      });
+      sql.exec(
+        `INSERT INTO artifacts (token, kind, source_key, created_at)
+         VALUES ('old', 'kind', NULL, 1000)`
+      );
+      sql.exec(
+        `INSERT INTO artifact_entries
+           (token, sequence, entry_key, label, body, created_at)
+         VALUES ('old', 1, NULL, 'a 0', 'written before images', 1000)`
+      );
+
+      const store = makeArtifactStore(sql, () => 1_000);
+      const before = store.entries("old");
+      const appended = store.append("old", {
+        label: "a 0",
+        text: "a chart",
+        media: { type: "image/png", data: PNG }
+      });
+      return {
+        version: recorded(sql),
+        before,
+        appended: appended?.entry,
+        after: store.entries("old"),
+        bytes: store.media("old", 2)
+      };
+    });
+    expect(found.version).toBe(CURRENT_SCHEMA_VERSION);
+    expect(found.before).toEqual([
+      { sequence: 1, label: "a 0", text: "written before images", at: 1000 }
+    ]);
+    expect(found.appended?.media).toEqual({
+      type: "image/png",
+      byteLength: PNG.byteLength
+    });
+    expect(found.after.map((entry) => entry.media?.type)).toEqual([
+      undefined,
+      "image/png"
+    ]);
+    expect(found.bytes?.type).toBe("image/png");
+    expect(new Uint8Array(found.bytes!.data)).toEqual(PNG);
+  });
+});
+
+/**
+ * The refusals, as the classes they are.
+ *
+ * Only in here: a throw crossing Durable Object RPC keeps its message and loses
+ * its class, so the object's spec asserts the sentence and this one asserts the
+ * type — which is what a caller inside the Worker can actually catch.
+ */
+describe("appending media the store refuses", () => {
+  const append = (store: ReturnType<typeof makeArtifactStore>, token: string) =>
+    store.append(token, {
+      label: "a 0",
+      text: "a chart",
+      media: { type: "image/png", data: new Uint8Array([0xff, 0xd8, 0xff]) }
+    });
+
+  it("throws the type error for bytes that are not what they claim", async () => {
+    const thrown = await withSql("media-type", (sql) => {
+      const store = makeArtifactStore(sql, () => 1_000);
+      const token = store.open("kind");
+      try {
+        append(store, token);
+        return null;
+      } catch (error) {
+        return {
+          isTypeError: error instanceof ArtifactMediaTypeError,
+          entries: store.entries(token).length
+        };
+      }
+    });
+    expect(thrown?.isTypeError).toBe(true);
+    // Nothing partial: the check runs before either insert.
+    expect(thrown?.entries).toBe(0);
+  });
+
+  it("throws the size error past the limit, and files no bytes", async () => {
+    const thrown = await withSql("media-size", (sql) => {
+      const store = makeArtifactStore(sql, () => 1_000);
+      const token = store.open("kind");
+      const huge = new Uint8Array(MAX_ARTIFACT_MEDIA_BYTES + 1);
+      huge.set(PNG.subarray(0, 8));
+      try {
+        store.append(token, {
+          label: "a 0",
+          text: "a chart",
+          media: { type: "image/png", data: huge }
+        });
+        return null;
+      } catch (error) {
+        return {
+          isTooLarge: error instanceof ArtifactMediaTooLargeError,
+          entries: store.entries(token).length,
+          blobs: sql
+            .exec<{ n: number }>(
+              "SELECT COUNT(*) AS n FROM artifact_entry_media"
+            )
+            .one().n
+        };
+      }
+    });
+    expect(thrown?.isTooLarge).toBe(true);
+    expect(thrown?.entries).toBe(0);
+    expect(thrown?.blobs).toBe(0);
   });
 });

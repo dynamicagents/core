@@ -10,6 +10,14 @@
  * interleave with it.
  */
 
+import {
+  ArtifactMediaTooLargeError,
+  ArtifactMediaTypeError,
+  artifactMediaType,
+  MAX_ARTIFACT_MEDIA_BYTES,
+  normalizeMediaBytes
+} from "./media.js";
+
 /**
  * How long an artifact is kept. The same clock the rest of a Task's durable
  * state ages out on — see `TASK_RETENTION_MS` in
@@ -52,15 +60,37 @@ export function mintArtifactToken(): string {
   return token;
 }
 
+/**
+ * The image an entry carries, without its bytes.
+ *
+ * The descriptor travels and the bytes never do: every read of the log — a page
+ * read back over RPC, an SSE frame, the viewer's replay — carries this, while
+ * the payload is fetched once, by URL, from
+ * {@link file://./do.ts Artifacts.fetch}. See
+ * {@link file://./media.ts ARTIFACT_MEDIA_TYPES} for what a type may be.
+ */
+export interface ArtifactMedia {
+  /** The type its bytes were checked against, and are served under. */
+  type: string;
+  byteLength: number;
+}
+
 /** One append-only note on an artifact. */
 export interface ArtifactEntry {
   /** 1-based position in the artifact, and the SSE event id. */
   sequence: number;
   /** Who wrote it, as the viewer prints it beside the text. */
   label: string;
+  /**
+   * What it says. On a media entry this is the image's **alt text** — required
+   * for the same reason it is required everywhere else, so a reader served no
+   * images is still served the artifact, and accessibility is not optional.
+   */
   text: string;
   /** When it was recorded, in epoch milliseconds. */
   at: number;
+  /** The image on it, if it carries one. */
+  media?: ArtifactMedia;
 }
 
 /** An artifact's own row: what it is, and whether it has finished. */
@@ -105,6 +135,12 @@ export interface ArtifactEntryInput {
    * beside it. See {@link file://../a2a/push.ts PushChannel.working}.
    */
   key?: string;
+  /**
+   * One image to file with the note, under a type its bytes are checked against
+   * — see {@link file://./media.ts media.ts} for the allowlist and the limit.
+   * A payload either of those refuses makes this call **throw**.
+   */
+  media?: { type: string; data: ArrayBuffer | Uint8Array };
 }
 
 /**
@@ -155,7 +191,7 @@ const DDL = [
  * {@link ARTIFACT_RETENTION_MS}, so a deployment changing shape meets months of
  * rows it cannot drop and has to know which shape they are in.
  */
-export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_SCHEMA_VERSION = 3;
 
 /** Move a store recorded at `from` up to the shape this build expects. */
 export type SchemaUpgrade = (sql: SqlStorage, from: number) => void;
@@ -171,6 +207,22 @@ export type SchemaUpgrade = (sql: SqlStorage, from: number) => void;
 const upgrade: SchemaUpgrade = (sql, from) => {
   // 2: `lock`, for an artifact that must not change after somebody acted on it.
   if (from < 2) sql.exec("ALTER TABLE artifacts ADD COLUMN locked_at INTEGER");
+  // 3: an image on an entry. The descriptor is two nullable columns beside the
+  // text, so every row written before this reads back as an entry with no media
+  // and nothing is backfilled. The bytes go in a table of their own, which is
+  // what keeps them off every read of the log — see `entries` and `media`.
+  if (from < 3) {
+    sql.exec("ALTER TABLE artifact_entries ADD COLUMN media_type TEXT");
+    sql.exec("ALTER TABLE artifact_entries ADD COLUMN media_bytes INTEGER");
+    sql.exec(
+      `CREATE TABLE IF NOT EXISTS artifact_entry_media (
+         token TEXT NOT NULL,
+         sequence INTEGER NOT NULL,
+         bytes BLOB NOT NULL,
+         PRIMARY KEY (token, sequence)
+       )`
+    );
+  }
 };
 
 /** Runs `fn` as one transaction: the object's `ctx.storage.transactionSync`. */
@@ -255,7 +307,38 @@ type EntryRow = {
   label: string;
   body: string;
   created_at: number;
+  media_type: string | null;
+  media_bytes: number | null;
 };
+
+/**
+ * The columns an entry is read back from, in one place.
+ *
+ * Two reads answer an {@link EntryRow} — the whole log, and the one a replayed
+ * key finds — and a column added to one of them and not the other reads back as
+ * an entry whose image is missing.
+ */
+const ENTRY_COLUMNS =
+  "sequence, label, body, created_at, media_type, media_bytes";
+
+/** The bytes of one entry, with the artifact's age for the cache header. */
+type MediaRow = {
+  media_type: string | null;
+  bytes: ArrayBuffer;
+  artifact_created_at: number;
+};
+
+/** One entry's image, as the bytes route answers it. */
+export interface ArtifactMediaBytes {
+  /** The type the bytes were checked against at ingest. */
+  type: string;
+  data: ArrayBuffer;
+  /**
+   * When the artifact holding them was opened, which is what bounds a cache of
+   * them — see {@link file://./do.ts Artifacts.fetch}.
+   */
+  artifactCreatedAt: number;
+}
 
 export interface ArtifactStore {
   /**
@@ -282,6 +365,12 @@ export interface ArtifactStore {
    * better than dropping it, though no live reader will see it. A **locked**
    * artifact is the exception, and answers `null` too — except to a replay its
    * key catches, which returns the note as before.
+   *
+   * An `entry.media` the rules in {@link file://./media.ts media.ts} refuse
+   * **throws**, and writes nothing. Not `null`: that answer already means
+   * "swept, or locked", and the caller branching on it
+   * ({@link file://./transcript.ts transcribeNote}) would read a payload it got
+   * wrong as a month-old artifact.
    */
   append(token: string, entry: ArtifactEntryInput): AppendResult | null;
   /**
@@ -316,7 +405,18 @@ export interface ArtifactStore {
   lock(token: string, status: string): boolean;
   /** Notes after `afterSequence`, oldest first. Zero reads the whole log. */
   entries(token: string, afterSequence?: number): ArtifactEntry[];
-  /** Delete every artifact past {@link ARTIFACT_RETENTION_MS}, and its notes. */
+  /**
+   * The bytes of one entry's image, or `null` when the token, the sequence or
+   * the image is not there.
+   *
+   * Sweeps nothing, for the reason {@link entries} does not: this answers a URL
+   * a browser and a cache hit repeatedly, and a read must not do writes.
+   */
+  media(token: string, sequence: number): ArtifactMediaBytes | null;
+  /**
+   * Delete every artifact past {@link ARTIFACT_RETENTION_MS}, its notes, and the
+   * images on them.
+   */
   sweep(): void;
 }
 
@@ -343,12 +443,20 @@ export function makeArtifactStore(
     locked: row.locked_at !== null
   });
 
-  const rowToEntry = (row: EntryRow): ArtifactEntry => ({
-    sequence: row.sequence,
-    label: row.label,
-    text: row.body,
-    at: row.created_at
-  });
+  const rowToEntry = (row: EntryRow): ArtifactEntry => {
+    const entry: ArtifactEntry = {
+      sequence: row.sequence,
+      label: row.label,
+      text: row.body,
+      at: row.created_at
+    };
+    // Both columns or neither: they are written in one statement, so a row with
+    // one of them is not a descriptor to report a made-up number for.
+    if (row.media_type !== null && row.media_bytes !== null) {
+      entry.media = { type: row.media_type, byteLength: row.media_bytes };
+    }
+    return entry;
+  };
 
   const tokenFor = (kind: string, sourceKey: string): string | null =>
     sql
@@ -374,6 +482,14 @@ export function makeArtifactStore(
   // value and a destructured method would sweep nothing, silently.
   const sweep = (): void => {
     const cutoff = now() - ARTIFACT_RETENTION_MS;
+    // Both children before the parent: each of them names the artifacts the last
+    // statement is about to delete, so either one after it would match nothing
+    // and leave rows nothing resolves.
+    sql.exec(
+      `DELETE FROM artifact_entry_media WHERE token IN
+         (SELECT token FROM artifacts WHERE created_at < ?)`,
+      cutoff
+    );
     sql.exec(
       `DELETE FROM artifact_entries WHERE token IN
          (SELECT token FROM artifacts WHERE created_at < ?)`,
@@ -420,7 +536,7 @@ export function makeArtifactStore(
       if (entry.key !== undefined) {
         const prior = sql
           .exec<EntryRow>(
-            `SELECT sequence, label, body, created_at FROM artifact_entries
+            `SELECT ${ENTRY_COLUMNS} FROM artifact_entries
              WHERE token = ? AND entry_key = ?`,
             token,
             entry.key
@@ -430,6 +546,10 @@ export function makeArtifactStore(
           return { entry: rowToEntry(prior), appended: false, announced };
       }
       if (artifact.locked) return null;
+      // Checked here: after the replay above, so a retry rewrites no bytes, and
+      // before either insert, so a refusal leaves neither row behind.
+      const media =
+        entry.media === undefined ? null : checkedMedia(entry.media);
       const sequence =
         sql
           .exec<{ next: number }>(
@@ -440,20 +560,44 @@ export function makeArtifactStore(
       const at = now();
       sql.exec(
         `INSERT INTO artifact_entries
-           (token, sequence, entry_key, label, body, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+           (token, sequence, entry_key, label, body, created_at,
+            media_type, media_bytes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         token,
         sequence,
         entry.key ?? null,
         entry.label,
         entry.text,
-        at
+        at,
+        media?.type ?? null,
+        media?.bytes.byteLength ?? null
       );
-      return {
-        entry: { sequence, label: entry.label, text: entry.text, at },
-        appended: true,
-        announced
+      // No await between the two inserts, which is what makes them one write:
+      // nothing else runs in this object until this call returns, so no reader
+      // can see a descriptor whose bytes are not there yet. A transaction would
+      // buy nothing — see the note at the top of this file.
+      if (media !== null) {
+        sql.exec(
+          `INSERT INTO artifact_entry_media (token, sequence, bytes)
+           VALUES (?, ?, ?)`,
+          token,
+          sequence,
+          media.bytes
+        );
+      }
+      const recorded: ArtifactEntry = {
+        sequence,
+        label: entry.label,
+        text: entry.text,
+        at
       };
+      if (media !== null) {
+        recorded.media = {
+          type: media.type,
+          byteLength: media.bytes.byteLength
+        };
+      }
+      return { entry: recorded, appended: true, announced };
     },
 
     announce(token) {
@@ -495,15 +639,61 @@ export function makeArtifactStore(
     },
 
     entries(token, afterSequence = 0) {
+      // The blob table is not joined, and that is the point of it being a table
+      // of its own: the whole log is read on paths that want none of the bytes.
       return sql
         .exec<EntryRow>(
-          `SELECT sequence, label, body, created_at FROM artifact_entries
+          `SELECT ${ENTRY_COLUMNS} FROM artifact_entries
            WHERE token = ? AND sequence > ? ORDER BY sequence`,
           token,
           afterSequence
         )
         .toArray()
         .map(rowToEntry);
+    },
+
+    media(token, sequence) {
+      const row = sql
+        .exec<MediaRow>(
+          `SELECT e.media_type AS media_type, m.bytes AS bytes,
+                  a.created_at AS artifact_created_at
+             FROM artifact_entry_media m
+             JOIN artifact_entries e
+               ON e.token = m.token AND e.sequence = m.sequence
+             JOIN artifacts a ON a.token = m.token
+            WHERE m.token = ? AND m.sequence = ?`,
+          token,
+          sequence
+        )
+        .toArray()[0];
+      if (row === undefined || row.media_type === null) return null;
+      return {
+        type: row.media_type,
+        data: row.bytes,
+        artifactCreatedAt: row.artifact_created_at
+      };
     }
   };
+}
+
+/**
+ * The descriptor and bytes to write for a declared payload, or a throw.
+ *
+ * In this order: the bytes have to *be* an accepted type and the one declared —
+ * one comparison, because a type nothing accepts can never equal a type detected
+ * from a signature — and only bytes that passed that are weighed. The size is
+ * measured on what will be stored rather than on the buffer it came in.
+ */
+function checkedMedia(media: NonNullable<ArtifactEntryInput["media"]>): {
+  type: string;
+  bytes: ArrayBuffer;
+} {
+  const detected = artifactMediaType(media.data);
+  if (detected !== media.type) {
+    throw new ArtifactMediaTypeError(media.type, detected);
+  }
+  if (media.data.byteLength > MAX_ARTIFACT_MEDIA_BYTES) {
+    throw new ArtifactMediaTooLargeError(media.data.byteLength);
+  }
+  return { type: media.type, bytes: normalizeMediaBytes(media.data) };
 }

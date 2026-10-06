@@ -75,6 +75,31 @@ describe("handleArtifactRoute", () => {
     expect(response?.status).toBe(404);
   });
 
+  it("serves an entry's bytes under the type they were checked against", async () => {
+    const token = await artifacts().createArtifact("plan");
+    await artifacts().addEntry(token, {
+      label: "plan",
+      text: "the shape of it",
+      media: {
+        type: "image/png",
+        data: new Uint8Array([
+          0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x07
+        ])
+      }
+    });
+
+    const response = await serve(`https://agent.example/a/${token}/1.png`);
+    expect(response?.status).toBe(200);
+    expect(response?.headers.get("content-type")).toBe("image/png");
+    expect(response?.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(new Uint8Array(await response!.arrayBuffer())).toHaveLength(9);
+  });
+
+  it("is a 404 for bytes whose token names nothing", async () => {
+    const response = await serve(`https://agent.example/a/${"f".repeat(40)}/1`);
+    expect(response?.status).toBe(404);
+  });
+
   it.each([
     [
       "a path outside the prefix",
@@ -87,7 +112,8 @@ describe("handleArtifactRoute", () => {
     [
       "a path under the prefix nothing serves",
       `https://agent.example/a/${"c".repeat(40)}/raw`
-    ]
+    ],
+    ["a sequence no store mints", `https://agent.example/a/${"c".repeat(40)}/0`]
   ])("declines %s", async (_label, url) => {
     // `null`, not a 404 — sitting in front of a router must not change what
     // that router answers.
@@ -99,6 +125,7 @@ describe("handleArtifactRoute", () => {
     // binding, inside the Worker, or not at all.
     const url = `https://agent.example/a/${"d".repeat(40)}`;
     expect(await serve(url, { method: "POST" })).toBeNull();
+    expect(await serve(`${url}/1`, { method: "POST" })).toBeNull();
   });
 
   it.each([

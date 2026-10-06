@@ -8,6 +8,7 @@ import {
 } from "./events.js";
 import { parseArtifactPath } from "./path.js";
 import {
+  ARTIFACT_RETENTION_MS,
   makeArtifactStore,
   type ArtifactEntry,
   type ArtifactEntryInput,
@@ -37,10 +38,11 @@ import {
  * is the same door read back, for a Worker that wrote an artifact and needs what
  * it holds.
  *
- * **Reads are the token**, over {@link fetch}. The token is unguessable and
- * derived from nothing (see {@link file://./store.ts mintArtifactToken}), so it
- * is id and authorization in one, and a link is the whole of what a reader
- * needs. Nothing else here checks anything: hand out the link or do not.
+ * **Reads are the token**, over {@link fetch} — the event stream, and the bytes
+ * of an image on an entry. The token is unguessable and derived from nothing
+ * (see {@link file://./store.ts mintArtifactToken}), so it is id and
+ * authorization in one, and a link is the whole of what a reader needs. Nothing
+ * else here checks anything: hand out the link or do not.
  *
  * ## One object, addressed by a well-known name
  *
@@ -152,6 +154,12 @@ export class Artifacts extends DurableObject {
    * The token is required for the reason a read needs one, not because ingest
    * is guarded: it names the artifact, and a writer that cannot name it has no
    * business appending to it.
+   *
+   * An `entry.media` the rules in {@link file://./media.ts media.ts} refuse
+   * **throws**, and writes nothing — the one path here that does. The class does
+   * not survive the RPC hop, so a caller that wants to branch rather than catch
+   * checks `artifactMediaType` and `MAX_ARTIFACT_MEDIA_BYTES` before the call;
+   * what the throw owes it is a message naming the rule.
    */
   async addEntry(
     token: string,
@@ -259,17 +267,62 @@ export class Artifacts extends DurableObject {
   // --- reads, over the token ------------------------------------------------
 
   /**
-   * The event stream for one token.
+   * The event stream for one token, and the bytes of one entry's image.
    *
-   * Only `/a/<token>/events` is served here. The page itself never reaches this
-   * object — see {@link file://./route.ts handleArtifactRoute}.
+   * The page itself never reaches this object — see
+   * {@link file://./route.ts handleArtifactRoute}.
    */
   override async fetch(request: Request): Promise<Response> {
     const matched = parseArtifactPath(new URL(request.url).pathname);
-    if (matched?.route !== "events") {
-      return new Response("not found", { status: 404 });
+    if (matched?.route === "events") {
+      return this.openStream(
+        matched.token,
+        request.headers.get("last-event-id")
+      );
     }
-    return this.openStream(matched.token, request.headers.get("last-event-id"));
+    if (matched?.route === "bytes") {
+      return this.serveMedia(matched.token, matched.sequence);
+    }
+    return new Response("not found", { status: 404 });
+  }
+
+  /**
+   * One entry's image, under the type its bytes were checked against at ingest
+   * (see {@link file://./media.ts media.ts}).
+   *
+   * **One 404 for three misses** — a token naming nothing, a sequence naming no
+   * entry, an entry with no image — because telling them apart tells whoever
+   * guessed a URL which half of it they guessed right.
+   *
+   * No range requests: an `<img>` and a fetch into somebody's own store both
+   * want the whole thing, so a 206 path would be surface for nobody.
+   */
+  private serveMedia(token: string, sequence: number): Response {
+    const media = this.store.media(token, sequence);
+    if (media === null) {
+      return new Response("not found", {
+        status: 404,
+        headers: { "cache-control": "no-store" }
+      });
+    }
+    return new Response(media.data, {
+      headers: {
+        "content-type": media.type,
+        // `public` where the page and the stream are `no-store`, and that is
+        // cacheability rather than authorization: a cache hit still needs the
+        // URL, and the URL is the token. `immutable` is true because an entry
+        // never changes once written. What keeps the pair honest is the age —
+        // see {@link cacheAge}.
+        "cache-control": `public, max-age=${cacheAge(
+          media.artifactCreatedAt,
+          this.now()
+        )}, immutable`,
+        // The declared type is the only one a browser may act on.
+        "x-content-type-options": "nosniff",
+        "content-disposition": "inline",
+        "x-robots-tag": "noindex, nofollow"
+      }
+    });
   }
 
   /**
@@ -353,6 +406,22 @@ export class Artifacts extends DurableObject {
       if (then === "close") watcher.end();
     }
   }
+}
+
+/**
+ * How long a cache may keep one entry's bytes: what is left of the artifact.
+ *
+ * Retention is the only bound that matters, because the bytes themselves never
+ * change — so a cache populated now expires no later than the artifact it copied,
+ * and there is no window where this object has forgotten an image and the
+ * internet has not. Seconds here against the milliseconds retention is in, and
+ * the remainder is negative for an artifact past its cutoff that the lazy sweep
+ * has not reached yet — which is a thing the read paths serve, so the floor is
+ * what keeps the header truthful rather than a second rule about it.
+ */
+function cacheAge(artifactCreatedAt: number, now: number): number {
+  const remaining = artifactCreatedAt + ARTIFACT_RETENTION_MS - now;
+  return Math.max(0, Math.floor(remaining / 1000));
 }
 
 /** One open stream, from the writing side. */

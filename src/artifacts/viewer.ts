@@ -7,8 +7,9 @@
  * artifact link is the kind of URL that gets pasted into a thread and opened
  * months later — so the fewer moving parts between the token and the text, the
  * better. Everything it needs is inline: no stylesheet, no script, no font, and
- * no request beyond the stream it opens and the probe that tells a token naming
- * no artifact from a connection that dropped.
+ * the only requests it makes are the stream it opens, the probe that tells a
+ * token naming no artifact from a connection that dropped, and one per image an
+ * entry carries.
  *
  * ## Why the token is not in it
  *
@@ -79,6 +80,9 @@ h1 { font-size: 1.05rem; font-weight: 600; margin: 0; letter-spacing: .01em; }
 .label { font-weight: 600; color: var(--fg); font-family: ui-monospace, monospace; }
 .text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .note { color: var(--muted); font-size: .9rem; }
+/* A tall image must not push the rest of the log off the page, and the height
+   bound is what holds a portrait screenshot to a card's worth of it. */
+.image { display: block; max-width: 100%; max-height: 32rem; height: auto; }
 `;
 
 const SCRIPT = `
@@ -88,10 +92,43 @@ const SCRIPT = `
   var logEl = document.getElementById("log");
   var noteEl = document.getElementById("note");
   var ready = false;
+  // Every URL this page asks for hangs off its own, which is what keeps this
+  // string the same bytes for every artifact.
+  var base = location.pathname.replace(/\\/$/, "");
 
   function setStatus(state, text) {
     statusEl.dataset.state = state;
     statusEl.textContent = text;
+  }
+
+  // An entry's text, or the image it is the alt text of. Not both: the same
+  // string as alt and as a caption is read out twice by a screen reader.
+  function body(entry) {
+    if (!entry.media) {
+      var text = document.createElement("p");
+      text.className = "text";
+      text.textContent = entry.text;
+      return text;
+    }
+    var image = document.createElement("img");
+    image.className = "image";
+    image.loading = "lazy";
+    image.decoding = "async";
+    image.alt = entry.text;
+    // Before the src, so a load that fails immediately is still caught. What a
+    // reader sees here is an image whose artifact was swept while the page was
+    // open.
+    image.onerror = function () {
+      var gone = document.createElement("p");
+      gone.className = "note";
+      gone.textContent = "This image is no longer available.";
+      image.replaceWith(gone);
+    };
+    // Derived from this page's own location, like the stream URL, and from a
+    // number this page computed — so no token and nothing caller-supplied is
+    // interpolated into markup.
+    image.src = base + "/" + String(Number(entry.sequence));
+    return image;
   }
 
   function render(entry) {
@@ -107,14 +144,11 @@ const SCRIPT = `
     time.dateTime = new Date(entry.at).toISOString();
     time.textContent = new Date(entry.at).toLocaleTimeString();
     meta.append(label, time);
-    var body = document.createElement("p");
-    body.className = "text";
-    body.textContent = entry.text;
-    wrap.append(meta, body);
+    wrap.append(meta, body(entry));
     logEl.append(wrap);
   }
 
-  var eventsUrl = location.pathname.replace(/\\/$/, "") + "/events";
+  var eventsUrl = base + "/events";
   var stream = new EventSource(eventsUrl);
 
   stream.addEventListener("${ARTIFACT_EVENTS.ready}", function (event) {

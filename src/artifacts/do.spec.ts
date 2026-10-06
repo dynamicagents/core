@@ -5,6 +5,7 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { MAX_QUEUED_FRAMES, type Artifacts } from "./do.js";
 import { ARTIFACT_EVENTS } from "./events.js";
+import { MAX_ARTIFACT_MEDIA_BYTES } from "./media.js";
 import { ARTIFACT_RETENTION_MS } from "./store.js";
 
 /**
@@ -34,6 +35,15 @@ const eventsRequest = (token: string, lastEventId?: string) =>
   new Request(`https://agent.example/a/${token}/events`, {
     headers: lastEventId ? { "last-event-id": lastEventId } : {}
   });
+
+const bytesRequest = (token: string, sequence: number) =>
+  new Request(`https://agent.example/a/${token}/${sequence}`);
+
+/** PNG and JPEG as far as the signature check is concerned, which is far enough. */
+const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+const PNG = new Uint8Array([...PNG_SIGNATURE, 0x00, 0x01, 0x02]);
+const PNG_AGAIN = new Uint8Array([...PNG_SIGNATURE, 0x07, 0x07, 0x07]);
+const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
 
 interface Frame {
   id?: string;
@@ -398,6 +408,245 @@ describe("Artifacts — reading one back", () => {
   });
 });
 
+describe("Artifacts — an image on an entry", () => {
+  it("serves the bytes it was given, byte for byte", async () => {
+    const artifacts = fresh("media");
+    const token = await artifacts.createArtifact("plan");
+    expect(
+      await artifacts.addEntry(token, {
+        label: "plan",
+        text: "the shape of it",
+        media: { type: "image/png", data: PNG }
+      })
+    ).toMatchObject({ sequence: 1 });
+
+    const response = await artifacts.fetch(bytesRequest(token, 1));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("image/png");
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(PNG);
+  });
+
+  /**
+   * The headers a public URL owes. `max-age` is what is left of the artifact, so
+   * a cache populated now expires no later than the bytes it copied.
+   */
+  it("lets a cache keep the bytes, but never past the artifact", async () => {
+    await runInDurableObject(fresh("media-cache"), async (instance) => {
+      const halfway = Date.now() - ARTIFACT_RETENTION_MS / 2;
+      instance.clockOverride = () => halfway;
+      const token = await instance.createArtifact("plan");
+      await instance.addEntry(token, {
+        label: "plan",
+        text: "the shape of it",
+        media: { type: "image/png", data: PNG }
+      });
+
+      instance.clockOverride = () => Date.now();
+      const response = await instance.fetch(bytesRequest(token, 1));
+      const control = response.headers.get("cache-control") ?? "";
+      expect(control).toContain("public");
+      expect(control).toContain("immutable");
+      const maxAge = Number(/max-age=(\d+)/.exec(control)?.[1]);
+      expect(maxAge).toBeGreaterThan(0);
+      expect(maxAge).toBeLessThanOrEqual(ARTIFACT_RETENTION_MS / 2000);
+      expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(response.headers.get("content-disposition")).toBe("inline");
+      expect(response.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+    });
+  });
+
+  /**
+   * The sweep runs on a write, so an artifact past its cutoff is still readable
+   * until one lands. Serving it is the events route's behaviour too; what the
+   * floor on `max-age` adds is that nothing caches what is already overdue.
+   */
+  it("offers no cache for an image the sweep has not reached", async () => {
+    await runInDurableObject(fresh("media-overdue"), async (instance) => {
+      instance.clockOverride = () =>
+        Date.now() - ARTIFACT_RETENTION_MS - 60_000;
+      const token = await instance.createArtifact("plan");
+      await instance.addEntry(token, {
+        label: "plan",
+        text: "the shape of it",
+        media: { type: "image/png", data: PNG }
+      });
+
+      instance.clockOverride = () => Date.now();
+      const response = await instance.fetch(bytesRequest(token, 1));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toContain("max-age=0");
+    });
+  });
+
+  it("carries the descriptor on every read of the log, and the bytes on none", async () => {
+    const artifacts = fresh("media-descriptor");
+    const token = await artifacts.createArtifact("plan");
+    await artifacts.addEntry(token, {
+      label: "plan",
+      text: "the shape of it",
+      media: { type: "image/png", data: PNG }
+    });
+
+    const page = await artifacts.readArtifact(token);
+    expect(page?.entries).toEqual([
+      {
+        sequence: 1,
+        label: "plan",
+        text: "the shape of it",
+        at: expect.any(Number),
+        media: { type: "image/png", byteLength: PNG.byteLength }
+      }
+    ]);
+
+    const stream = frames(await artifacts.fetch(eventsRequest(token)));
+    await stream.next(); // `ready`
+    const frame = await stream.next();
+    // The frame is JSON on a bounded queue, so what rides it is the descriptor
+    // and the alt text — never a payload.
+    expect(Object.keys(frame?.data as object).sort()).toEqual([
+      "at",
+      "label",
+      "media",
+      "sequence",
+      "text"
+    ]);
+    expect(frame?.data).toMatchObject({
+      media: { type: "image/png", byteLength: PNG.byteLength }
+    });
+    await stream.cancel();
+  });
+
+  it("gives a replayed key its first sequence, and leaves the bytes alone", async () => {
+    const artifacts = fresh("media-replay");
+    const token = await artifacts.createArtifact("plan");
+    const first = await artifacts.addEntry(token, {
+      key: "plan:0",
+      label: "plan",
+      text: "the shape of it",
+      media: { type: "image/png", data: PNG }
+    });
+    expect(
+      await artifacts.addEntry(token, {
+        key: "plan:0",
+        label: "plan",
+        text: "the shape of it",
+        media: { type: "image/png", data: PNG_AGAIN }
+      })
+    ).toEqual(first);
+
+    const response = await artifacts.fetch(bytesRequest(token, 1));
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(PNG);
+    expect((await artifacts.readArtifact(token))?.entries).toHaveLength(1);
+  });
+
+  it("stores the view it was handed, not the buffer behind it", async () => {
+    const artifacts = fresh("media-view");
+    const token = await artifacts.createArtifact("plan");
+    const backing = new Uint8Array([0x99, 0x99, ...PNG, 0x99, 0x99]);
+    await artifacts.addEntry(token, {
+      label: "plan",
+      text: "the shape of it",
+      media: {
+        type: "image/png",
+        data: backing.subarray(2, 2 + PNG.byteLength)
+      }
+    });
+
+    expect((await artifacts.readArtifact(token))?.entries[0]?.media).toEqual({
+      type: "image/png",
+      byteLength: PNG.byteLength
+    });
+    const response = await artifacts.fetch(bytesRequest(token, 1));
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(PNG);
+  });
+
+  /**
+   * A refusal **throws** rather than answering `null`, because `null` already
+   * means "swept, or locked" and a caller branches on it — see `transcribeNote`.
+   *
+   * Driven on the instance rather than through the stub, as every spec here with
+   * a throwing method is: an RPC rejection is reported inside the object as an
+   * unhandled one as well, and a suite that tolerates those tolerates real ones.
+   * What the refusals leave behind is the half worth asserting anyway, and
+   * storage is reachable from here.
+   */
+  it("refuses a payload past the limit, and writes nothing at all", async () => {
+    await runInDurableObject(
+      fresh("media-too-large"),
+      async (instance, state) => {
+        const token = await instance.createArtifact("plan");
+        const huge = new Uint8Array(MAX_ARTIFACT_MEDIA_BYTES + 1);
+        huge.set(PNG_SIGNATURE);
+
+        await expect(
+          instance.addEntry(token, {
+            label: "plan",
+            text: "the shape of it",
+            media: { type: "image/png", data: huge }
+          })
+        ).rejects.toThrow(new RegExp(String(MAX_ARTIFACT_MEDIA_BYTES)));
+
+        expect((await instance.readArtifact(token))?.entries).toEqual([]);
+        expect(
+          state.storage.sql
+            .exec<{ n: number }>(
+              "SELECT COUNT(*) AS n FROM artifact_entry_media"
+            )
+            .one().n
+        ).toBe(0);
+      }
+    );
+  });
+
+  it("refuses bytes that are not the type they claim", async () => {
+    await runInDurableObject(fresh("media-mismatch"), async (instance) => {
+      const token = await instance.createArtifact("plan");
+      await expect(
+        instance.addEntry(token, {
+          label: "plan",
+          text: "the shape of it",
+          media: { type: "image/png", data: JPEG }
+        })
+      ).rejects.toThrow(/does not start with/);
+      expect((await instance.readArtifact(token))?.entries).toEqual([]);
+    });
+  });
+
+  it("refuses SVG rather than sanitizing it", async () => {
+    await runInDurableObject(fresh("media-svg"), async (instance) => {
+      const token = await instance.createArtifact("plan");
+      await expect(
+        instance.addEntry(token, {
+          label: "plan",
+          text: "the shape of it",
+          media: {
+            type: "image/svg+xml",
+            data: new TextEncoder().encode("<svg><script/></svg>")
+          }
+        })
+      ).rejects.toThrow(/sanitized/);
+      expect((await instance.readArtifact(token))?.entries).toEqual([]);
+    });
+  });
+
+  it.each([
+    ["a token that names nothing", "M".repeat(40), 1],
+    ["a sequence past the end", null, 9],
+    ["an entry carrying no image", null, 1]
+  ])("is a 404 for %s", async (_label, unknown, sequence) => {
+    const artifacts = fresh("media-404");
+    const token = await artifacts.createArtifact("plan");
+    await artifacts.addEntry(token, { label: "plan", text: "no image here" });
+
+    // One answer for all three: telling them apart tells whoever guessed a URL
+    // which half of it they guessed right.
+    const response = await artifacts.fetch(
+      bytesRequest(unknown ?? token, sequence)
+    );
+    expect(response.status).toBe(404);
+  });
+});
+
 describe("Artifacts — retention", () => {
   /**
    * Lazily, on the next write, and never on an alarm: a deletion nobody is
@@ -426,6 +675,32 @@ describe("Artifacts — retention", () => {
       expect(rows).toBe(0);
       expect(await instance.tokenFor(KIND, "new-task")).toBe(current);
     });
+  });
+
+  it("takes the images on it too, so none outlives its artifact", async () => {
+    await runInDurableObject(
+      fresh("retention-media"),
+      async (instance, state) => {
+        instance.clockOverride = () =>
+          Date.now() - ARTIFACT_RETENTION_MS - 60_000;
+        const stale = await instance.createArtifact("plan", "old-plan");
+        await instance.addEntry(stale, {
+          label: "plan",
+          text: "the shape of it",
+          media: { type: "image/png", data: PNG }
+        });
+
+        instance.clockOverride = () => Date.now();
+        // The addition that pays for the sweep.
+        await instance.createArtifact("plan", "new-plan");
+
+        const blobs = state.storage.sql
+          .exec<{ n: number }>("SELECT COUNT(*) AS n FROM artifact_entry_media")
+          .one().n;
+        expect(blobs).toBe(0);
+        expect((await instance.fetch(bytesRequest(stale, 1))).status).toBe(404);
+      }
+    );
   });
 
   it("keeps one still inside the window", async () => {
@@ -587,12 +862,22 @@ describe("Artifacts — the event stream", () => {
     });
   });
 
-  it("serves nothing but the events route", async () => {
+  it("serves the stream and an entry's bytes, and nothing else", async () => {
     const artifacts = fresh("stream-route");
     const token = await artifacts.createArtifact(KIND);
-    const response = await artifacts.fetch(
-      new Request(`https://agent.example/a/${token}`)
-    );
-    expect(response.status).toBe(404);
+    await artifacts.addEntry(token, {
+      label: "a 0",
+      text: "the shape of it",
+      media: { type: "image/png", data: PNG }
+    });
+
+    // The page is the edge's to serve from a string, so it never reaches here.
+    for (const path of [`/a/${token}`, `/a/${token}/raw`]) {
+      const response = await artifacts.fetch(
+        new Request(`https://agent.example${path}`)
+      );
+      expect(response.status).toBe(404);
+    }
+    expect((await artifacts.fetch(bytesRequest(token, 1))).status).toBe(200);
   });
 });
