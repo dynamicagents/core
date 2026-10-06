@@ -29,6 +29,12 @@ export const ARTIFACT_EVENTS = {
 export interface ReadyEvent {
   kind: string;
   status: string | null;
+  /**
+   * The object's clock as the stream opened, in epoch milliseconds. Entry
+   * times are this clock's, and a reader timing a card still running measures
+   * against it rather than its own, which can be minutes off.
+   */
+  now: number;
 }
 
 /** The terminal frame. Nothing follows it; the stream closes. */

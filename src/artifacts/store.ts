@@ -10,6 +10,7 @@
  * interleave with it.
  */
 
+import { readEntryDetail, type ArtifactEntryDetail } from "./detail.js";
 import {
   ArtifactMediaTooLargeError,
   ArtifactMediaTypeError,
@@ -82,13 +83,16 @@ export interface ArtifactEntry {
   /** Who wrote it, as the viewer prints it beside the text. */
   label: string;
   /**
-   * What it says. On a media entry this is the image's **alt text** — required
-   * for the same reason it is required everywhere else, so a reader served no
-   * images is still served the artifact, and accessibility is not optional.
+   * The note — or, for a card, its one-line summary. On a media entry it is the
+   * image's **alt text**, required for the same reason it is required
+   * everywhere else: a reader served no images is still served the artifact,
+   * and accessibility is not optional.
    */
   text: string;
   /** When it was recorded, in epoch milliseconds. */
   at: number;
+  /** What opening it shows — see {@link file://./detail.ts ArtifactEntryDetail}. */
+  detail?: ArtifactEntryDetail;
   /** The image on it, if it carries one. */
   media?: ArtifactMedia;
 }
@@ -124,6 +128,8 @@ export interface AppendResult {
 export interface ArtifactEntryInput {
   label: string;
   text: string;
+  /** Shape-checked and clipped on the way in — see `readEntryDetail`. */
+  detail?: ArtifactEntryDetail;
   /**
    * A caller-side dedupe id, making the append idempotent.
    *
@@ -191,7 +197,7 @@ const DDL = [
  * {@link ARTIFACT_RETENTION_MS}, so a deployment changing shape meets months of
  * rows it cannot drop and has to know which shape they are in.
  */
-export const CURRENT_SCHEMA_VERSION = 3;
+export const CURRENT_SCHEMA_VERSION = 4;
 
 /** Move a store recorded at `from` up to the shape this build expects. */
 export type SchemaUpgrade = (sql: SqlStorage, from: number) => void;
@@ -207,11 +213,13 @@ export type SchemaUpgrade = (sql: SqlStorage, from: number) => void;
 const upgrade: SchemaUpgrade = (sql, from) => {
   // 2: `lock`, for an artifact that must not change after somebody acted on it.
   if (from < 2) sql.exec("ALTER TABLE artifacts ADD COLUMN locked_at INTEGER");
-  // 3: an image on an entry. The descriptor is two nullable columns beside the
+  // 3: an entry's card, as JSON.
+  if (from < 3) sql.exec("ALTER TABLE artifact_entries ADD COLUMN detail TEXT");
+  // 4: an image on an entry. The descriptor is two nullable columns beside the
   // text, so every row written before this reads back as an entry with no media
   // and nothing is backfilled. The bytes go in a table of their own, which is
   // what keeps them off every read of the log — see `entries` and `media`.
-  if (from < 3) {
+  if (from < 4) {
     sql.exec("ALTER TABLE artifact_entries ADD COLUMN media_type TEXT");
     sql.exec("ALTER TABLE artifact_entries ADD COLUMN media_bytes INTEGER");
     sql.exec(
@@ -307,6 +315,7 @@ type EntryRow = {
   label: string;
   body: string;
   created_at: number;
+  detail: string | null;
   media_type: string | null;
   media_bytes: number | null;
 };
@@ -316,10 +325,10 @@ type EntryRow = {
  *
  * Two reads answer an {@link EntryRow} — the whole log, and the one a replayed
  * key finds — and a column added to one of them and not the other reads back as
- * an entry whose image is missing.
+ * an entry missing whatever it added.
  */
 const ENTRY_COLUMNS =
-  "sequence, label, body, created_at, media_type, media_bytes";
+  "sequence, label, body, created_at, detail, media_type, media_bytes";
 
 /** The bytes of one entry, with the artifact's age for the cache header. */
 type MediaRow = {
@@ -370,7 +379,9 @@ export interface ArtifactStore {
    * **throws**, and writes nothing. Not `null`: that answer already means
    * "swept, or locked", and the caller branching on it
    * ({@link file://./transcript.ts transcribeNote}) would read a payload it got
-   * wrong as a month-old artifact.
+   * wrong as a month-old artifact. The entry's row and its bytes are one
+   * transaction, so a write that fails anywhere leaves no entry at all and a
+   * keyed retry writes both.
    */
   append(token: string, entry: ArtifactEntryInput): AppendResult | null;
   /**
@@ -425,7 +436,10 @@ export interface ArtifactStore {
  *
  * `now` is a parameter so the retention sweep is testable without waiting a
  * month; production passes `Date.now`. `atomically` is the object's
- * `transactionSync`, for the schema upgrade — see {@link ArtifactSchemaOptions}.
+ * `transactionSync`: the schema upgrade runs in it — see
+ * {@link ArtifactSchemaOptions} — and so does the one write that spans tables,
+ * {@link ArtifactStore.append}. Omitted, every statement stands on its own,
+ * which only a spec does.
  */
 export function makeArtifactStore(
   sql: SqlStorage,
@@ -433,6 +447,8 @@ export function makeArtifactStore(
   atomically?: Atomically
 ): ArtifactStore {
   ensureArtifactSchema(sql, atomically ? { atomically } : {});
+
+  const write: Atomically = atomically ?? ((fn) => fn());
 
   const rowTo = (row: ArtifactRow): Artifact => ({
     token: row.token,
@@ -444,18 +460,19 @@ export function makeArtifactStore(
   });
 
   const rowToEntry = (row: EntryRow): ArtifactEntry => {
-    const entry: ArtifactEntry = {
+    const detail = row.detail === null ? undefined : parseDetail(row.detail);
+    return {
       sequence: row.sequence,
       label: row.label,
       text: row.body,
-      at: row.created_at
+      at: row.created_at,
+      ...(detail ? { detail } : {}),
+      // Both columns or neither: they are written in one statement, so a row
+      // with one of them is not a descriptor to report a made-up number for.
+      ...(row.media_type !== null && row.media_bytes !== null
+        ? { media: { type: row.media_type, byteLength: row.media_bytes } }
+        : {})
     };
-    // Both columns or neither: they are written in one statement, so a row with
-    // one of them is not a descriptor to report a made-up number for.
-    if (row.media_type !== null && row.media_bytes !== null) {
-      entry.media = { type: row.media_type, byteLength: row.media_bytes };
-    }
-    return entry;
   };
 
   const tokenFor = (kind: string, sourceKey: string): string | null =>
@@ -547,57 +564,68 @@ export function makeArtifactStore(
       }
       if (artifact.locked) return null;
       // Checked here: after the replay above, so a retry rewrites no bytes, and
-      // before either insert, so a refusal leaves neither row behind.
+      // before the write below, so a refusal leaves nothing to roll back.
       const media =
         entry.media === undefined ? null : checkedMedia(entry.media);
-      const sequence =
-        sql
-          .exec<{ next: number }>(
-            "SELECT COALESCE(MAX(sequence), 0) + 1 AS next FROM artifact_entries WHERE token = ?",
-            token
-          )
-          .toArray()[0]?.next ?? 1;
       const at = now();
-      sql.exec(
-        `INSERT INTO artifact_entries
-           (token, sequence, entry_key, label, body, created_at,
-            media_type, media_bytes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        token,
-        sequence,
-        entry.key ?? null,
-        entry.label,
-        entry.text,
-        at,
-        media?.type ?? null,
-        media?.bytes.byteLength ?? null
-      );
-      // No await between the two inserts, which is what makes them one write:
-      // nothing else runs in this object until this call returns, so no reader
-      // can see a descriptor whose bytes are not there yet. A transaction would
-      // buy nothing — see the note at the top of this file.
-      if (media !== null) {
+      const detail = readEntryDetail(entry.detail);
+      let sequence = 0;
+      // The sequence and both inserts in one transaction. Not for isolation —
+      // nothing else runs in this object between them, since `ctx.storage.sql`
+      // is synchronous — but for **rollback**: the blob insert is the one
+      // statement here that can fail on its own (a row SQLite will not take),
+      // and without the transaction it would leave a committed entry carrying a
+      // descriptor whose bytes are not there. A keyed retry then finds that
+      // entry, writes nothing, and the URL on it 404s for the artifact's life.
+      write(() => {
+        sequence =
+          sql
+            .exec<{ next: number }>(
+              "SELECT COALESCE(MAX(sequence), 0) + 1 AS next FROM artifact_entries WHERE token = ?",
+              token
+            )
+            .toArray()[0]?.next ?? 1;
         sql.exec(
-          `INSERT INTO artifact_entry_media (token, sequence, bytes)
-           VALUES (?, ?, ?)`,
+          `INSERT INTO artifact_entries
+             (token, sequence, entry_key, label, body, created_at, detail,
+              media_type, media_bytes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           token,
           sequence,
-          media.bytes
+          entry.key ?? null,
+          entry.label,
+          entry.text,
+          at,
+          detail ? JSON.stringify(detail) : null,
+          media?.type ?? null,
+          media?.bytes.byteLength ?? null
         );
-      }
-      const recorded: ArtifactEntry = {
-        sequence,
-        label: entry.label,
-        text: entry.text,
-        at
+        if (media !== null) {
+          sql.exec(
+            `INSERT INTO artifact_entry_media (token, sequence, bytes)
+             VALUES (?, ?, ?)`,
+            token,
+            sequence,
+            media.bytes
+          );
+        }
+      });
+      return {
+        entry: {
+          sequence,
+          label: entry.label,
+          text: entry.text,
+          at,
+          ...(detail ? { detail } : {}),
+          ...(media
+            ? {
+                media: { type: media.type, byteLength: media.bytes.byteLength }
+              }
+            : {})
+        },
+        appended: true,
+        announced
       };
-      if (media !== null) {
-        recorded.media = {
-          type: media.type,
-          byteLength: media.bytes.byteLength
-        };
-      }
-      return { entry: recorded, appended: true, announced };
     },
 
     announce(token) {
@@ -674,6 +702,19 @@ export function makeArtifactStore(
       };
     }
   };
+}
+
+/**
+ * A stored detail, read back. A column this store wrote is JSON it made, so a
+ * failure here is a hand-edited row — and costs that entry its card, not the
+ * read.
+ */
+function parseDetail(json: string): ArtifactEntryDetail | undefined {
+  try {
+    return readEntryDetail(JSON.parse(json));
+  } catch {
+    return undefined;
+  }
 }
 
 /**

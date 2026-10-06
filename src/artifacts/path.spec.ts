@@ -62,7 +62,8 @@ describe("parseArtifactPath", () => {
     ["a path segment nothing serves", `/a/${TOKEN}/raw`],
     ["a deeper path", `/a/${TOKEN}/events/extra`],
     ["a sequence no store mints", `/a/${TOKEN}/0`],
-    // One entry, one URL: the alternative is ten spellings a cache keeps apart.
+    // One decimal spelling per sequence, which is the form `artifactEntryUrl`
+    // emits — `01` would be a second key for the same bytes in every cache.
     ["a sequence with a leading zero", `/a/${TOKEN}/01`],
     ["a sequence past the bound", `/a/${TOKEN}/1234567890`],
     ["a sequence with a path after it", `/a/${TOKEN}/1/extra`],

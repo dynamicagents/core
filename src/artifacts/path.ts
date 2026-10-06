@@ -29,13 +29,16 @@ const TOKEN = /^[0-9A-Za-z]{32,128}$/;
  * What an entry's bytes URL ends in: its sequence, and an extension that is
  * matched and then **ignored**.
  *
- * Digits only, so it cannot be read as `/events`, and no leading zero, so one
- * entry has one URL rather than ten — which is what lets a cache keep it. Nine
- * digits at most, because a path segment that reaches `Number` deserves a bound,
- * and `0` is not a sequence this store mints. The extension exists because a URL
- * that looks like an image costs nothing and a consumer's existing ones end in
- * one; it carries no authority, since `nosniff` plus a signature-checked type
- * leaves the served `Content-Type` the only thing a browser may act on.
+ * Digits only, so it cannot be read as `/events`, and no leading zero, so the
+ * sequence has one spelling: `1`, never `01` or `001`. The extension is a second
+ * spelling of the same entry — `1`, `1.png` and `1.jpg` all address it — so what
+ * the leading-zero rule buys is a canonical decimal form the builder here emits
+ * and a cache keyed on it keeps once, not a single URL per entry. Nine digits at
+ * most, because a path segment that reaches `Number` deserves a bound, and `0`
+ * is not a sequence this store mints. The extension exists because a URL that
+ * looks like an image costs nothing and a consumer's existing ones end in one;
+ * it carries no authority, since `nosniff` plus a signature-checked type leaves
+ * the served `Content-Type` the only thing a browser may act on.
  */
 const SEQUENCE = /^([1-9]\d{0,8})(?:\.[A-Za-z0-9]{1,8})?$/;
 

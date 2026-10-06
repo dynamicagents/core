@@ -93,6 +93,18 @@ describe("the refusals", () => {
     expect(error.message).toContain("image/jpeg");
   });
 
+  // Every one of these is `in ARTIFACT_MEDIA_TYPES`, and none is on the
+  // allowlist — so an `in` here answers the wrong sentence for a type the store
+  // refused on its way past the signature check it never reached.
+  it.each(["toString", "constructor", "__proto__"])(
+    "names the allowlist for %s, which only Object.prototype has",
+    (declared) => {
+      const error = new ArtifactMediaTypeError(declared, "image/png");
+      expect(error.message).toContain("is not an artifact media type");
+      expect(error.message).not.toContain("does not start with");
+    }
+  );
+
   it("names the limit it broke", () => {
     const error = new ArtifactMediaTooLargeError(MAX_ARTIFACT_MEDIA_BYTES + 1);
     expect(error.name).toBe("ArtifactMediaTooLargeError");

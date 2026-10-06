@@ -111,7 +111,14 @@ export class ArtifactMediaTypeError extends Error {
   constructor(declared: string, detected: string | null) {
     const accepted = Object.keys(ARTIFACT_MEDIA_TYPES).join(", ");
     super(
-      declared in ARTIFACT_MEDIA_TYPES
+      // The declared type is caller-controlled, so the lookup is by *own*
+      // property. `in` reaches `Object.prototype`, and every inherited name —
+      // `toString`, `constructor`, `__proto__` — comes back true, so a caller
+      // declaring one of those would be told its bytes contradict a type that
+      // is not on the allowlist at all, instead of being told the allowlist.
+      // The same rule, for the same reason, as `tenantAgent` in
+      // {@link file://../worker/index.ts createA2AWorker}.
+      Object.hasOwn(ARTIFACT_MEDIA_TYPES, declared)
         ? `artifact media declared ${declared} does not start with that type's ` +
             `signature — the bytes are ${detected ?? "no accepted type"}. The ` +
             "type a bytes URL is served under is checked against the bytes, so " +

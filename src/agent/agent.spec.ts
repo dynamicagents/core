@@ -672,9 +672,35 @@ describe("an awaited sub-agent", () => {
     expect(state.work).toEqual([
       expect.objectContaining({ kind: "awaited", open: false, settled: true })
     ]);
+    // The narration, then the tool call as a card its result completes.
     expect(await transcriptEntries(accepted.id)).toEqual([
-      "working on sleep:1"
+      "working on sleep:1",
+      "child_sleep",
+      "child_sleep"
     ]);
+    const token = await requireArtifactsStub(testEnv).tokenFor(
+      SESSION_TRANSCRIPT_KIND,
+      accepted.id
+    );
+    const read = await requireArtifactsStub(testEnv).readArtifact(token!);
+    const [narration, call, result] = read?.entries ?? [];
+    expect(narration?.detail).toBeUndefined();
+    expect(call?.detail).toMatchObject({
+      status: "running",
+      title: "child_sleep",
+      sections: [{ label: "Input", format: "code" }]
+    });
+    expect(call?.detail?.sections?.[0]?.body).toContain('"seconds": 1');
+    expect(result?.detail).toMatchObject({
+      ref: call?.detail?.ref,
+      status: "ok",
+      sections: [{ label: "Output", format: "code" }]
+    });
+    expect(result?.detail?.sections?.[0]?.body).toContain('"slept": 1');
+    // Three notes back to back, and the thread is still given the link once.
+    expect(
+      working(harness, accepted.id).filter((text) => text.includes("/a/"))
+    ).toHaveLength(1);
   });
 
   it("files a note the live path missed, from the replay", async () => {
@@ -686,10 +712,12 @@ describe("an awaited sub-agent", () => {
     await until(
       "the replayed note",
       () => transcriptEntries(accepted.id),
-      (entries) => entries.length > 0
+      (entries) => entries.length >= 3
     );
     expect(await transcriptEntries(accepted.id)).toEqual([
-      "working on sleep:1"
+      "working on sleep:1",
+      "child_sleep",
+      "child_sleep"
     ]);
   });
 

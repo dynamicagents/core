@@ -198,16 +198,11 @@ describe("the artifacts schema version", () => {
   });
 
   /**
-   * The step that adds media, against a store the way version 2 left it: an
-   * entry written before images existed reads back without one, and an image is
-   * filed beside it afterwards.
-   *
-   * Version 2's own `ALTER TABLE` is spelled here because a store in that shape
-   * is not something this build can produce — {@link upgrade} runs every branch
-   * below the target, so asking for target 2 with the real steps would add the
-   * media columns too and then the v3 step would meet them.
+   * The real step, against a store the way version 2 left it: an entry
+   * written before cards existed reads back as plain text, and the next one
+   * keeps its card.
    */
-  it("brings a version 2 store up to media, keeping the entries on it", async () => {
+  it("brings a version 2 store up to cards, keeping its notes as text", async () => {
     const found = await withSql("v2", (sql) => {
       ensureArtifactSchema(sql, {
         steps: (db, from) => {
@@ -223,7 +218,83 @@ describe("the artifacts schema version", () => {
       sql.exec(
         `INSERT INTO artifact_entries
            (token, sequence, entry_key, label, body, created_at)
-         VALUES ('old', 1, NULL, 'a 0', 'written before images', 1000)`
+         VALUES ('old', 1, 'k1', 'a 0', 'before', 1000)`
+      );
+      const store = makeArtifactStore(sql, () => 1_000);
+      const card = {
+        ref: "t1",
+        status: "running" as const,
+        title: "Bash",
+        sections: [
+          { label: "Input", body: "npm test", format: "code" as const }
+        ]
+      };
+      store.append("old", {
+        key: "k2",
+        label: "a 0",
+        text: "npm test",
+        detail: card
+      });
+      const replayed = store.append("old", {
+        key: "k2",
+        label: "a 0",
+        text: "npm test",
+        detail: card
+      });
+      return {
+        version: recorded(sql),
+        entries: store.entries("old"),
+        replayed: replayed?.entry
+      };
+    });
+    expect(found.version).toBe(CURRENT_SCHEMA_VERSION);
+    expect(found.entries[0]).toEqual({
+      sequence: 1,
+      label: "a 0",
+      text: "before",
+      at: 1000
+    });
+    expect(found.entries[1]?.detail).toEqual({
+      ref: "t1",
+      status: "running",
+      title: "Bash",
+      sections: [{ label: "Input", body: "npm test", format: "code" }]
+    });
+    // A replay its key catches returns the card it wrote the first time.
+    expect(found.replayed?.detail).toEqual(found.entries[1]?.detail);
+  });
+
+  /**
+   * The step that adds media, against a store the way version 3 left it: a card
+   * written before images existed keeps its card, an entry written then reads
+   * back with no descriptor, and an image is filed beside both afterwards.
+   *
+   * Versions 2 and 3's own `ALTER TABLE`s are spelled here because a store in
+   * that shape is not something this build can produce — {@link upgrade} runs
+   * every branch below the target, so asking for target 3 with the real steps
+   * would add the media columns too and then the step under test would meet
+   * them.
+   */
+  it("brings a version 3 store up to media, keeping the cards on it", async () => {
+    const found = await withSql("v3", (sql) => {
+      ensureArtifactSchema(sql, {
+        steps: (db, from) => {
+          if (from < 2)
+            db.exec("ALTER TABLE artifacts ADD COLUMN locked_at INTEGER");
+          if (from < 3)
+            db.exec("ALTER TABLE artifact_entries ADD COLUMN detail TEXT");
+        },
+        target: 3
+      });
+      sql.exec(
+        `INSERT INTO artifacts (token, kind, source_key, created_at)
+         VALUES ('old', 'kind', NULL, 1000)`
+      );
+      sql.exec(
+        `INSERT INTO artifact_entries
+           (token, sequence, entry_key, label, body, created_at, detail)
+         VALUES ('old', 1, NULL, 'a 0', 'written before images', 1000,
+                 '{"title":"Bash","status":"ok"}')`
       );
 
       const store = makeArtifactStore(sql, () => 1_000);
@@ -242,8 +313,15 @@ describe("the artifacts schema version", () => {
       };
     });
     expect(found.version).toBe(CURRENT_SCHEMA_VERSION);
+    // The card the v3 store wrote survives the step, and carries no media.
     expect(found.before).toEqual([
-      { sequence: 1, label: "a 0", text: "written before images", at: 1000 }
+      {
+        sequence: 1,
+        label: "a 0",
+        text: "written before images",
+        at: 1000,
+        detail: { title: "Bash", status: "ok" }
+      }
     ]);
     expect(found.appended?.media).toEqual({
       type: "image/png",
@@ -320,5 +398,83 @@ describe("appending media the store refuses", () => {
     expect(thrown?.isTooLarge).toBe(true);
     expect(thrown?.entries).toBe(0);
     expect(thrown?.blobs).toBe(0);
+  });
+});
+
+/**
+ * The entry's row and its bytes are one write.
+ *
+ * The blob insert is the one statement in an append that can fail on its own, so
+ * the fixture is a real collision: a media row already at the sequence the
+ * append is about to allocate. Without the transaction the entry commits and its
+ * bytes do not, which is worse than losing the note — the descriptor rides every
+ * read of the log, so the viewer asks for a URL that 404s for the artifact's
+ * life, and the keyed retry that repairs every other partial write finds the
+ * entry already there and writes nothing.
+ */
+describe("appending an image whose bytes the blob table refuses", () => {
+  const chart = { type: "image/png", data: PNG } as const;
+
+  it("rolls the entry back with them, and a keyed retry writes both", async () => {
+    const found = await runInDurableObject(
+      ns.get(ns.idFromName(`store:media-rollback:${crypto.randomUUID()}`)),
+      (_instance, state) => {
+        const sql = state.storage.sql;
+        const atomically = (fn: () => void): void => {
+          state.storage.transactionSync(fn);
+        };
+        const store = makeArtifactStore(sql, () => 1_000, atomically);
+        const token = store.open("kind");
+        // The collision, on the sequence the first append will take.
+        sql.exec(
+          `INSERT INTO artifact_entry_media (token, sequence, bytes)
+           VALUES (?, 1, ?)`,
+          token,
+          PNG.buffer
+        );
+
+        let thrown: unknown;
+        try {
+          store.append(token, {
+            key: "plan:0",
+            label: "a 0",
+            text: "a chart",
+            media: chart
+          });
+        } catch (error) {
+          thrown = error;
+        }
+        const rolledBack = {
+          thrown: thrown instanceof Error,
+          entries: store.entries(token).length
+        };
+
+        // The fixture, removed: what is under test is the retry, not the
+        // collision, and the caller retrying has no idea either happened.
+        sql.exec("DELETE FROM artifact_entry_media WHERE token = ?", token);
+        const retried = store.append(token, {
+          key: "plan:0",
+          label: "a 0",
+          text: "a chart",
+          media: chart
+        });
+        return {
+          ...rolledBack,
+          appended: retried?.appended,
+          entry: retried?.entry,
+          bytes: store.media(token, 1)
+        };
+      }
+    );
+    expect(found.thrown).toBe(true);
+    // Nothing committed: no entry, and so no sequence spent either.
+    expect(found.entries).toBe(0);
+    expect(found.appended).toBe(true);
+    expect(found.entry?.sequence).toBe(1);
+    expect(found.entry?.media).toEqual({
+      type: "image/png",
+      byteLength: PNG.byteLength
+    });
+    expect(new Uint8Array(found.bytes!.data)).toEqual(PNG);
   });
 });
