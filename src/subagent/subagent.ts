@@ -7,6 +7,11 @@ import {
 } from "@cloudflare/think";
 import type { ContextConfig } from "agents/context";
 import { type LanguageModel, type ToolSet, type UIMessage } from "ai";
+import {
+  clipEntryBody,
+  type ArtifactEntryDetail,
+  type EntryStatus
+} from "../artifacts/detail.js";
 import type { AgentPlugin, PluginContext } from "../contract/plugin.js";
 import {
   assemblePlugins,
@@ -43,10 +48,16 @@ export type SubAgentClass = {
 /** The milestone a note travels under, from child to parent. */
 export const NOTE_MILESTONE = "note";
 
-/** A note's payload: its dedupe key and its text, both persisted. */
+/** A note's payload: its dedupe key, its text and its card, all persisted. */
 export interface NoteData {
   key: string;
   text: string;
+  /**
+   * What opening the note on the transcript shows. Clip its sections with
+   * `clipEntryBody` before reporting it: a milestone is persisted before the
+   * transcript ever sees it.
+   */
+  detail?: ArtifactEntryDetail;
 }
 
 export abstract class SubAgent<
@@ -187,27 +198,63 @@ export abstract class SubAgent<
 
   /**
    * Send what the model says before a tool call to the parent as a note, the
-   * moment the call starts. `onStepEnd` fires after the step's tools finish,
-   * which for a long tool is too late to be progress.
+   * moment the call starts, and each tool call as a card that its result
+   * completes. `onStepEnd` fires after the step's tools finish, which for a
+   * long tool is too late to be progress.
    *
    * A persisted milestone rather than ephemeral progress: the parent's
    * `onProgress` is best-effort, so it replays these when the run finishes.
    * Keyed on the tool call, which is stable across a recovered step.
    */
-  override async onChunk(ctx: {
-    chunk: { type: string; text?: string; toolCallId?: string };
-  }): Promise<void> {
+  override async onChunk(ctx: { chunk: ToolChunk }): Promise<void> {
     const { chunk } = ctx;
     if (chunk.type === "text-delta") {
       this.#buffered += chunk.text ?? "";
       return;
     }
-    if (chunk.type !== "tool-call" || this.#flushed) return;
-    this.#flushed = true;
-    const text = this.#buffered.trim();
-    this.#buffered = "";
-    if (!text || !chunk.toolCallId) return;
-    await this.note(`${this.name}:${chunk.toolCallId}`, text);
+    const id = chunk.toolCallId;
+    if (!id) return;
+    if (chunk.type === "tool-call") {
+      if (!this.#flushed) {
+        this.#flushed = true;
+        const text = this.#buffered.trim();
+        this.#buffered = "";
+        if (text) await this.note(`${this.name}:${id}`, text);
+      }
+      await this.#card(id, chunk, "running", "Input", chunk.input);
+      return;
+    }
+    // A preliminary result is a streaming tool's partial output; the final one
+    // follows under the same id.
+    if (chunk.type === "tool-result" && !chunk.preliminary)
+      await this.#card(id, chunk, "ok", "Output", chunk.output);
+    if (chunk.type === "tool-error")
+      await this.#card(id, chunk, "error", "Error", chunk.error);
+  }
+
+  /**
+   * One half of a tool's card: the call opens it, the result or error
+   * completes it — two entries sharing a `ref`, which the transcript folds.
+   */
+  async #card(
+    id: string,
+    chunk: ToolChunk,
+    status: EntryStatus,
+    label: string,
+    value: unknown
+  ): Promise<void> {
+    const name = chunk.toolName ?? "tool";
+    const half = status === "running" ? "call" : "result";
+    await this.note(
+      `${this.name}:${id}:${half}`,
+      summarizeToolInput(chunk.input) ?? name,
+      {
+        ref: `${this.name}:${id}`,
+        status,
+        title: name,
+        sections: [{ label, body: clipEntryBody(show(value)), format: "code" }]
+      }
+    );
   }
 
   override onStepEnd(): void {
@@ -216,11 +263,58 @@ export abstract class SubAgent<
   }
 
   /** Report one note to the parent's transcript. For tools with news. */
-  protected async note(key: string, text: string): Promise<void> {
-    const data: NoteData = { key, text };
+  protected async note(
+    key: string,
+    text: string,
+    detail?: ArtifactEntryDetail
+  ): Promise<void> {
+    const data: NoteData = { key, text, ...(detail ? { detail } : {}) };
     await this.reportProgress(
       { milestone: NOTE_MILESTONE, message: text, data },
       { persist: true }
     );
+  }
+}
+
+/** The fields of an AI SDK stream part that {@link SubAgent.onChunk} reads. */
+interface ToolChunk {
+  type: string;
+  text?: string;
+  toolCallId?: string;
+  toolName?: string;
+  input?: unknown;
+  output?: unknown;
+  error?: unknown;
+  preliminary?: boolean;
+}
+
+/** The most of a tool's input a card's summary line shows. */
+const SUMMARY_MAX_CHARS = 120;
+
+/**
+ * A tool call as one line: its input's first string field, which for most
+ * tools is the thing acted on — a path, a query, a command. `undefined` when
+ * there is none, and the card falls back to the tool's name.
+ */
+function summarizeToolInput(input: unknown): string | undefined {
+  let first: unknown = input;
+  if (typeof input === "object" && input !== null && !Array.isArray(input))
+    first = Object.values(input).find((value) => typeof value === "string");
+  if (typeof first !== "string") return undefined;
+  const line = first.trim().split("\n")[0]?.trim();
+  if (!line) return undefined;
+  return line.length <= SUMMARY_MAX_CHARS
+    ? line
+    : `${line.slice(0, SUMMARY_MAX_CHARS - 1)}…`;
+}
+
+/** A tool's input or output as a card's body. */
+function show(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value instanceof Error) return value.message;
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    return String(value);
   }
 }

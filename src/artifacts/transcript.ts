@@ -31,7 +31,8 @@
  *
  * ## When the thread gets the note instead
  *
- * Twice, and both are facts about *this note* rather than about the wiring:
+ * Twice, and both are facts about *this note* rather than about the wiring —
+ * and only for a note without a card (see {@link SubagentNote.detail}):
  * this deployment has not learned its own origin yet, so there is no link to
  * post; or retention has swept the artifact out from under the write, so there
  * is no longer one to link to. Neither can be fixed by the caller and neither
@@ -51,6 +52,7 @@ import { labelSubagentNote, subagentNoteLabel } from "./label.js";
 import type { ArtifactsEnv } from "../env.js";
 import { assertArtifactsBound, requireArtifactsStub } from "./binding.js";
 import { artifactViewerUrl } from "./path.js";
+import type { ArtifactEntryDetail } from "./detail.js";
 
 /** The kind a task's progress notes are recorded under. */
 export const SESSION_TRANSCRIPT_KIND = "session-transcript";
@@ -74,6 +76,13 @@ export interface SubagentNote {
    * sides — the gatekeeper's, and the artifact's.
    */
   key: string;
+  /**
+   * The note's card — a tool call, say — when it has one. A note with a card is
+   * **transcript-only**: neither fallback below posts it to the thread, which
+   * would put one message per tool call back in front of the person. It can
+   * still be the note that posts the link.
+   */
+  detail?: ArtifactEntryDetail;
 }
 
 /**
@@ -97,7 +106,7 @@ export async function transcribeNote(
   // origin to build one out of, and filing the note would only bury it on a
   // transcript nothing has pointed at yet.
   if (note.origin === undefined) {
-    await post(labelSubagentNote(note.text, note.source));
+    if (!note.detail) await post(labelSubagentNote(note.text, note.source));
     return;
   }
 
@@ -106,13 +115,14 @@ export async function transcribeNote(
   const recorded = await stub.addEntry(token, {
     key: note.key,
     label: subagentNoteLabel(note.source),
-    text: note.text
+    text: note.text,
+    ...(note.detail ? { detail: note.detail } : {})
   });
   // `null` is retention having swept the artifact between the two calls. Rare,
   // and not worth a retry: the note is a month old by construction, so the
   // thread gets it and the run goes on.
   if (recorded === null) {
-    await post(labelSubagentNote(note.text, note.source));
+    if (!note.detail) await post(labelSubagentNote(note.text, note.source));
     return;
   }
   if (recorded.announced) return;

@@ -10,6 +10,8 @@
  * interleave with it.
  */
 
+import { readEntryDetail, type ArtifactEntryDetail } from "./detail.js";
+
 /**
  * How long an artifact is kept. The same clock the rest of a Task's durable
  * state ages out on — see `TASK_RETENTION_MS` in
@@ -58,9 +60,12 @@ export interface ArtifactEntry {
   sequence: number;
   /** Who wrote it, as the viewer prints it beside the text. */
   label: string;
+  /** The note — or, for a card, its one-line summary. */
   text: string;
   /** When it was recorded, in epoch milliseconds. */
   at: number;
+  /** What opening it shows — see {@link file://./detail.ts ArtifactEntryDetail}. */
+  detail?: ArtifactEntryDetail;
 }
 
 /** An artifact's own row: what it is, and whether it has finished. */
@@ -94,6 +99,8 @@ export interface AppendResult {
 export interface ArtifactEntryInput {
   label: string;
   text: string;
+  /** Shape-checked and clipped on the way in — see `readEntryDetail`. */
+  detail?: ArtifactEntryDetail;
   /**
    * A caller-side dedupe id, making the append idempotent.
    *
@@ -155,7 +162,7 @@ const DDL = [
  * {@link ARTIFACT_RETENTION_MS}, so a deployment changing shape meets months of
  * rows it cannot drop and has to know which shape they are in.
  */
-export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_SCHEMA_VERSION = 3;
 
 /** Move a store recorded at `from` up to the shape this build expects. */
 export type SchemaUpgrade = (sql: SqlStorage, from: number) => void;
@@ -171,6 +178,8 @@ export type SchemaUpgrade = (sql: SqlStorage, from: number) => void;
 const upgrade: SchemaUpgrade = (sql, from) => {
   // 2: `lock`, for an artifact that must not change after somebody acted on it.
   if (from < 2) sql.exec("ALTER TABLE artifacts ADD COLUMN locked_at INTEGER");
+  // 3: an entry's card, as JSON.
+  if (from < 3) sql.exec("ALTER TABLE artifact_entries ADD COLUMN detail TEXT");
 };
 
 /** Runs `fn` as one transaction: the object's `ctx.storage.transactionSync`. */
@@ -255,6 +264,7 @@ type EntryRow = {
   label: string;
   body: string;
   created_at: number;
+  detail: string | null;
 };
 
 export interface ArtifactStore {
@@ -343,12 +353,16 @@ export function makeArtifactStore(
     locked: row.locked_at !== null
   });
 
-  const rowToEntry = (row: EntryRow): ArtifactEntry => ({
-    sequence: row.sequence,
-    label: row.label,
-    text: row.body,
-    at: row.created_at
-  });
+  const rowToEntry = (row: EntryRow): ArtifactEntry => {
+    const detail = row.detail === null ? undefined : parseDetail(row.detail);
+    return {
+      sequence: row.sequence,
+      label: row.label,
+      text: row.body,
+      at: row.created_at,
+      ...(detail ? { detail } : {})
+    };
+  };
 
   const tokenFor = (kind: string, sourceKey: string): string | null =>
     sql
@@ -420,7 +434,7 @@ export function makeArtifactStore(
       if (entry.key !== undefined) {
         const prior = sql
           .exec<EntryRow>(
-            `SELECT sequence, label, body, created_at FROM artifact_entries
+            `SELECT sequence, label, body, created_at, detail FROM artifact_entries
              WHERE token = ? AND entry_key = ?`,
             token,
             entry.key
@@ -438,19 +452,27 @@ export function makeArtifactStore(
           )
           .toArray()[0]?.next ?? 1;
       const at = now();
+      const detail = readEntryDetail(entry.detail);
       sql.exec(
         `INSERT INTO artifact_entries
-           (token, sequence, entry_key, label, body, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+           (token, sequence, entry_key, label, body, created_at, detail)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
         token,
         sequence,
         entry.key ?? null,
         entry.label,
         entry.text,
-        at
+        at,
+        detail ? JSON.stringify(detail) : null
       );
       return {
-        entry: { sequence, label: entry.label, text: entry.text, at },
+        entry: {
+          sequence,
+          label: entry.label,
+          text: entry.text,
+          at,
+          ...(detail ? { detail } : {})
+        },
         appended: true,
         announced
       };
@@ -497,7 +519,7 @@ export function makeArtifactStore(
     entries(token, afterSequence = 0) {
       return sql
         .exec<EntryRow>(
-          `SELECT sequence, label, body, created_at FROM artifact_entries
+          `SELECT sequence, label, body, created_at, detail FROM artifact_entries
            WHERE token = ? AND sequence > ? ORDER BY sequence`,
           token,
           afterSequence
@@ -506,4 +528,17 @@ export function makeArtifactStore(
         .map(rowToEntry);
     }
   };
+}
+
+/**
+ * A stored detail, read back. A column this store wrote is JSON it made, so a
+ * failure here is a hand-edited row — and costs that entry its card, not the
+ * read.
+ */
+function parseDetail(json: string): ArtifactEntryDetail | undefined {
+  try {
+    return readEntryDetail(JSON.parse(json));
+  } catch {
+    return undefined;
+  }
 }
