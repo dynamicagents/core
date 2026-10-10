@@ -464,10 +464,14 @@ export abstract class TaskHost<
    * Start the task's workflow, recovering at every boundary.
    *
    * `runWorkflow` is `create({ id })` then a tracking insert. A start run again
-   * after an earlier one got as far as `create` finds the instance there — in
-   * production `create` throws on an id in use, and locally it resumes — and a
+   * after an earlier one got as far as `create` finds the instance there —
+   * `create` rejects an id in use with `instance.already_exists` — and a
    * tracking insert that throws on an id already tracked means the same. So a
    * failed start whose instance exists adopts it. The row is bound last.
+   *
+   * An adopted instance is therefore untracked, and that is harmless: the
+   * tracking table is the SDK's own bookkeeping, nothing here reads it, and a
+   * workflow's callbacks reach the host whether or not its row exists.
    */
   async #start(taskId: string): Promise<void> {
     const params = this.runs.params(taskId);

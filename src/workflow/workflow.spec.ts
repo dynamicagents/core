@@ -309,7 +309,14 @@ describe("G1: the edge → the host → the workflow", () => {
       const done = await harness.waitForTerminal(taskId);
       expect(done.text).toBe(`after ${boundary}`);
       expect((await status(taskId)).status).toBe("complete");
-      expect(await trackedCount(key, taskId)).toBe(1);
+      // Never two, which is what a double start would leave. One where the
+      // start ran whole, and none where it adopted an instance seeded under
+      // the task's id: `runWorkflow` is `create` then the tracking insert, so
+      // a `create` rejected as `instance.already_exists` never reaches the
+      // insert. The `tracking` row is the one seeded above, not core's.
+      expect(await trackedCount(key, taskId)).toBe(
+        boundary === "create" ? 0 : 1
+      );
       await pause(300);
       expect(terminals(harness, taskId)).toHaveLength(1);
     });

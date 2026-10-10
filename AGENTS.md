@@ -225,7 +225,7 @@ is the default — the vitest plugin peer under _The VCR harness_ is the worked
 example, and it says why. `agents` and `@cloudflare/think` have ceilings because both
 have broken across most of their recent minors and core is coupled to them about
 as deeply as a consumer can be — Think's base class and hooks, `Agent`, `Session`,
-and the experimental subpaths. That ceiling is not a number anyone has to remember to revisit:
+and every subpath core reaches past the root. That ceiling is not a number anyone has to remember to revisit:
 `--latest` reports when a release lands outside it, so widening it becomes a
 deliberate act after a green suite rather than a guess made in advance.
 
