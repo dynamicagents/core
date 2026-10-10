@@ -469,9 +469,12 @@ export abstract class TaskHost<
    * tracking insert that throws on an id already tracked means the same. So a
    * failed start whose instance exists adopts it. The row is bound last.
    *
-   * An adopted instance is therefore untracked, and that is harmless: the
-   * tracking table is the SDK's own bookkeeping, nothing here reads it, and a
-   * workflow's callbacks reach the host whether or not its row exists.
+   * Whether the adopted instance carries a tracking row depends on where the
+   * earlier attempt was cut: none when it was cut between `create` and the
+   * insert, and the row that attempt wrote when it got past it. Neither state
+   * is worth reconciling — the table is the SDK's own bookkeeping, nothing
+   * here reads it, and a workflow's callbacks reach the host whether or not
+   * its row exists.
    */
   async #start(taskId: string): Promise<void> {
     const params = this.runs.params(taskId);
