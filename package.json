@@ -1,6 +1,6 @@
 {
   "name": "@dynamicagents/core",
-  "version": "0.13.1",
+  "version": "0.14.0",
   "description": "Shared, mandatory foundation for Dynamic Agents on Cloudflare Workers: zero-trust A2A, a durable task host, task workflows, and step agents on @cloudflare/think.",
   "keywords": [
     "a2a",
@@ -123,10 +123,10 @@
     "zod": "^4.6.5"
   },
   "peerDependencies": {
-    "@cloudflare/think": ">=0.20.0 <0.21.0",
+    "@cloudflare/think": ">=0.20.2 <0.21.0",
     "@cloudflare/vitest-plugin": ">=1",
     "@typescript-eslint/utils": ">=8",
-    "agents": ">=0.26.0 <0.27.0",
+    "agents": ">=0.28.0 <0.29.0",
     "ai": "^7.0.88",
     "vitest": ">=4",
     "workers-ai-provider": "^4.0.0"
@@ -143,10 +143,10 @@
     }
   },
   "devDependencies": {
-    "@cloudflare/think": "^0.20.0",
+    "@cloudflare/think": "^0.20.2",
     "@cloudflare/vitest-plugin": "^1.1.9",
     "@types/node": "^26.5.1",
-    "agents": "^0.26.0",
+    "agents": "^0.28.0",
     "ai": "^7.0.101",
     "eslint": "^10.10.0",
     "happy-dom": "^20.14.5",

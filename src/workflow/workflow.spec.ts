@@ -309,7 +309,15 @@ describe("G1: the edge → the host → the workflow", () => {
       const done = await harness.waitForTerminal(taskId);
       expect(done.text).toBe(`after ${boundary}`);
       expect((await status(taskId)).status).toBe("complete");
-      expect(await trackedCount(key, taskId)).toBe(1);
+      // Never two, which is what a double start would leave, and which of zero
+      // or one says where the cut fell. `runWorkflow` is `create` then the
+      // tracking insert: before `create` the retry runs both; between them it
+      // leaves an instance for the retry's `create` to reject as
+      // `instance.already_exists`, so the insert is never reached; after it the
+      // retry adopts the row that attempt already wrote. Adoption is why `1`
+      // here is not core's row in the last case.
+      const tracked = { row: 1, create: 0, tracking: 1 } as const;
+      expect(await trackedCount(key, taskId)).toBe(tracked[boundary]);
       await pause(300);
       expect(terminals(harness, taskId)).toHaveLength(1);
     });
