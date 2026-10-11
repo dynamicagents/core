@@ -22,10 +22,10 @@
  * Think. It does import `agents` — far smaller than the whole `Agent` base
  * class, and not zero.
  *
- * **Experimental, and that reaches consumers.** Every type in
- * `agents/schedules` carries "The API surface may change before stabilizing".
- * This is a published subpath, so the churn is inherited rather than absorbed;
- * keeping the assembly in one module is what makes it one file's problem.
+ * **The dependency's surface is this subpath's surface.** `Scheduler` and its
+ * types are re-exported verbatim, so a consumer is typed against `agents`' own
+ * declarations and every change to them arrives here first: the churn is
+ * inherited rather than absorbed, and one module keeps it one file's problem.
  *
  * ## The sharp edges
  *
