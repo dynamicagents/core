@@ -202,6 +202,13 @@ export abstract class StepAgent<
 
   /** Learned from the `jku` each job carries; never configured. */
   readonly #origin = new SelfOrigin();
+  /**
+   * Jobs whose turn is being submitted, settled or answered right now — the
+   * windows {@link submitFollowUp} cannot see in Think's submissions. In
+   * memory, because what it guards is this isolate interleaving at an await;
+   * a queued or running turn is in Think's own ledger, and read there.
+   */
+  readonly #turning = new Set<string>();
   /** Each transcript's writes, chained — see {@link StepAgent.#note}. */
   readonly #transcribing = new Map<string, Promise<void>>();
   #plugins?: AssembledPlugins<Env>;
@@ -544,7 +551,14 @@ export abstract class StepAgent<
     if (
       this.ledger.resume(stepJobId, { id: `answer:${request.requestId}`, text })
     ) {
-      await this.submitAnswer({ stepJobId });
+      // `working` again before the answer is submitted: a result landing in
+      // between must not get its turn in ahead of the answer.
+      this.#turning.add(stepJobId);
+      try {
+        await this.submitAnswer({ stepJobId });
+      } finally {
+        this.#turning.delete(stepJobId);
+      }
     }
   }
 
@@ -683,9 +697,20 @@ export abstract class StepAgent<
           await this.cancelSubmission(submission.submissionId, TASK_ENDED);
         }
         return;
-      case "completed":
-        await this.#settleCompleted(stepJobId);
+      case "completed": {
+        // Held until the job is parked or not: until then it reads `working`
+        // with no turn live, and a result submitted in that gap would run
+        // beside the question this turn may have asked.
+        let interim = false;
+        this.#turning.add(stepJobId);
+        try {
+          interim = await this.#settleCompleted(stepJobId);
+        } finally {
+          this.#turning.delete(stepJobId);
+        }
+        if (interim) await this.#submitNextFollowUp(stepJobId);
         return;
+      }
       case "error":
       case "skipped":
         await this.#fail(stepJobId, submission.error ?? "the turn failed");
@@ -700,15 +725,16 @@ export abstract class StepAgent<
    * What a completed turn means for the job, in this order:
    *
    *  1. a question is pending → park, and the workflow relays it;
-   *  2. work is still open → an interim turn: push its closing words, stay
-   *     `working`, and send the next result held back for this turn;
+   *  2. work is still open → an interim turn: push its closing words and stay
+   *     `working`, answering `true` so the next result held back for this
+   *     turn is sent;
    *  3. otherwise the turn is the job's reply.
    *
    * Without (2), a detached dispatch would settle the job the moment the
    * parent turn ended, and the child's result would land on a closed one.
    */
-  async #settleCompleted(stepJobId: string): Promise<void> {
-    if (this.ledger.closed(stepJobId)) return;
+  async #settleCompleted(stepJobId: string): Promise<boolean> {
+    if (this.ledger.closed(stepJobId)) return false;
     // The async read: the `messages` getter is empty on a cold object, and a
     // turn recovered after an eviction is exactly when this runs on one.
     const outcome = readTurn(await this.getMessages(), stepJobId);
@@ -738,13 +764,12 @@ export abstract class StepAgent<
             };
       const n = this.ledger.park(stepJobId, request);
       if (n !== null) await this.#queueReport(stepJobId, n);
-      return;
+      return false;
     }
 
     if (this.ledger.openWork(stepJobId) > 0) {
       if (outcome.reply) await this.#push(stepJobId, outcome.reply, "turn");
-      await this.#submitNextFollowUp(stepJobId);
-      return;
+      return true;
     }
 
     const n = this.ledger.settle(stepJobId, {
@@ -752,6 +777,7 @@ export abstract class StepAgent<
       reply: outcome.reply
     });
     if (n !== null) await this.#queueReport(stepJobId, n);
+    return false;
   }
 
   /**
@@ -1038,8 +1064,8 @@ export abstract class StepAgent<
 
   /**
    * Every run's terminal, awaited and detached alike: replay its notes, close
-   * an awaited run's work, and once — end its transcript, then run the spec's
-   * `settle`.
+   * an awaited run's work, and once — see {@link #endRun} — end its
+   * transcript and run the spec's `settle`.
    */
   override async onAgentToolFinish(
     run: AgentToolRunInfo,
@@ -1052,12 +1078,7 @@ export abstract class StepAgent<
     await this.#replayNotes(run);
     if (work.kind === "awaited") this.ledger.closeWork(run.runId);
     if (!this.ledger.claimSettle(run.runId)) return;
-    await settleTranscript(
-      this.env,
-      this.#transcriptOf(run.runId),
-      result.status
-    );
-    await this.#release(
+    await this.#endRun(
       this.#subAgent(work.name)?.spec as SubAgentSpec<unknown, Env> | undefined,
       {
         runId: run.runId,
@@ -1083,12 +1104,29 @@ export abstract class StepAgent<
   ): Promise<void> {
     this.ledger.closeWork(runId);
     if (!this.ledger.claimSettle(runId)) return;
-    await this.#release(spec, {
+    await this.#endRun(spec, {
       runId,
       taskId,
       runtime,
       result: { status: "error", error }
     });
+  }
+
+  /**
+   * What the run that won `claimSettle` owes, whichever way it ended: its
+   * transcript ended — a refused run's too, since its dispatch may already
+   * have reopened a page it carries on — then the spec's `settle`.
+   */
+  async #endRun(
+    spec: SubAgentSpec<unknown, Env> | undefined,
+    context: Omit<SubAgentSettleContext<Env>, "parent">
+  ): Promise<void> {
+    await settleTranscript(
+      this.env,
+      this.#transcriptOf(context.runId),
+      context.result.status
+    );
+    await this.#release(spec, context);
   }
 
   /** A spec's `settle`, best-effort: a release that fails is logged. */
@@ -1132,8 +1170,9 @@ export abstract class StepAgent<
    * is a no-op. A job that closed meanwhile owes it nothing.
    *
    * Held, and still owed, while the job waits on the person or another of its
-   * turns is queued or running: {@link #submitNextFollowUp} sends it once that
-   * turn ends with the job `working`. A job holds one question at a time — a
+   * turns is queued, running, being submitted or being settled:
+   * {@link #submitNextFollowUp} sends it once that turn ends with the job
+   * `working`. A job holds one question at a time — a
    * second `ask_user` cannot park a parked job — so a result whose turn ran
    * beside a pending question could neither ask about itself nor settle
    * without settling over the question. Checked at submission because Think
@@ -1149,15 +1188,23 @@ export abstract class StepAgent<
       this.ledger.endFollowUp(payload.workId);
       return;
     }
-    if (row.state === "input-required") return;
-    if (await this.#turnInFlight(work.stepJobId, payload.workId)) return;
-    const keys = keysOf(row);
-    await this.runTurn({
-      mode: "submit",
-      input: userMessage(followUp.id, followUp.text, keys),
-      idempotencyKey: followUp.id,
-      metadata: { ...metadataOf(keys), workId: payload.workId }
-    });
+    const stepJobId = work.stepJobId;
+    if (row.state === "input-required" || this.#turning.has(stepJobId)) return;
+    // Reserved before the first await, so two results landing together do
+    // not both find the job idle and both submit.
+    this.#turning.add(stepJobId);
+    try {
+      if (await this.#turnInFlight(stepJobId, payload.workId)) return;
+      const keys = keysOf(row);
+      await this.runTurn({
+        mode: "submit",
+        input: userMessage(followUp.id, followUp.text, keys),
+        idempotencyKey: followUp.id,
+        metadata: { ...metadataOf(keys), workId: payload.workId }
+      });
+    } finally {
+      this.#turning.delete(stepJobId);
+    }
   }
 
   /**

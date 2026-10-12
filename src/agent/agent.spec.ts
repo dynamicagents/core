@@ -992,6 +992,30 @@ describe("a run's transcript", () => {
     expect(new Set(links).size).toBe(2);
   });
 
+  /**
+   * The dispatch reopens a page it carries on before the run is known to
+   * start, so a run refused there still owes the page its end.
+   */
+  it("is ended by a run that reopened it and was refused", async () => {
+    const { harness } = harnessFor("pages-refused", "CAPPED_AGENT");
+    using _ = harness.interceptGatekeeper();
+    const page = crypto.randomUUID();
+    const artifacts = requireArtifactsStub(testEnv);
+    const token = await artifacts.createArtifact(
+      SESSION_TRANSCRIPT_KIND,
+      `page:${page}`
+    );
+    await artifacts.addEntry(token, { label: "earlier", text: "earlier work" });
+    await artifacts.settle(token, "completed");
+
+    const accepted = await harness.send(
+      `capped:bgdelegate:same-page:${page}:again`
+    );
+    await harness.waitForTerminal(accepted.id);
+
+    expect(await statusOf(`page:${page}`)).toBe("failed");
+  });
+
   it("is carried on by a run that continues it, with no second link", async () => {
     const { harness } = harnessFor("pages-same");
     using _ = harness.interceptGatekeeper();
