@@ -42,7 +42,11 @@ import {
 } from "../artifacts/binding.js";
 import { readEntryDetail } from "../artifacts/detail.js";
 import { artifactViewerUrl } from "../artifacts/path.js";
-import { transcribeNote } from "../artifacts/transcript.js";
+import {
+  reopenTranscript,
+  settleTranscript,
+  transcribeNote
+} from "../artifacts/transcript.js";
 import {
   PluginSetupError,
   assemblePlugins,
@@ -67,6 +71,7 @@ import {
   type SubAgentEnvelope
 } from "../subagent/subagent.js";
 import {
+  ASKED,
   ASK_USER_TOOL_NAME,
   CHECK_BACK_DESCRIPTION,
   CHECK_BACK_TOOL_NAME,
@@ -197,7 +202,7 @@ export abstract class StepAgent<
 
   /** Learned from the `jku` each job carries; never configured. */
   readonly #origin = new SelfOrigin();
-  /** Each task's transcript writes, chained — see {@link StepAgent.#note}. */
+  /** Each transcript's writes, chained — see {@link StepAgent.#note}. */
   readonly #transcribing = new Map<string, Promise<void>>();
   #plugins?: AssembledPlugins<Env>;
   #buffered = "";
@@ -396,23 +401,25 @@ export abstract class StepAgent<
   }
 
   /**
-   * An interrupted `ask_user` becomes its question as text. The default repair
-   * reads as a tool that broke; this was a question, and the next user message
-   * answers it.
+   * An `ask_user` call is left unsettled — it has no `execute` — and is
+   * settled here, on the next turn, as the call it was: its input whole, and
+   * {@link ASKED} as its result. The default repair reads as a tool that broke.
+   *
+   * Never as text. Think persists the repair, so the model's history holds what
+   * this returns for every question it ever asked, and it asks the way its
+   * history shows asking: rewritten as prose, 0 of 17 calls survived in one
+   * coordinator's history, and 12 of its next 19 approvals were asked in prose,
+   * with no `artifact` and so no link.
    */
   protected override repairInterruptedToolPart(
     part: UIMessage["parts"][number]
   ): UIMessage["parts"][number] {
     if (part.type === `tool-${ASK_USER_TOOL_NAME}`) {
-      const input = (
-        part as { input?: { question?: unknown; options?: unknown } }
-      ).input;
-      if (typeof input?.question === "string") {
-        const options = Array.isArray(input.options)
-          ? `\n\n${input.options.map((o) => `- ${String(o)}`).join("\n")}`
-          : "";
-        return { type: "text", text: `${input.question}${options}` };
-      }
+      return {
+        ...part,
+        state: "output-available",
+        output: ASKED
+      } as UIMessage["parts"][number];
     }
     return super.repairInterruptedToolPart(part);
   }
@@ -693,8 +700,8 @@ export abstract class StepAgent<
    * What a completed turn means for the job, in this order:
    *
    *  1. a question is pending → park, and the workflow relays it;
-   *  2. work is still open → an interim turn: push its closing words and stay
-   *     `working`;
+   *  2. work is still open → an interim turn: push its closing words, stay
+   *     `working`, and send the next result held back for this turn;
    *  3. otherwise the turn is the job's reply.
    *
    * Without (2), a detached dispatch would settle the job the moment the
@@ -736,6 +743,7 @@ export abstract class StepAgent<
 
     if (this.ledger.openWork(stepJobId) > 0) {
       if (outcome.reply) await this.#push(stepJobId, outcome.reply, "turn");
+      await this.#submitNextFollowUp(stepJobId);
       return;
     }
 
@@ -962,6 +970,10 @@ export abstract class StepAgent<
           name: Cls.name,
           ...(runtime ? { runtime } : {})
         });
+        // A run carrying on another's work files on its transcript, which
+        // ended with that run: open it again so its page streams this one.
+        const transcript = this.#transcriptOf(runId);
+        if (transcript !== runId) await reopenTranscript(this.env, transcript);
         const envelope: SubAgentEnvelope = {
           input,
           taskId,
@@ -1026,7 +1038,8 @@ export abstract class StepAgent<
 
   /**
    * Every run's terminal, awaited and detached alike: replay its notes, close
-   * an awaited run's work, and run the spec's `settle` once.
+   * an awaited run's work, and once — end its transcript, then run the spec's
+   * `settle`.
    */
   override async onAgentToolFinish(
     run: AgentToolRunInfo,
@@ -1039,6 +1052,11 @@ export abstract class StepAgent<
     await this.#replayNotes(run);
     if (work.kind === "awaited") this.ledger.closeWork(run.runId);
     if (!this.ledger.claimSettle(run.runId)) return;
+    await settleTranscript(
+      this.env,
+      this.#transcriptOf(run.runId),
+      result.status
+    );
     await this.#release(
       this.#subAgent(work.name)?.spec as SubAgentSpec<unknown, Env> | undefined,
       {
@@ -1112,6 +1130,15 @@ export abstract class StepAgent<
    * ends (see {@link onSubmissionStatus}), so a repeat — a redelivered finish,
    * the start-up sweep — submits again under the same idempotency key, which
    * is a no-op. A job that closed meanwhile owes it nothing.
+   *
+   * Held, and still owed, while the job waits on the person or another of its
+   * turns is queued or running: {@link #submitNextFollowUp} sends it once that
+   * turn ends with the job `working`. A job holds one question at a time — a
+   * second `ask_user` cannot park a parked job — so a result whose turn ran
+   * beside a pending question could neither ask about itself nor settle
+   * without settling over the question. Checked at submission because Think
+   * runs a job's turns in the order they were submitted, and a follow-up
+   * queued behind a turn that then asks would run while the job is parked.
    */
   async submitFollowUp(payload: { workId: string }): Promise<void> {
     const work = this.ledger.work(payload.workId);
@@ -1122,6 +1149,8 @@ export abstract class StepAgent<
       this.ledger.endFollowUp(payload.workId);
       return;
     }
+    if (row.state === "input-required") return;
+    if (await this.#turnInFlight(work.stepJobId, payload.workId)) return;
     const keys = keysOf(row);
     await this.runTurn({
       mode: "submit",
@@ -1129,6 +1158,28 @@ export abstract class StepAgent<
       idempotencyKey: followUp.id,
       metadata: { ...metadataOf(keys), workId: payload.workId }
     });
+  }
+
+  /**
+   * Send the oldest follow-up a job holds back — see {@link submitFollowUp}.
+   * One, because its turn may ask, and the rest wait on that turn's end.
+   */
+  async #submitNextFollowUp(stepJobId: string): Promise<void> {
+    const [next] = this.ledger.owedFollowUps(stepJobId);
+    if (next) await this.submitFollowUp({ workId: next });
+  }
+
+  /**
+   * Whether a turn of the job, other than the follow-up of `workId`, is
+   * queued or running. A finished one is already terminal when
+   * `onSubmissionStatus` hears of it.
+   */
+  async #turnInFlight(stepJobId: string, workId: string): Promise<boolean> {
+    const live = await this.listSubmissions({ status: ["pending", "running"] });
+    return live.some(
+      (s) =>
+        s.metadata?.stepJobId === stepJobId && s.metadata?.workId !== workId
+    );
   }
 
   /**
@@ -1189,7 +1240,8 @@ export abstract class StepAgent<
     if (progress.milestone !== NOTE_MILESTONE) return;
     const note = readNote(progress.data);
     const stepJobId = this.ledger.work(run.runId)?.stepJobId;
-    if (note && stepJobId) await this.#note(stepJobId, sourceOf(run), note);
+    if (note && stepJobId)
+      await this.#note(run.runId, stepJobId, sourceOf(run), note);
   }
 
   /**
@@ -1228,13 +1280,13 @@ export abstract class StepAgent<
     for (const milestone of inspection?.milestones ?? []) {
       if (milestone.name !== NOTE_MILESTONE) continue;
       const note = readNote(milestone.data);
-      if (note) await this.#note(work.stepJobId, job.source, note);
+      if (note) await this.#note(job.runId, work.stepJobId, job.source, note);
     }
   }
 
   /**
-   * A job's notes go on its task's transcript, and their lines to the host —
-   * one at a time per task, in the order they arrived.
+   * A run's notes go on its transcript, and their lines to the host — one at
+   * a time per transcript, in the order they arrived.
    *
    * The SDK calls `onProgress` without awaiting the call before it, so a child
    * that files two notes back to back — its narration and its first tool call
@@ -1245,27 +1297,29 @@ export abstract class StepAgent<
    * it, and the finish replay files whatever they had not.
    */
   async #note(
+    runId: string,
     stepJobId: string,
     source: NoteSource,
     note: NoteData
   ): Promise<void> {
     const job = this.ledger.job(stepJobId);
     if (!job) return;
-    const { taskId } = job;
-    const write = (this.#transcribing.get(taskId) ?? Promise.resolve()).then(
-      () =>
-        transcribeNote(
-          this.env,
-          {
-            taskId,
-            origin: this.#origin.peek(),
-            source,
-            text: note.text,
-            key: note.key,
-            ...(note.detail ? { detail: note.detail } : {})
-          },
-          (line) => this.#hostProgress(job, line, note.key)
-        )
+    const transcript = this.#transcriptOf(runId);
+    const write = (
+      this.#transcribing.get(transcript) ?? Promise.resolve()
+    ).then(() =>
+      transcribeNote(
+        this.env,
+        {
+          transcript,
+          origin: this.#origin.peek(),
+          source,
+          text: note.text,
+          key: note.key,
+          ...(note.detail ? { detail: note.detail } : {})
+        },
+        (line) => this.#hostProgress(job, line, note.key)
+      )
     );
     // The next note waits for this one, not on its outcome: a failure is this
     // note's, and is thrown to whoever filed it.
@@ -1273,13 +1327,31 @@ export abstract class StepAgent<
       () => {},
       () => {}
     );
-    this.#transcribing.set(taskId, settled);
+    this.#transcribing.set(transcript, settled);
     try {
       await write;
     } finally {
-      if (this.#transcribing.get(taskId) === settled)
-        this.#transcribing.delete(taskId);
+      if (this.#transcribing.get(transcript) === settled)
+        this.#transcribing.delete(transcript);
     }
+  }
+
+  /**
+   * The transcript a run's notes go on: its own, unless its spec says it
+   * carries on another run's — see `transcriptKey` on `SubAgentSpec`.
+   */
+  #transcriptOf(runId: string): string {
+    const work = this.ledger.work(runId);
+    if (!work) return runId;
+    const spec = this.#subAgent(work.name)?.spec as
+      SubAgentSpec<unknown, Env> | undefined;
+    return (
+      spec?.transcriptKey?.({
+        runId,
+        taskId: this.ledger.row(work.stepJobId)?.taskId ?? work.stepJobId,
+        runtime: work.runtime
+      }) ?? runId
+    );
   }
 
   // --- identity and helpers --------------------------------------------------

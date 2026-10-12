@@ -47,7 +47,7 @@
  * it would be posted verbatim beside a transcript that already had it.
  */
 
-import { TaskState } from "@a2a-js/sdk";
+import type { AgentToolLifecycleResult } from "agents";
 import { labelSubagentNote, subagentNoteLabel } from "./label.js";
 import type { ArtifactsEnv } from "../env.js";
 import { assertArtifactsBound, requireArtifactsStub } from "./binding.js";
@@ -59,8 +59,12 @@ export const SESSION_TRANSCRIPT_KIND = "session-transcript";
 
 /** One labelled note, as both emission sites hold it. */
 export interface SubagentNote {
-  /** The task whose transcript this belongs on — the artifact's source key. */
-  taskId: string;
+  /**
+   * The transcript this belongs on — the artifact's source key. One per
+   * sub-agent run unless its spec says the run continues another's; see
+   * `transcriptKey` on `SubAgentSpec`.
+   */
+  transcript: string;
   /**
    * This deployment's own public origin, for the link. Absent on an instance no
    * turn has reached yet, which is the one case that cannot produce a usable
@@ -86,7 +90,7 @@ export interface SubagentNote {
 }
 
 /**
- * Record one labelled note on its task's transcript, and post what the thread
+ * Record one labelled note on its run's transcript, and post what the thread
  * should get for it: the link, the note itself, or nothing at all.
  *
  * `post` is handed the text and answers whether it **reached** the thread —
@@ -111,7 +115,10 @@ export async function transcribeNote(
   }
 
   const stub = requireArtifactsStub(env);
-  const token = await stub.createArtifact(SESSION_TRANSCRIPT_KIND, note.taskId);
+  const token = await stub.createArtifact(
+    SESSION_TRANSCRIPT_KIND,
+    note.transcript
+  );
   const recorded = await stub.addEntry(token, {
     key: note.key,
     label: subagentNoteLabel(note.source),
@@ -137,23 +144,45 @@ export async function transcribeNote(
 }
 
 /**
- * End the task's transcript in the state the task settled in.
+ * Open a run's transcript again when the run carries on work whose transcript
+ * already ended, so the page streams what it adds. Silent about one that was
+ * never opened, and best-effort for the reason {@link settleTranscript} is.
+ */
+export async function reopenTranscript(
+  env: ArtifactsEnv,
+  transcript: string
+): Promise<void> {
+  assertArtifactsBound(env);
+  try {
+    const stub = requireArtifactsStub(env);
+    const token = await stub.tokenFor(SESSION_TRANSCRIPT_KIND, transcript);
+    if (token !== null) await stub.reopen(token);
+  } catch (err) {
+    console.warn("[artifacts] transcript not reopened", {
+      transcript,
+      err: String(err)
+    });
+  }
+}
+
+/**
+ * End a run's transcript in the state the run ended in.
  *
- * Silent about a task that never opened one, which is most of them: a task
- * whose subagents said nothing has no transcript to end.
+ * Silent about a run that never opened one: a run that said nothing has no
+ * transcript to end.
  *
  * The RPC is best-effort where {@link transcribeNote}'s is not, and the
- * difference is what the caller can still do about it. This runs from
- * `TaskHost`'s settle path, *after* the terminal row is durable and with
- * nothing left to retry — so a store that will not take the settle must not turn a
- * task that finished into a call that failed. The binding itself is checked
- * outside that, because an unbound namespace is a wiring fault rather than an
- * outage and has a fix worth raising.
+ * difference is what the caller can still do about it. This runs from the
+ * run's terminal, after its notes are replayed and with nothing left to retry,
+ * so a store that will not take the settle must not turn a run that finished
+ * into a call that failed. The binding itself is checked outside that, because
+ * an unbound namespace is a wiring fault rather than an outage and has a fix
+ * worth raising.
  */
 export async function settleTranscript(
   env: ArtifactsEnv,
-  taskId: string,
-  state: TaskState
+  transcript: string,
+  status: AgentToolLifecycleResult["status"]
 ): Promise<void> {
   // Outside the `try`, and the only thing that is: this raises
   // `ArtifactsNotBoundError`, which names a line a deployment is missing and
@@ -162,26 +191,25 @@ export async function settleTranscript(
   assertArtifactsBound(env);
   try {
     const stub = requireArtifactsStub(env);
-    const token = await stub.tokenFor(SESSION_TRANSCRIPT_KIND, taskId);
+    const token = await stub.tokenFor(SESSION_TRANSCRIPT_KIND, transcript);
     if (token === null) return;
-    await stub.settle(token, settleStatus(state));
+    await stub.settle(token, SETTLED_AS[status]);
   } catch (err) {
     console.warn("[artifacts] transcript not settled", {
-      taskId,
+      transcript,
       err: String(err)
     });
   }
 }
 
 /**
- * A `TaskState` as the page prints it.
- *
- * The object stores whatever string it is told and renders it verbatim, so the
- * translation from a protocol enum to a word a person reads belongs on this
- * side — where the enum is already known — and not in a kind-generic store.
+ * A run's end as the page prints it. The object stores whatever string it is
+ * told and renders it verbatim, so the word a person reads is chosen here,
+ * where the status is known, and not in a kind-generic store.
  */
-function settleStatus(state: TaskState): string {
-  return (TaskState[state] ?? "unspecified")
-    .replace("TASK_STATE_", "")
-    .toLowerCase();
-}
+const SETTLED_AS: Record<AgentToolLifecycleResult["status"], string> = {
+  completed: "completed",
+  error: "failed",
+  aborted: "canceled",
+  interrupted: "interrupted"
+};

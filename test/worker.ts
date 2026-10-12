@@ -128,6 +128,25 @@ function parentRule(view: ModelTurnView): MockStep {
       ? { text: lastToolOutput(view) }
       : call("test_child", { task: delegate }, "Delegating.");
   }
+  // Start a run in the background, then ask the person something while it
+  // works: the result lands on a job that is waiting on an answer.
+  const bgask = after(text, "bgask:");
+  if (bgask !== undefined) {
+    return answered
+      ? call("ask_user", { question: "Carry on?", options: ["Yes", "No"] })
+      : call("test_background", { task: bgask }, "Started in the background.");
+  }
+  // A background result that needs the person: its follow-up turn asks about
+  // it, by the child's own words.
+  const result = /child did: (please-ask\S*)/.exec(text)?.[1];
+  if (result !== undefined) {
+    return answered
+      ? { text: lastToolOutput(view) }
+      : call("ask_user", {
+          question: `About ${result}?`,
+          options: ["Yes", "No"]
+        });
+  }
   const bg2 = after(text, "bgdelegate2:");
   if (bg2 !== undefined) {
     if (answered) return {};
@@ -199,6 +218,12 @@ function parentRule(view: ModelTurnView): MockStep {
 function childRule(view: ModelTurnView): MockStep {
   const text = view.lastUserText;
   if (text === "fail") return { error: "child told to fail" };
+  // Says something, so the run files notes on the page it was given.
+  if (text.startsWith("same-page:")) {
+    return view.answered
+      ? { text: `child did: ${text}` }
+      : call("child_sleep", { seconds: 0 }, `working on ${text}`);
+  }
   const sleep = after(text, "sleep:");
   if (sleep !== undefined) {
     return view.answered
@@ -272,8 +297,12 @@ const CHILD_SPEC: SubAgentSpec<{ task: string }, TestEnv> = {
   prepare: async ({ runId, input }) => {
     // Long enough for a spec to cancel the task while it prepares.
     if (input.task === "slowprep") await sleep(2_000);
-    return { lease: `lease:${runId}` };
+    // `same-page:<page>` carries on whichever run wrote that page before.
+    const page = /^same-page:([^:]+)/.exec(input.task)?.[1];
+    return { lease: `lease:${runId}`, ...(page ? { page } : {}) };
   },
+  transcriptKey: ({ runtime }) =>
+    typeof runtime?.page === "string" ? `page:${runtime.page}` : undefined,
   /** Durable, like `onTaskSettled`: a spec reads every release. */
   settle: async ({ runId, result, parent }) => {
     parent.storage.sql.exec(

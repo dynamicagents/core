@@ -2,12 +2,12 @@ import { beforeAll, describe, it, expect } from "vitest";
 // From `cloudflare:workers`, not `cloudflare:test` — the latter's `env` is
 // deprecated, and the repo's type-aware `no-deprecated` rule fails the build on it.
 import { env } from "cloudflare:workers";
-import { TaskState } from "@a2a-js/sdk";
 import type { ArtifactsEnv } from "../env.js";
 import type { Artifacts } from "./do.js";
 import { ARTIFACTS_OBJECT_NAME, ArtifactsNotBoundError } from "./binding.js";
 import {
   SESSION_TRANSCRIPT_KIND,
+  reopenTranscript,
   settleTranscript,
   transcribeNote,
   type SubagentNote
@@ -59,7 +59,7 @@ const artifacts = () => ns.get(ns.idFromName(ARTIFACTS_OBJECT_NAME));
 const ORIGIN = "https://agent.example";
 
 const note = (overrides: Partial<SubagentNote> = {}): SubagentNote => ({
-  taskId: crypto.randomUUID(),
+  transcript: crypto.randomUUID(),
   origin: ORIGIN,
   source: { type: "claude-code", ordinal: 0 },
   text: "Running the suite.",
@@ -104,11 +104,11 @@ beforeAll(async () => {
 
 describe("transcribeNote", () => {
   it("posts the link once it has landed, and nothing after that", async () => {
-    const taskId = crypto.randomUUID();
+    const transcript = crypto.randomUUID();
     const first = poster();
     await transcribeNote(
       wired,
-      note({ taskId, text: "first", key: "claude:0" }),
+      note({ transcript, text: "first", key: "claude:0" }),
       first.post
     );
     expect(first.posted).toHaveLength(1);
@@ -119,12 +119,12 @@ describe("transcribeNote", () => {
     const rest = poster();
     await transcribeNote(
       wired,
-      note({ taskId, text: "second", key: "claude:1" }),
+      note({ transcript, text: "second", key: "claude:1" }),
       rest.post
     );
     await transcribeNote(
       wired,
-      note({ taskId, text: "third", key: "claude:2" }),
+      note({ transcript, text: "third", key: "claude:2" }),
       rest.post
     );
     expect(rest.posted).toEqual([]);
@@ -140,11 +140,11 @@ describe("transcribeNote", () => {
    * has the URL for.
    */
   it("carries the link again until a post reaches the thread", async () => {
-    const taskId = crypto.randomUUID();
+    const transcript = crypto.randomUUID();
     const dropped = poster(false);
     await transcribeNote(
       wired,
-      note({ taskId, text: "first", key: "claude:0" }),
+      note({ transcript, text: "first", key: "claude:0" }),
       dropped.post
     );
     expect(dropped.posted[0]).toMatch(LINK);
@@ -153,7 +153,7 @@ describe("transcribeNote", () => {
     const retried = poster();
     await transcribeNote(
       wired,
-      note({ taskId, text: "second", key: "claude:1" }),
+      note({ transcript, text: "second", key: "claude:1" }),
       retried.post
     );
     expect(retried.posted).toEqual([dropped.posted[0]]);
@@ -162,7 +162,7 @@ describe("transcribeNote", () => {
     const after = poster();
     await transcribeNote(
       wired,
-      note({ taskId, text: "third", key: "claude:2" }),
+      note({ transcript, text: "third", key: "claude:2" }),
       after.post
     );
     expect(after.posted).toEqual([]);
@@ -175,16 +175,24 @@ describe("transcribeNote", () => {
    * post.
    */
   it("says nothing on a replay of the note that delivered it", async () => {
-    const taskId = crypto.randomUUID();
+    const transcript = crypto.randomUUID();
     const first = poster();
-    await transcribeNote(wired, note({ taskId, key: "claude:0" }), first.post);
+    await transcribeNote(
+      wired,
+      note({ transcript, key: "claude:0" }),
+      first.post
+    );
     const replay = poster();
-    await transcribeNote(wired, note({ taskId, key: "claude:0" }), replay.post);
+    await transcribeNote(
+      wired,
+      note({ transcript, key: "claude:0" }),
+      replay.post
+    );
     expect(first.posted[0]).toMatch(LINK);
     expect(replay.posted).toEqual([]);
   });
 
-  it("keeps two tasks' transcripts apart", async () => {
+  it("keeps two runs' transcripts apart, each with its own link", async () => {
     const one = poster();
     const other = poster();
     await transcribeNote(wired, note(), one.post);
@@ -194,19 +202,22 @@ describe("transcribeNote", () => {
   });
 
   it("records the note under the label the thread would have shown", async () => {
-    const taskId = crypto.randomUUID();
+    const transcript = crypto.randomUUID();
     await transcribeNote(
       wired,
       note({
-        taskId,
+        transcript,
         source: { type: "claude-code", ordinal: 2 },
         text: "hello"
       }),
       poster().post
     );
-    await settleTranscript(wired, taskId, TaskState.TASK_STATE_COMPLETED);
+    await settleTranscript(wired, transcript, "completed");
 
-    const token = await artifacts().tokenFor(SESSION_TRANSCRIPT_KIND, taskId);
+    const token = await artifacts().tokenFor(
+      SESSION_TRANSCRIPT_KIND,
+      transcript
+    );
     const body = await (
       await artifacts().fetch(new Request(`${ORIGIN}/a/${token}/events`))
     ).text();
@@ -231,16 +242,16 @@ describe("transcribeNote", () => {
   it("posts the note unchanged before this instance knows its own origin", async () => {
     // A link needs an origin, and the origin arrives with a turn. Filing the
     // note against a URL nobody could be given would only bury it.
-    const taskId = crypto.randomUUID();
+    const transcript = crypto.randomUUID();
     const captured = poster();
     await transcribeNote(
       wired,
-      note({ taskId, origin: undefined, text: "early" }),
+      note({ transcript, origin: undefined, text: "early" }),
       captured.post
     );
     expect(captured.posted).toEqual(["[claude-code 0] early"]);
     expect(
-      await artifacts().tokenFor(SESSION_TRANSCRIPT_KIND, taskId)
+      await artifacts().tokenFor(SESSION_TRANSCRIPT_KIND, transcript)
     ).toBeNull();
   });
 
@@ -263,15 +274,18 @@ describe("transcribeNote", () => {
     });
 
     it("can be the note that delivers the link, and is recorded with its card", async () => {
-      const taskId = crypto.randomUUID();
+      const transcript = crypto.randomUUID();
       const captured = poster();
       await transcribeNote(
         wired,
-        note({ taskId, text: "npm test", detail: CARD }),
+        note({ transcript, text: "npm test", detail: CARD }),
         captured.post
       );
       expect(captured.posted[0]).toMatch(LINK);
-      const token = await artifacts().tokenFor(SESSION_TRANSCRIPT_KIND, taskId);
+      const token = await artifacts().tokenFor(
+        SESSION_TRANSCRIPT_KIND,
+        transcript
+      );
       const read = await artifacts().readArtifact(token!);
       expect(read?.entries[0]).toMatchObject({
         text: "npm test",
@@ -298,8 +312,8 @@ describe("transcribeNote", () => {
    * note once and still find a link nobody has announced.
    */
   it("delivers the link on the retry after an ack is lost", async () => {
-    const taskId = crypto.randomUUID();
-    const committed = note({ taskId, text: "first", key: "claude:0" });
+    const transcript = crypto.randomUUID();
+    const committed = note({ transcript, text: "first", key: "claude:0" });
 
     // The attempt whose ack never arrives: the RPC runs, and the reply is
     // dropped on the way back to the caller.
@@ -338,8 +352,11 @@ describe("transcribeNote", () => {
     // And recorded exactly once, not twice: the key caught the replay, so the
     // retry read back the sequence the lost attempt wrote rather than appending
     // beside it.
-    await settleTranscript(wired, taskId, TaskState.TASK_STATE_COMPLETED);
-    const token = await artifacts().tokenFor(SESSION_TRANSCRIPT_KIND, taskId);
+    await settleTranscript(wired, transcript, "completed");
+    const token = await artifacts().tokenFor(
+      SESSION_TRANSCRIPT_KIND,
+      transcript
+    );
     const body = await (
       await artifacts().fetch(new Request(`${ORIGIN}/a/${token}/events`))
     ).text();
@@ -348,12 +365,15 @@ describe("transcribeNote", () => {
 });
 
 describe("settleTranscript", () => {
-  it("ends the transcript in the state the task settled in", async () => {
-    const taskId = crypto.randomUUID();
-    await transcribeNote(wired, note({ taskId }), poster().post);
-    await settleTranscript(wired, taskId, TaskState.TASK_STATE_COMPLETED);
+  it("ends the transcript in the state the run ended in", async () => {
+    const transcript = crypto.randomUUID();
+    await transcribeNote(wired, note({ transcript }), poster().post);
+    await settleTranscript(wired, transcript, "completed");
 
-    const token = await artifacts().tokenFor(SESSION_TRANSCRIPT_KIND, taskId);
+    const token = await artifacts().tokenFor(
+      SESSION_TRANSCRIPT_KIND,
+      transcript
+    );
     const body = await (
       await artifacts().fetch(new Request(`${ORIGIN}/a/${token}/events`))
     ).text();
@@ -363,44 +383,97 @@ describe("settleTranscript", () => {
   });
 
   it.each([
-    [TaskState.TASK_STATE_FAILED, "failed"],
-    [TaskState.TASK_STATE_CANCELED, "canceled"],
-    [TaskState.TASK_STATE_REJECTED, "rejected"]
-  ])("renders %s as its own word", async (state, word) => {
-    const taskId = crypto.randomUUID();
-    await transcribeNote(wired, note({ taskId }), poster().post);
-    await settleTranscript(wired, taskId, state);
+    ["error", "failed"],
+    ["aborted", "canceled"],
+    ["interrupted", "interrupted"]
+  ] as const)("renders %s as its own word", async (state, word) => {
+    const transcript = crypto.randomUUID();
+    await transcribeNote(wired, note({ transcript }), poster().post);
+    await settleTranscript(wired, transcript, state);
 
-    const token = await artifacts().tokenFor(SESSION_TRANSCRIPT_KIND, taskId);
+    const token = await artifacts().tokenFor(
+      SESSION_TRANSCRIPT_KIND,
+      transcript
+    );
     const body = await (
       await artifacts().fetch(new Request(`${ORIGIN}/a/${token}/events`))
     ).text();
     expect(body).toContain(`"status":"${word}"`);
   });
 
-  it("opens nothing for a task whose subagents never spoke", async () => {
-    // Most tasks. A settle that created an artifact would leave one empty page
-    // per task that ever ran.
-    const taskId = crypto.randomUUID();
-    await settleTranscript(wired, taskId, TaskState.TASK_STATE_COMPLETED);
+  it("opens nothing for a run that never spoke", async () => {
+    // A settle that created an artifact would leave one empty page per run
+    // that said nothing.
+    const transcript = crypto.randomUUID();
+    await settleTranscript(wired, transcript, "completed");
     expect(
-      await artifacts().tokenFor(SESSION_TRANSCRIPT_KIND, taskId)
+      await artifacts().tokenFor(SESSION_TRANSCRIPT_KIND, transcript)
     ).toBeNull();
   });
 
   it("throws without a binding", async () => {
     await expect(
-      settleTranscript(unbound, "task-1", TaskState.TASK_STATE_COMPLETED)
+      settleTranscript(unbound, "task-1", "completed")
     ).rejects.toThrow(ArtifactsNotBoundError);
   });
 
   it("never throws on a binding that is there and failing", async () => {
-    // The one place the two are told apart. This runs after the terminal row is
-    // durable and with no step left to retry, so a store having a bad minute
-    // must not turn a task that finished into a call that failed — while a
+    // The one place the two are told apart. This runs at the run's terminal,
+    // with nothing left to retry, so a store having a bad minute must not turn
+    // a run that finished into a call that failed — while a
     // missing binding, which is a line somebody can go and add, still says so.
     await expect(
-      settleTranscript(broken, "task-1", TaskState.TASK_STATE_COMPLETED)
+      settleTranscript(broken, "task-1", "completed")
     ).resolves.toBeUndefined();
+  });
+});
+
+describe("reopenTranscript", () => {
+  /**
+   * A session carried on — a plan edited, a pull request revised — goes on the
+   * page it already has. Its link reached the thread the first time, so the
+   * thread hears nothing new; the page streams again for whoever reloads it.
+   */
+  it("opens an ended transcript again, and its link is not posted twice", async () => {
+    const transcript = crypto.randomUUID();
+    const first = poster();
+    await transcribeNote(wired, note({ transcript, key: "a:0" }), first.post);
+    expect(first.posted[0]).toMatch(LINK);
+    await settleTranscript(wired, transcript, "completed");
+    const token = await artifacts().tokenFor(
+      SESSION_TRANSCRIPT_KIND,
+      transcript
+    );
+    expect((await artifacts().artifactState(token!))?.status).toBe("completed");
+
+    await reopenTranscript(wired, transcript);
+    expect((await artifacts().artifactState(token!))?.status).toBeNull();
+    const resumed = poster();
+    await transcribeNote(
+      wired,
+      note({ transcript, key: "b:0", text: "carrying on" }),
+      resumed.post
+    );
+    expect(resumed.posted).toEqual([]);
+    const read = await artifacts().readArtifact(token!);
+    expect(read?.entries.map((e) => e.text)).toEqual([
+      "Running the suite.",
+      "carrying on"
+    ]);
+  });
+
+  it("opens nothing for a transcript that was never written", async () => {
+    const transcript = crypto.randomUUID();
+    await reopenTranscript(wired, transcript);
+    expect(
+      await artifacts().tokenFor(SESSION_TRANSCRIPT_KIND, transcript)
+    ).toBeNull();
+  });
+
+  it("throws without a binding, and never on a failing one", async () => {
+    await expect(reopenTranscript(unbound, "run-1")).rejects.toThrow(
+      ArtifactsNotBoundError
+    );
+    await expect(reopenTranscript(broken, "run-1")).resolves.toBeUndefined();
   });
 });

@@ -13,8 +13,6 @@ import { buildCompletedTask, buildFailedTask } from "../a2a/notify.js";
 import { createPushChannel, type PushChannel } from "../a2a/push.js";
 import { taskStateLabel, type PlainTask } from "../a2a/task.js";
 import type { GatekeeperIdentity } from "../a2a/verify.js";
-import { assertArtifactsBound } from "../artifacts/binding.js";
-import { settleTranscript } from "../artifacts/transcript.js";
 import type { CoreEnv } from "../env.js";
 import { isTerminalState, TASK_RETENTION_MS } from "../ledger.js";
 import { answerEventType } from "../workflow/keys.js";
@@ -53,9 +51,9 @@ interface DeliveryJob {
  * `identity.key`, as agents are, behind core's unchanged edge.
  *
  * It holds everything the gatekeeper hears — the ledger, the push channel, the
- * delivery outbox, the cancel ordering, the transcript's settle — and nothing
- * about how a task is done. That is the workflow's, one instance per task, id
- * = task id, and the step agents' it runs.
+ * delivery outbox, the cancel ordering — and nothing about how a task is done.
+ * That is the workflow's, one instance per task, id = task id, and the step
+ * agents' it runs.
  *
  * These rules hold it:
  *
@@ -95,8 +93,6 @@ export abstract class TaskHost<
   protected abstract readonly hostBinding: string;
 
   override async onStart(): Promise<void> {
-    // A wiring fault with a name: the host settles every task's transcript.
-    assertArtifactsBound(this.env);
     // Every side effect a transition owes is recorded with it, so a host
     // evicted between the two finds the debt here. Queued rather than run: each
     // is retried, and none of them belongs in a start.
@@ -631,18 +627,16 @@ export abstract class TaskHost<
   }
 
   /**
-   * End the transcript, then tell each agent that ran a job, then the host's
-   * own hook, then record that all of them ran. The transcript first, because
-   * somebody may be watching for the line that says it finished. At least
-   * once: an eviction before the record reruns them. Each notice stays owed
-   * past that record, until its agent took it: it is what stops the task's
-   * jobs and releases what they held.
+   * Tell each agent that ran a job, then run the host's own hook, then record
+   * that all of them ran. At least once: an eviction before the record reruns
+   * them. Each notice stays owed past that record, until its agent took it: it
+   * is what stops the task's jobs and releases what they held — their runs'
+   * transcripts end with the runs, on the agent.
    */
   async #settled(taskId: string): Promise<void> {
     const state =
       this.ledger.get(taskId)?.status?.state ??
       TaskState.TASK_STATE_UNSPECIFIED;
-    await settleTranscript(this.env, taskId, state);
     for (const notice of this.runs.oweNotices(taskId, state)) {
       await this.#queueNotice(notice);
     }

@@ -22,7 +22,8 @@ export {
   type RestrictToolsOptions,
   type SubAgentPrepareContext,
   type SubAgentSettleContext,
-  type SubAgentSpec
+  type SubAgentSpec,
+  type SubAgentTranscriptContext
 } from "./contract/index.js";
 
 export {

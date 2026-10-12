@@ -152,7 +152,7 @@ state:
 
 | role              | core's class                 | owns                                                                                                                         |
 | ----------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| **task host**     | `TaskHost` (`/task`)         | the A2A task: its ledger, the push channel, the delivery outbox, cancellation, the transcript's settle                       |
+| **task host**     | `TaskHost` (`/task`)         | the A2A task: its ledger, the push channel, the delivery outbox, cancellation                                                |
 | **task workflow** | `TaskWorkflow` (`/workflow`) | the sequence of steps and the state between them — one Workflow instance per task, id = task id                              |
 | **step agent**    | `StepAgent` (`/agent`)       | a step job and its conversation: a Think agent that runs the job over as many turns as it needs, and reports to the workflow |
 
@@ -309,11 +309,13 @@ person following the task. A long run produces dozens. The notes are worth keepi
 they are the only account of what the run actually did — and a thread is the wrong
 place to keep them.
 
-`@dynamicagents/core/artifacts` is where they go instead. A note is posted as a link
-and nothing else until one such post **reaches** the thread; every note after that is
-recorded and not posted at all, and the link streams live and then ends with the
-state the task settled in. The agent's own progress is untouched: its step text is the
-conversation, not an account of one.
+`@dynamicagents/core/artifacts` is where they go instead. Each run has a transcript of
+its own, so concurrent runs never share a page. A note is posted as a link and nothing
+else until one such post **reaches** the thread; every note after that is recorded and
+not posted at all, and the link streams live and then ends with the state the run
+ended in. A run that carries on an earlier one's work — a spec's `transcriptKey` says
+so — continues that page, and its link is not posted again. The agent's own progress
+is untouched: its step text is the conversation, not an account of one.
 
 **Every agent binds `ARTIFACTS`**, and the wiring is a binding, a migration, an
 export and the route delegation below. A Durable Object that starts without the

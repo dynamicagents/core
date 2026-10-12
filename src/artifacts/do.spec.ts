@@ -247,6 +247,37 @@ describe("Artifacts — settling", () => {
   });
 });
 
+describe("Artifacts — reopening", () => {
+  it("opens a settled artifact again, so its stream stays open", async () => {
+    const artifacts = fresh("reopen");
+    const token = await artifacts.createArtifact(KIND);
+    await artifacts.settle(token, "completed");
+
+    expect(await artifacts.reopen(token)).toBe(true);
+    expect(await artifacts.reopen(token)).toBe(false);
+    expect((await artifacts.artifactState(token))?.status).toBeNull();
+    // And it can end again, in whatever the work that carried on ended in.
+    expect(await artifacts.settle(token, "failed")).toBe(true);
+  });
+
+  it("leaves a locked artifact as it was acted on", async () => {
+    const artifacts = fresh("reopen-locked");
+    const token = await artifacts.createArtifact("plan");
+    await artifacts.lock(token, "approved");
+
+    expect(await artifacts.reopen(token)).toBe(false);
+    expect(await artifacts.artifactState(token)).toMatchObject({
+      status: "approved",
+      locked: true
+    });
+  });
+
+  it("refuses a token that names nothing", async () => {
+    const artifacts = fresh("reopen-unknown");
+    expect(await artifacts.reopen("Q".repeat(40))).toBe(false);
+  });
+});
+
 describe("Artifacts — locking", () => {
   it("refuses every note after it, and settles in its status", async () => {
     const artifacts = fresh("lock");

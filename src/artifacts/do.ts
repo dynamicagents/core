@@ -213,6 +213,15 @@ export class Artifacts extends DurableObject {
   }
 
   /**
+   * Open a settled artifact again, so its page streams what is added next —
+   * see {@link file://./store.ts ArtifactStore.reopen}. Nothing is broadcast:
+   * the settle closed every stream, and a reader who reloads finds it open.
+   */
+  async reopen(token: string): Promise<boolean> {
+    return this.store.reopen(token);
+  }
+
+  /**
    * Settle this artifact in `status` and refuse every note after it — see
    * {@link file://./store.ts ArtifactStore.lock}. Ends every stream on it, as a
    * settle does. Returns whether it applied.

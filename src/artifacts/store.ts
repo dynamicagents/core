@@ -315,6 +315,12 @@ export interface ArtifactStore {
    */
   settle(token: string, status: string): boolean;
   /**
+   * Undo a {@link settle}: the artifact is open again, for work that carried
+   * on after it ended. Returns whether it applied — `false` for an unknown
+   * token, one still open, and one locked, which stays as it was acted on.
+   */
+  reopen(token: string): boolean;
+  /**
    * Settle this artifact in `status` and refuse every note after it. Returns
    * whether it applied — `false` for an unknown token and for one already
    * locked.
@@ -496,6 +502,17 @@ export function makeArtifactStore(
         "UPDATE artifacts SET status = ?, settled_at = ? WHERE token = ?",
         status,
         now(),
+        token
+      );
+      return true;
+    },
+
+    reopen(token) {
+      const artifact = get(token);
+      if (artifact === null || artifact.status === null || artifact.locked)
+        return false;
+      sql.exec(
+        "UPDATE artifacts SET status = NULL, settled_at = NULL WHERE token = ?",
         token
       );
       return true;
