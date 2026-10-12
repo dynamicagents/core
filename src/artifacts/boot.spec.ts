@@ -71,12 +71,10 @@ async function bootWithout(binding: string, name: string): Promise<Boot> {
 }
 
 describe("the artifacts binding at DO start", () => {
-  it("fails a step agent's onStart, and a host's, when nothing is bound", async () => {
-    for (const binding of ["TEST_AGENT", "TEST_HOST"]) {
-      expect(await bootWithout(binding, "unbound")).toMatchObject({
-        named: true
-      });
-    }
+  it("fails a step agent's onStart when nothing is bound", async () => {
+    expect(await bootWithout("TEST_AGENT", "unbound")).toMatchObject({
+      named: true
+    });
   });
 
   it("names every line the wiring needs, the route delegation included", async () => {

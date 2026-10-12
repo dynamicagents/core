@@ -13,8 +13,8 @@
  * - **The object** — {@link Artifacts}, one per deployment, bound as `ARTIFACTS`.
  * - **The routes** — {@link handleArtifactRoute}, one delegation from a Worker's
  *   `fetch`, serving the viewer page and the event stream behind it.
- * - **The emission** — {@link transcribeNote} and {@link settleTranscript},
- *   which core's `TaskHost` and `StepAgent` already call.
+ * - **The emission** — {@link transcribeNote}, {@link settleTranscript} and
+ *   {@link reopenTranscript}, which core's `StepAgent` already calls.
  *
  * **The binding is required**, and a deployment that omits it fails at DO
  * start with the lines it is missing — see
@@ -83,6 +83,7 @@ export { ARTIFACT_VIEWER_HTML, artifactViewerResponse } from "./viewer.js";
 
 export {
   SESSION_TRANSCRIPT_KIND,
+  reopenTranscript,
   settleTranscript,
   transcribeNote,
   type SubagentNote

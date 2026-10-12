@@ -591,6 +591,15 @@ export class StepJobs {
     );
   }
 
+  /** One job's work rows whose follow-up turn has not run, oldest first. */
+  owedFollowUps(stepJobId: string): string[] {
+    this.#ensure();
+    return this.sql<{ work_id: string }>`
+      SELECT work_id FROM da_step_work
+      WHERE step_job_id = ${stepJobId} AND follow_up_json IS NOT NULL
+      ORDER BY created_at ASC`.map((r) => r.work_id);
+  }
+
   /**
    * How much work holds a job `working`: a run or wait still going, or one
    * whose follow-up turn has not run. The settlement check.

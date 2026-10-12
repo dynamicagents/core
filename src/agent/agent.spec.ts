@@ -21,7 +21,11 @@ import {
 } from "../testing/harness.js";
 import { TEST_TENANT } from "../testing/auth.js";
 import { requireArtifactsStub } from "../artifacts/binding.js";
-import { UNAPPROVABLE_ARTIFACT, unrecordedApprovalText } from "./tools.js";
+import {
+  ASKED,
+  UNAPPROVABLE_ARTIFACT,
+  unrecordedApprovalText
+} from "./tools.js";
 import { SESSION_TRANSCRIPT_KIND } from "../artifacts/transcript.js";
 import type { StepJob, TaskParams } from "../workflow/types.js";
 import worker, {
@@ -161,10 +165,10 @@ async function cancel(harness: AgentHarness, taskId: string) {
   if (body.error) throw new Error(body.error.message);
 }
 
-/** The note entries on a task's transcript, oldest first. */
-async function transcriptEntries(taskId: string): Promise<string[]> {
+/** The note entries on a transcript — a run's id, by default — oldest first. */
+async function transcriptEntries(transcript: string): Promise<string[]> {
   const stub = requireArtifactsStub(testEnv);
-  const token = await stub.tokenFor(SESSION_TRANSCRIPT_KIND, taskId);
+  const token = await stub.tokenFor(SESSION_TRANSCRIPT_KIND, transcript);
   if (!token) return [];
   const body = await (
     await stub.fetch(new Request(`https://agent.test/a/${token}/events`))
@@ -538,6 +542,44 @@ describe("asking the caller to approve an artifact", () => {
     });
   });
 
+  /**
+   * The model asks the way its history shows asking. An answered question
+   * left there as prose — no tool, no artifact — is an example of asking in
+   * prose, and a model shown enough of them stops calling the tool.
+   */
+  it("leaves the question in the history as the call it was, artifact and all", async () => {
+    const { harness, agent } = harnessFor("approve-history");
+    using _ = harness.interceptGatekeeper();
+    const token = await plan();
+
+    const accepted = await harness.send(`approve-artifact:${token}`);
+    const [parked] = await harness.waitForState(
+      accepted.id,
+      "TASK_STATE_INPUT_REQUIRED"
+    );
+    await harness.answer(accepted.id, questionOf(parked).requestId, {
+      optionId: "approve"
+    });
+    await harness.waitForTerminal(accepted.id);
+
+    const parts = await runInDurableObject(agent, async (instance: TestAgent) =>
+      (await instance.getMessages()).flatMap((m) =>
+        m.parts.map((p) => JSON.parse(JSON.stringify(p)) as unknown)
+      )
+    );
+    expect(parts).toContainEqual(
+      expect.objectContaining({
+        type: "tool-ask_user",
+        state: "output-available",
+        input: { question: "Approve this?", artifact: token },
+        output: ASKED
+      })
+    );
+    expect(parts).not.toContainEqual(
+      expect.objectContaining({ type: "text", text: "Approve this?" })
+    );
+  });
+
   it("records a rejection and a comment without locking", async () => {
     const { harness } = harnessFor("approve-no");
     using _ = harness.interceptGatekeeper();
@@ -672,15 +714,16 @@ describe("an awaited sub-agent", () => {
     expect(state.work).toEqual([
       expect.objectContaining({ kind: "awaited", open: false, settled: true })
     ]);
+    const runId = state.work[0]!.workId;
     // The narration, then the tool call as a card its result completes.
-    expect(await transcriptEntries(accepted.id)).toEqual([
+    expect(await transcriptEntries(runId)).toEqual([
       "working on sleep:1",
       "child_sleep",
       "child_sleep"
     ]);
     const token = await requireArtifactsStub(testEnv).tokenFor(
       SESSION_TRANSCRIPT_KIND,
-      accepted.id
+      runId
     );
     const read = await requireArtifactsStub(testEnv).readArtifact(token!);
     const [narration, call, result] = read?.entries ?? [];
@@ -704,17 +747,18 @@ describe("an awaited sub-agent", () => {
   });
 
   it("files a note the live path missed, from the replay", async () => {
-    const { harness } = harnessFor("noprogress");
+    const { harness, debug } = harnessFor("noprogress");
     using _ = harness.interceptGatekeeper();
 
     const accepted = await harness.send("delegate:sleep:1");
     await harness.waitForTerminal(accepted.id);
+    const runId = (await debug(accepted.id)).work[0]!.workId;
     await until(
       "the replayed note",
-      () => transcriptEntries(accepted.id),
+      () => transcriptEntries(runId),
       (entries) => entries.length >= 3
     );
-    expect(await transcriptEntries(accepted.id)).toEqual([
+    expect(await transcriptEntries(runId)).toEqual([
       "working on sleep:1",
       "child_sleep",
       "child_sleep"
@@ -913,6 +957,184 @@ describe("a detached sub-agent", () => {
     // The reason `SubAgent` reads the summary itself: Think's own is the first
     // message alone, "step 1.". Were this one message, Think's would do.
     expect((await debug(accepted.id)).runs[0].assistantMessages).toBe(2);
+  });
+});
+
+/**
+ * One page per run: two runs at once never interleave on one, and each puts
+ * its own link in the thread. A run that carries on another's work — its
+ * spec's `transcriptKey` says which — continues that page instead, and the
+ * thread already has its link.
+ */
+describe("a run's transcript", () => {
+  async function statusOf(transcript: string): Promise<string | null> {
+    const stub = requireArtifactsStub(testEnv);
+    const token = await stub.tokenFor(SESSION_TRANSCRIPT_KIND, transcript);
+    return token ? ((await stub.artifactState(token))?.status ?? null) : null;
+  }
+
+  it("is the run's own, with a link of its own, and ends with the run", async () => {
+    const { harness, debug } = harnessFor("pages-two");
+    using _ = harness.interceptGatekeeper();
+
+    const accepted = await harness.send("bgdelegate2:sleep:1|sleep:2");
+    await harness.waitForTerminal(accepted.id);
+    const runs = (await debug(accepted.id)).work.map((w) => w.workId);
+    expect(runs).toHaveLength(2);
+    for (const run of runs) {
+      expect((await transcriptEntries(run))[0]).toMatch(/^working on sleep:/);
+      expect(await statusOf(run)).toBe("completed");
+    }
+    expect(await transcriptEntries(accepted.id)).toEqual([]);
+    const links = working(harness, accepted.id).filter((t) =>
+      t.includes("/a/")
+    );
+    expect(new Set(links).size).toBe(2);
+  });
+
+  /**
+   * The dispatch reopens a page it carries on before the run is known to
+   * start, so a run refused there still owes the page its end.
+   */
+  it("is ended by a run that reopened it and was refused", async () => {
+    const { harness } = harnessFor("pages-refused", "CAPPED_AGENT");
+    using _ = harness.interceptGatekeeper();
+    const page = crypto.randomUUID();
+    const artifacts = requireArtifactsStub(testEnv);
+    const token = await artifacts.createArtifact(
+      SESSION_TRANSCRIPT_KIND,
+      `page:${page}`
+    );
+    await artifacts.addEntry(token, { label: "earlier", text: "earlier work" });
+    await artifacts.settle(token, "completed");
+
+    const accepted = await harness.send(
+      `capped:bgdelegate:same-page:${page}:again`
+    );
+    await harness.waitForTerminal(accepted.id);
+
+    expect(await statusOf(`page:${page}`)).toBe("failed");
+  });
+
+  it("is carried on by a run that continues it, with no second link", async () => {
+    const { harness } = harnessFor("pages-same");
+    using _ = harness.interceptGatekeeper();
+    const page = crypto.randomUUID();
+
+    const first = await harness.send(`delegate:same-page:${page}:one`);
+    await harness.waitForTerminal(first.id);
+    expect(await statusOf(`page:${page}`)).toBe("completed");
+
+    const second = await harness.send(`delegate:same-page:${page}:two`);
+    await harness.waitForTerminal(second.id);
+
+    expect(await transcriptEntries(`page:${page}`)).toEqual([
+      `working on same-page:${page}:one`,
+      "child_sleep",
+      "child_sleep",
+      `working on same-page:${page}:two`,
+      "child_sleep",
+      "child_sleep"
+    ]);
+    expect(await statusOf(`page:${page}`)).toBe("completed");
+    expect(
+      working(harness, first.id).filter((t) => t.includes("/a/"))
+    ).toHaveLength(1);
+    expect(
+      working(harness, second.id).filter((t) => t.includes("/a/"))
+    ).toHaveLength(0);
+  });
+});
+
+/**
+ * A job holds one question at a time: the person answers the one in front of
+ * them, and a second `ask_user` cannot park a job already parked. So a result
+ * that lands while the job waits on the person is held, still owed, until the
+ * answer's turn ends — never run beside the question, where it could neither
+ * ask about itself nor finish without finishing over it.
+ */
+describe("a result that lands while the person is being asked", () => {
+  it("is held until the question is answered, then carried on", async () => {
+    const { harness, debug } = harnessFor("bg-parked");
+    using _ = harness.interceptGatekeeper();
+
+    const accepted = await harness.send("bgask:sleep:1");
+    const [parked] = await harness.waitForState(
+      accepted.id,
+      "TASK_STATE_INPUT_REQUIRED"
+    );
+    await until(
+      "the run to report",
+      () => debug(accepted.id),
+      (d) => d.work.some((w) => w.kind === "detached" && !w.open)
+    );
+    await pause(500);
+    const waiting = await debug(accepted.id);
+    expect(waiting.row?.state).toBe("input-required");
+    expect(reportsOf(waiting)).toEqual(["input-required"]);
+    expect(terminals(harness, accepted.id)).toHaveLength(0);
+
+    const question = questionOf(parked);
+    await harness.answer(accepted.id, question.requestId, {
+      optionId: question.options![0].id
+    });
+    const done = await harness.waitForTerminal(accepted.id);
+    expect(done.state).toBe("TASK_STATE_COMPLETED");
+    expect(done.text).toContain("child did: sleep:1");
+    expect(reportsOf(await debug(accepted.id))).toEqual([
+      "input-required",
+      "completed"
+    ]);
+  });
+
+  it("asks about each result in turn, one question at a time", async () => {
+    const { harness, debug } = harnessFor("bg-asks");
+    using _ = harness.interceptGatekeeper();
+
+    const accepted = await harness.send(
+      "bgdelegate2:please-ask:1|please-ask:2"
+    );
+    const questions = async (): Promise<HitlRequestData[]> =>
+      (
+        await harness.waitForState(accepted.id, "TASK_STATE_INPUT_REQUIRED")
+      ).map(questionOf);
+
+    const [first] = await questions();
+    await until(
+      "both runs to report",
+      () => debug(accepted.id),
+      (d) => d.work.filter((w) => w.kind === "detached" && !w.open).length === 2
+    );
+    await pause(500);
+    // The second result is held, not asked beside the first.
+    expect(await questions()).toHaveLength(1);
+    expect(reportsOf(await debug(accepted.id))).toEqual(["input-required"]);
+
+    await harness.answer(accepted.id, first!.requestId, {
+      optionId: first!.options![0].id
+    });
+    const second = await until(
+      "the second question",
+      questions,
+      (qs) => qs.length === 2
+    ).then((qs) => qs[1]!);
+    expect([first!.prompt, second.prompt].sort()).toEqual([
+      "About please-ask:1?",
+      "About please-ask:2?"
+    ]);
+    expect(second.requestId).not.toBe(first!.requestId);
+
+    await harness.answer(accepted.id, second.requestId, {
+      optionId: second.options![0].id
+    });
+    expect((await harness.waitForTerminal(accepted.id)).state).toBe(
+      "TASK_STATE_COMPLETED"
+    );
+    expect(reportsOf(await debug(accepted.id))).toEqual([
+      "input-required",
+      "input-required",
+      "completed"
+    ]);
   });
 });
 

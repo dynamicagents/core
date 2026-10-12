@@ -41,7 +41,7 @@ export const askUserInputSchema = z.object({
   artifact: nonBlank("artifact")
     .optional()
     .describe(
-      "The id of something you made for them to approve, such as a plan. They get its link with your question, and answer Approve, Reject, or with a comment; `options` is not used. Approving it locks it, so it cannot change afterwards."
+      "The id of something you made for them to approve, such as a plan. They get its link with your question, and answer Approve, Reject, or with a comment, so leave `options` out. Approving it locks it, so it cannot change afterwards."
     )
 });
 
@@ -63,6 +63,12 @@ export const askUserTool: Tool<{
     "Ask the person you are working for a question, and stop. Their answer arrives as their next message, and you continue from there. Use it when you cannot go on well without a decision or a fact only they have — not to announce what you are about to do, and not to confirm what you already know.",
   inputSchema: askUserInputSchema
 });
+
+/**
+ * The result an answered `ask_user` call carries in the history: the call was
+ * made, and the answer is a message of its own rather than this result.
+ */
+export const ASKED = "Asked. Their answer arrives as a message of its own.";
 
 /**
  * What the model reads when the person answered an approval: which way they

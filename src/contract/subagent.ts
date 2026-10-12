@@ -22,6 +22,13 @@ export interface SubAgentSettleContext<Env = Cloudflare.Env> {
   parent: PluginContext<Env>;
 }
 
+/** What `transcriptKey` is handed: a run, and what `prepare` resolved for it. */
+export interface SubAgentTranscriptContext {
+  runId: string;
+  taskId: string;
+  runtime: Record<string, unknown> | undefined;
+}
+
 /**
  * A sub-agent as data: what the parent's model is offered, and the hooks that
  * run around a dispatch. A plugin that owns a domain exports one; the agent
@@ -57,4 +64,12 @@ export interface SubAgentSpec<I = unknown, Env = Cloudflare.Env> {
    * terminal: completed, failed and canceled alike. Best-effort.
    */
   settle?(context: SubAgentSettleContext<Env>): Promise<void>;
+  /**
+   * The transcript a run's notes go on. Every run has its own — its `runId` —
+   * so each gets a page and a link of its own. A run that carries on an
+   * earlier run's work answers that run's key, and its notes continue that
+   * page with no second link. Asked again for every note, so it must be a
+   * function of its context alone.
+   */
+  transcriptKey?(context: SubAgentTranscriptContext): string | undefined;
 }
