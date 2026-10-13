@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { generateText } from "ai";
+import { catalogModel } from "./catalog.js";
 import { GATEWAY_METADATA_MAX, gatewayLogFields } from "./gateway-log.js";
 import { workersAIModel } from "./workers-ai.js";
 
@@ -71,6 +72,80 @@ describe("a Workers AI model", () => {
     expect(JSON.stringify(calls[0])).toContain("caller-1");
     expect(calls[0]?.inputs).toEqual(
       expect.objectContaining({ reasoning_effort: "low" })
+    );
+  });
+});
+
+describe("an AI Gateway catalog model", () => {
+  /**
+   * A binding on the run path, which answers a `Response` and not a parsed
+   * body: the delegate asks for the raw reply so it can read a resume handle
+   * off the headers before any provider parses it. The Workers AI binding
+   * above answers the parsed shape instead, which is why these cannot share a
+   * stub.
+   */
+  function recordingRunBinding() {
+    const calls: { model: string; body: unknown; options: unknown }[] = [];
+    const ai = {
+      run: async (model: string, body: unknown, options: unknown) => {
+        calls.push({ model, body, options });
+        return Response.json({
+          id: "chatcmpl-test",
+          object: "chat.completion",
+          created: 0,
+          model,
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: "ok" },
+              finish_reason: "stop"
+            }
+          ],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }
+        });
+      }
+    } as unknown as Ai;
+    return { ai, calls };
+  }
+
+  it("addresses the provider by slug and carries the gateway to the binding", async () => {
+    const { ai, calls } = recordingRunBinding();
+    await generateText({
+      model: catalogModel(
+        { AI: ai },
+        {
+          slug: "openai/gpt-6-luna",
+          gatewayId: "gw",
+          ...gatewayLogFields({ agent: "a", taskId: "t1", phase: "turn" })
+        }
+      ),
+      prompt: "hi"
+    }).catch(() => undefined);
+
+    // The slug is what the binding is asked for, verbatim: it is the provider's
+    // address, not a model name the body carries.
+    expect(calls[0]?.model).toBe("openai/gpt-6-luna");
+    // The same fields a Workers AI call sends, so one log filter matches both.
+    expect(calls[0]?.options).toEqual(
+      expect.objectContaining({
+        gateway: {
+          id: "gw",
+          metadata: { agent: "a", taskId: "t1", phase: "turn" },
+          eventId: "t1"
+        }
+      })
+    );
+  });
+
+  it("defaults to the account's `default` gateway", async () => {
+    const { ai, calls } = recordingRunBinding();
+    await generateText({
+      model: catalogModel({ AI: ai }, { slug: "openai/gpt-6-luna" }),
+      prompt: "hi"
+    }).catch(() => undefined);
+
+    expect(calls[0]?.options).toEqual(
+      expect.objectContaining({ gateway: { id: "default" } })
     );
   });
 });

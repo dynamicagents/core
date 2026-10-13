@@ -386,7 +386,7 @@ test harness cannot reach a production bundle.
 | `@dynamicagents/core/workflow`     | `TaskWorkflow` and its step helpers, the job and report types                                  |
 | `@dynamicagents/core/agent`        | `StepAgent`, core's tools (`ask_user`, `check_back`, `search_history`)                         |
 | `@dynamicagents/core/subagent`     | `SubAgent`, the child a `StepAgent` dispatches                                                 |
-| `@dynamicagents/core/model`        | `workersAIModel`, `gatewayLogFields`                                                           |
+| `@dynamicagents/core/model`        | `workersAIModel`, `catalogModel`, `gatewayLogFields`                                           |
 | `@dynamicagents/core/a2a`          | card signing, JWKS, gatekeeper-JWT verify, push notify, task store, executor                   |
 | `@dynamicagents/core/worker`       | `createA2AWorker()`, `defineAgent()` — the whole zero-trust edge                               |
 | `@dynamicagents/core/alarm`        | many deadlines over one Durable Object alarm, for a plain `DurableObject`                      |
