@@ -21,6 +21,10 @@ export interface WorkersAIModelOptions extends GatewayLogFields {
  * A Workers AI model through AI Gateway, carrying what the call tells the
  * gateway about itself.
  *
+ * For a model from another provider in AI Gateway's catalog, over this same
+ * binding, see {@link file://./catalog.ts catalogModel} — the `modelId` here is
+ * a `@cf/...` id and nothing else.
+ *
  * The gateway goes on the **model's** settings and never on the provider's:
  * `workers-ai-provider` resolves `providerGateway ?? modelGateway`, so a
  * gateway on both silently discards the model's `metadata` and `eventId`.

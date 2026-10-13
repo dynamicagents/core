@@ -178,10 +178,12 @@ Think names things, so the day Think grows the same feature the port is a deleti
 
 ### Model providers
 
-A provider is a function returning one `LanguageModel` for `getModel()`.
-`workersAIModel` in `src/model/` is the one core ships. There is no fallback model:
-a transient failure is retried by the AI SDK (`maxRetries`, which `beforeTurn` can
-tune) and an interrupted turn is continued by Think's chat recovery.
+A provider is a function returning one `LanguageModel` for `getModel()`. `src/model/`
+ships two, both over the `AI` binding and both through AI Gateway: `workersAIModel`
+for a `@cf/...` Workers AI id, and `catalogModel` for a `"<provider>/<model>"` slug
+from the gateway's provider catalog. There is no fallback model on either: a transient
+failure is retried by the AI SDK (`maxRetries`, which `beforeTurn` can tune) and an
+interrupted turn is continued by Think's chat recovery.
 
 Everything deployment-specific stays out: which AI Gateway, which credential, how to
 classify an error beyond the context-overflow classifier. Those are the agent's.

@@ -29,7 +29,13 @@
 
 import type { Artifacts } from "./artifacts/do.js";
 
-/** Workers AI, backing the chat loop (and whatever a plugin runs on it). */
+/**
+ * Workers AI, backing the chat loop (and whatever a plugin runs on it).
+ *
+ * It is also the way out to the other providers in AI Gateway's catalog, which
+ * is why nothing in core takes a model credential: see
+ * {@link file://./model/catalog.ts catalogModel}.
+ */
 export interface AiEnv {
   AI: Ai;
 }
