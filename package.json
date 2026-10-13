@@ -123,6 +123,8 @@
     "zod": "^4.6.5"
   },
   "peerDependencies": {
+    "@ai-sdk/anthropic": "^4.0.0",
+    "@ai-sdk/openai": "^4.0.0",
     "@cloudflare/think": ">=0.20.2 <0.21.0",
     "@cloudflare/vitest-plugin": ">=1",
     "@typescript-eslint/utils": ">=8",
@@ -132,6 +134,12 @@
     "workers-ai-provider": "^4.0.0"
   },
   "peerDependenciesMeta": {
+    "@ai-sdk/anthropic": {
+      "optional": true
+    },
+    "@ai-sdk/openai": {
+      "optional": true
+    },
     "@cloudflare/vitest-plugin": {
       "optional": true
     },

@@ -80,3 +80,28 @@ export function gatewayLogFields(
     ...(correlation.taskId ? { eventId: correlation.taskId } : {})
   };
 }
+
+/**
+ * The `gateway` block a provider puts on one model's settings, and the only
+ * place that mapping lives.
+ *
+ * Every provider in this module sends it, and a log filter matches their rows
+ * interchangeably only while they all spell it identically — so they share this
+ * rather than each building the object. A field left absent is omitted rather
+ * than sent as `undefined`, for the reason {@link gatewayLogFields} gives.
+ *
+ * Structurally typed, not the provider's own `GatewayOptions`, so this module
+ * keeps the neutrality its header claims. A caller needing a field only one
+ * transport has spreads it over the result.
+ */
+export function modelGateway(
+  gatewayId: string | undefined,
+  fields: GatewayLogFields
+): { id: string; metadata?: AiGatewayMetadata; eventId?: string } {
+  const { metadata, eventId } = fields;
+  return {
+    id: gatewayId ?? "default",
+    ...(metadata ? { metadata } : {}),
+    ...(eventId ? { eventId } : {})
+  };
+}

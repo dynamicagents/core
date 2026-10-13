@@ -110,7 +110,7 @@ describe("an AI Gateway catalog model", () => {
 
   it("addresses the provider by slug and carries the gateway to the binding", async () => {
     const { ai, calls } = recordingRunBinding();
-    await generateText({
+    const result = await generateText({
       model: catalogModel(
         { AI: ai },
         {
@@ -120,7 +120,7 @@ describe("an AI Gateway catalog model", () => {
         }
       ),
       prompt: "hi"
-    }).catch(() => undefined);
+    });
 
     // The slug is what the binding is asked for, verbatim: it is the provider's
     // address, not a model name the body carries.
@@ -135,6 +135,14 @@ describe("an AI Gateway catalog model", () => {
         }
       })
     );
+    // **The assertion with teeth.** Everything above is identical if the
+    // provider plugins are dropped — same slug, same gateway object — because a
+    // Workers AI chat model gets built for the slug instead. What separates the
+    // two is that only the catalog path reads a provider-shaped reply back:
+    // without it the turn ends empty and throws nothing. So reading the text is
+    // what proves the slug was routed and parsed, not merely dispatched.
+    expect(result.text).toBe("ok");
+    expect(result.finishReason).toBe("stop");
   });
 
   it("defaults to the account's `default` gateway", async () => {
@@ -142,8 +150,10 @@ describe("an AI Gateway catalog model", () => {
     await generateText({
       model: catalogModel({ AI: ai }, { slug: "openai/gpt-6-luna" }),
       prompt: "hi"
-    }).catch(() => undefined);
+    });
 
+    // No metadata and no event id either: a field the call site does not know
+    // is left out, never sent as `undefined`.
     expect(calls[0]?.options).toEqual(
       expect.objectContaining({ gateway: { id: "default" } })
     );

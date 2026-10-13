@@ -3,7 +3,7 @@ import { createWorkersAI } from "workers-ai-provider";
 import { anthropic } from "workers-ai-provider/anthropic";
 import { openai } from "workers-ai-provider/openai";
 import type { AiEnv } from "../env.js";
-import type { GatewayLogFields } from "./gateway-log.js";
+import { modelGateway, type GatewayLogFields } from "./gateway-log.js";
 
 /** One AI Gateway catalog model, as an agent's `getModel()` returns it. */
 export interface CatalogModelOptions extends GatewayLogFields {
@@ -37,11 +37,10 @@ export interface CatalogModelOptions extends GatewayLogFields {
  * all: without them `workers-ai-provider` builds Workers AI models only.
  *
  * The gateway goes on the **model's** settings, as it does for Workers AI — but
- * for a catalog slug the model's is the one that wins (`modelGateway ??
- * providerGateway`), which is the opposite order to the Workers AI path next
- * door. Nothing here sets a provider-level gateway, so the two cannot disagree;
- * the order matters to whoever adds one. Built per call for the reason given in
- * {@link file://./workers-ai.ts workersAIModel}.
+ * here the model's is the one taken in preference, the reverse of the Workers AI
+ * path next door. Nothing here sets a provider-level gateway, so the two cannot
+ * disagree; the order matters to whoever adds one. Built per call for the reason
+ * given in {@link file://./workers-ai.ts workersAIModel}.
  *
  * A slug dispatches through `env.AI.run`, the transport that carries resumable
  * streaming. Gateway-side response caching and server-side fallback are the two
@@ -60,15 +59,9 @@ export function catalogModel(
   env: AiEnv,
   options: CatalogModelOptions
 ): LanguageModel {
-  const { slug, gatewayId = "default", metadata, eventId } = options;
+  const { slug, gatewayId } = options;
   return createWorkersAI({
     binding: env.AI,
     providers: [openai, anthropic]
-  })(slug, {
-    gateway: {
-      id: gatewayId,
-      ...(metadata ? { metadata } : {}),
-      ...(eventId ? { eventId } : {})
-    }
-  });
+  })(slug, { gateway: modelGateway(gatewayId, options) });
 }

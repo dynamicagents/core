@@ -5,8 +5,10 @@
  * what the model id names rather than by how it is reached — both go through AI
  * Gateway over the `AI` binding, and both carry the same log fields:
  * `workersAIModel` for a `@cf/...` Workers AI id, `catalogModel` for a
- * `"<provider>/<model>"` slug from AI Gateway's provider catalog. The settings
- * the two accept barely overlap, which is why they are not one function.
+ * `"<provider>/<model>"` slug from AI Gateway's provider catalog. Two functions
+ * rather than one because the provider underneath is built differently for a
+ * slug — and because sending a slug to the Workers AI one fails quietly, which
+ * is the fault {@link file://./workers-ai.ts workersAIModel} describes.
  *
  * There is no fallback model, on either: a transient failure is retried by the
  * AI SDK (`maxRetries`, which `beforeTurn` can tune) and an interrupted turn is
