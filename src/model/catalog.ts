@@ -1,4 +1,8 @@
-import type { LanguageModel } from "ai";
+import {
+  wrapLanguageModel,
+  type LanguageModel,
+  type LanguageModelMiddleware
+} from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { anthropic } from "workers-ai-provider/anthropic";
 import { openai } from "workers-ai-provider/openai";
@@ -61,14 +65,62 @@ export function catalogModel(
   options: CatalogModelOptions
 ): LanguageModel {
   const { slug, gatewayId = "default", metadata, eventId } = options;
-  return createWorkersAI({
-    binding: env.AI,
-    providers: [openai, anthropic]
-  })(slug, {
-    gateway: {
-      id: gatewayId,
-      ...(metadata ? { metadata } : {}),
-      ...(eventId ? { eventId } : {})
-    }
+  return wrapLanguageModel({
+    model: createWorkersAI({
+      binding: env.AI,
+      providers: [openai, anthropic]
+    })(slug, {
+      gateway: {
+        id: gatewayId,
+        ...(metadata ? { metadata } : {}),
+        ...(eventId ? { eventId } : {})
+      }
+    }),
+    middleware: workersAIToolCallIds
   });
+}
+
+/**
+ * What `workers-ai-provider` joins onto every tool-call id a Workers AI model
+ * emits, and takes off again only when it sends that history back to Workers AI.
+ */
+const WORKERS_AI_TOOL_CALL_MARKER = "::cf-wai-tool-call::";
+
+/**
+ * A history outlives the model that wrote it, so a conversation moved onto a
+ * slug re-sends the ids its Workers AI turns recorded, marker and all, and the
+ * provider plugins pass them on verbatim. OpenAI refuses an id over 64
+ * characters, and a marked one is 65; Anthropic refuses the colons. The marker
+ * becomes `_` rather than going with its suffix: the suffix is random per call,
+ * so it keeps two calls apart where the model's own ids collide.
+ *
+ * Only the request is rewritten. The stored history keeps the marker, so the
+ * same conversation moved back onto Workers AI is stripped by its own provider.
+ */
+const workersAIToolCallIds: LanguageModelMiddleware = {
+  transformParams: ({ params }) =>
+    Promise.resolve({
+      ...params,
+      // A case per role: mapped as one union, the two content arrays type as
+      // neither.
+      prompt: params.prompt.map((message) => {
+        switch (message.role) {
+          case "assistant":
+            return { ...message, content: message.content.map(resendable) };
+          case "tool":
+            return { ...message, content: message.content.map(resendable) };
+          default:
+            return message;
+        }
+      })
+    })
+};
+
+function resendable<P extends object>(part: P): P {
+  return "toolCallId" in part && typeof part.toolCallId === "string"
+    ? {
+        ...part,
+        toolCallId: part.toolCallId.replace(WORKERS_AI_TOOL_CALL_MARKER, "_")
+      }
+    : part;
 }
