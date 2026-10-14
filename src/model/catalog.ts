@@ -90,9 +90,10 @@ const WORKERS_AI_TOOL_CALL_MARKER = "::cf-wai-tool-call::";
  * A history outlives the model that wrote it, so a conversation moved onto a
  * slug re-sends the ids its Workers AI turns recorded, marker and all, and the
  * provider plugins pass them on verbatim. OpenAI refuses an id over 64
- * characters, and a marked one is 65; Anthropic refuses the colons. The marker
- * becomes `_` rather than going with its suffix: the suffix is random per call,
- * so it keeps two calls apart where the model's own ids collide.
+ * characters, and GLM's `call_<24 hex>` is 65 once marked; Anthropic refuses
+ * the colons in any marked id. The marker becomes `_` rather than going with
+ * its suffix: the suffix is random per call, so it keeps two calls apart where
+ * the model's own ids collide.
  *
  * Only the request is rewritten. The stored history keeps the marker, so the
  * same conversation moved back onto Workers AI is stripped by its own provider.
@@ -101,8 +102,8 @@ const workersAIToolCallIds: LanguageModelMiddleware = {
   transformParams: ({ params }) =>
     Promise.resolve({
       ...params,
-      // A case per role: mapped as one union, the two content arrays type as
-      // neither.
+      // A case per role: mapped as one union, the assistant's content array
+      // and the tool's type as neither.
       prompt: params.prompt.map((message) => {
         switch (message.role) {
           case "assistant":
