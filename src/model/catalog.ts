@@ -1,9 +1,10 @@
+import { createOpenAI } from "@ai-sdk/openai";
 import {
   wrapLanguageModel,
   type LanguageModel,
   type LanguageModelMiddleware
 } from "ai";
-import { createWorkersAI } from "workers-ai-provider";
+import { createWorkersAI, type ProviderPlugin } from "workers-ai-provider";
 import { anthropic } from "workers-ai-provider/anthropic";
 import { openai } from "workers-ai-provider/openai";
 import type { AiEnv } from "../env.js";
@@ -21,6 +22,12 @@ export interface CatalogModelOptions extends GatewayLogFields {
   slug: string;
   /** Which AI Gateway. `"default"` auto-provisions on first request. */
   gatewayId?: string;
+  /**
+   * OpenAI's prompt-cache routing key. Every call an object makes re-sends one
+   * history, so the key is the object's name, as it is for Workers AI's
+   * `sessionAffinity`. Read by `openai/*` slugs only.
+   */
+  sessionAffinity?: string;
 }
 
 /**
@@ -35,10 +42,11 @@ export interface CatalogModelOptions extends GatewayLogFields {
  * over the provider's own endpoint, where the key would have to live in the
  * Worker.
  *
- * The provider plugins are the pair Think resolves a bare model string with, so
- * a slug returned from `getModel()` as a string and one built here reach the
- * same provider through the same parser. They are what make a slug routable at
- * all: without them `workers-ai-provider` builds Workers AI models only.
+ * The provider plugins are what make a slug routable at all: without them
+ * `workers-ai-provider` builds Workers AI models only. An `openai/*` slug gets
+ * {@link responses} rather than the package's own `openai` plugin, so a bare
+ * `"openai/..."` string returned from `getModel()`, which Think resolves with
+ * the package's pair, is not the same model as one built here.
  *
  * The gateway goes on the **model's** settings, as it does for Workers AI — but
  * for a catalog slug the model's is the one that wins (`modelGateway ??
@@ -54,21 +62,26 @@ export interface CatalogModelOptions extends GatewayLogFields {
  * a turn whose stream dies mid-flight. That is the trade neither is plumbed for
  * here, and it is why this module ships no fallback model.
  *
- * There is no `sessionAffinity` and no reasoning budget: the first is a Workers
- * AI prefix-cache key and the second a Workers AI input field, and a catalog
- * provider reads neither. Where one of these models takes a reasoning effort it
- * is an AI SDK `providerOptions` value, set on the call rather than on the
- * model.
+ * There is no reasoning budget here: where one of these models takes a
+ * reasoning effort it is an AI SDK `providerOptions` value, set on the call
+ * rather than on the model.
  */
 export function catalogModel(
   env: AiEnv,
   options: CatalogModelOptions
 ): LanguageModel {
-  const { slug, gatewayId = "default", metadata, eventId } = options;
+  const {
+    slug,
+    gatewayId = "default",
+    metadata,
+    eventId,
+    sessionAffinity
+  } = options;
+  const isOpenAI = slug.startsWith("openai/");
   return wrapLanguageModel({
     model: createWorkersAI({
       binding: env.AI,
-      providers: [openai, anthropic]
+      providers: [isOpenAI ? responses : openai, anthropic]
     })(slug, {
       gateway: {
         id: gatewayId,
@@ -76,8 +89,53 @@ export function catalogModel(
         ...(eventId ? { eventId } : {})
       }
     }),
-    middleware: workersAIToolCallIds
+    middleware: isOpenAI
+      ? [workersAIToolCallIds, openAIDefaults(sessionAffinity)]
+      : workersAIToolCallIds
   });
+}
+
+/**
+ * OpenAI's own models, on the Responses API rather than Chat Completions, where
+ * OpenAI's reasoning models refuse function tools at any reasoning effort but
+ * `"none"`. The run catalog takes a Responses body at the same
+ * `env.AI.run(slug)` and streams it with a resume handle, so the transport is
+ * unchanged: only the wire format the body is written in and parsed from. The
+ * `apiKey` is never sent, since the run transport forwards the body alone.
+ *
+ * Every other OpenAI-wire slug keeps the package's Chat Completions plugin: the
+ * catalog's Responses support is verified for OpenAI only.
+ */
+const responses: ProviderPlugin = {
+  wireFormat: "openai",
+  create: ({ modelId, fetch }) =>
+    createOpenAI({ apiKey: "unused", fetch }).responses(modelId)
+};
+
+/**
+ * Defaults for every `openai/*` call, under any the caller sets.
+ *
+ * `store: false`, because Responses would otherwise keep each reply at OpenAI
+ * and send the next step a reference to it, into whichever OpenAI organization
+ * AI Gateway billed. Off, the provider asks for the reasoning encrypted and
+ * sends it back by value, which is what a step's tool loop needs. No reasoning
+ * outlives its turn anyway: see {@link file://../agent/history.ts}.
+ */
+function openAIDefaults(sessionAffinity?: string): LanguageModelMiddleware {
+  return {
+    transformParams: ({ params }) =>
+      Promise.resolve({
+        ...params,
+        providerOptions: {
+          ...params.providerOptions,
+          openai: {
+            store: false,
+            ...(sessionAffinity ? { promptCacheKey: sessionAffinity } : {}),
+            ...params.providerOptions?.openai
+          }
+        }
+      })
+  };
 }
 
 /**
