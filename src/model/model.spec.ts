@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { generateText } from "ai";
+import { generateText, streamText } from "ai";
 import { catalogModel } from "./catalog.js";
 import { GATEWAY_METADATA_MAX, gatewayLogFields } from "./gateway-log.js";
 import { workersAIModel } from "./workers-ai.js";
@@ -274,6 +274,101 @@ describe("an AI Gateway catalog model", () => {
 
     expect(calls[0]?.options).toEqual(
       expect.objectContaining({ gateway: { id: "default" } })
+    );
+  });
+
+  it("streams a Responses reply on the run path, and resumes it where it broke", async () => {
+    const usage = {
+      input_tokens: 1,
+      output_tokens: 1,
+      total_tokens: 2,
+      input_tokens_details: { cached_tokens: 0 },
+      output_tokens_details: { reasoning_tokens: 0 }
+    };
+    const message = {
+      type: "message",
+      id: "msg_1",
+      role: "assistant",
+      status: "completed",
+      content: [{ type: "output_text", text: "ok", annotations: [] }]
+    };
+    const response = {
+      id: "resp_1",
+      object: "response",
+      created_at: 0,
+      model: "gpt-6-luna",
+      output: []
+    };
+    const events = [
+      {
+        type: "response.created",
+        response: { ...response, status: "in_progress" }
+      },
+      {
+        type: "response.output_item.added",
+        output_index: 0,
+        item: { ...message, status: "in_progress", content: [] }
+      },
+      ...["o", "k"].map((delta) => ({
+        type: "response.output_text.delta",
+        item_id: "msg_1",
+        output_index: 0,
+        content_index: 0,
+        delta,
+        logprobs: []
+      })),
+      { type: "response.output_item.done", output_index: 0, item: message },
+      {
+        type: "response.completed",
+        response: { ...response, status: "completed", output: [message], usage }
+      }
+    ].map(
+      (e, sequence_number) =>
+        `event: ${e.type}\ndata: ${JSON.stringify({ ...e, sequence_number })}\n\n`
+    );
+    // The connection drops after the first delta; the gateway's buffer holds
+    // the rest.
+    const delivered = 3;
+    const resumed: string[] = [];
+    let read = 0;
+    const ai = {
+      run: async () =>
+        new Response(
+          // Pulled, not enqueued up front: an error discards a queue nobody
+          // has read yet.
+          new ReadableStream({
+            pull(controller) {
+              if (read < delivered)
+                controller.enqueue(new TextEncoder().encode(events[read++]));
+              else controller.error(new Error("Network connection lost."));
+            }
+          }),
+          {
+            headers: {
+              "content-type": "text/event-stream",
+              "cf-aig-run-id": "run-1"
+            }
+          }
+        ),
+      fetch: async (url: string) => {
+        resumed.push(url);
+        const from = Number(new URL(url).searchParams.get("from"));
+        return new Response(events.slice(from).join(""), {
+          headers: { "content-type": "text/event-stream" }
+        });
+      }
+    } as unknown as Ai;
+
+    const result = streamText({
+      model: catalogModel({ AI: ai }, { slug: "openai/gpt-6-luna" }),
+      prompt: "hi"
+    });
+
+    expect(await result.text).toBe("ok");
+    expect(resumed).toHaveLength(1);
+    expect(resumed[0]).toContain("/run/run-1/resume");
+    expect(new URL(resumed[0] ?? "").searchParams.get("from")).toBe(
+      String(delivered)
     );
   });
 });
