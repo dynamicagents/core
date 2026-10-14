@@ -137,6 +137,50 @@ describe("an AI Gateway catalog model", () => {
     );
   });
 
+  it("re-sends a Workers AI turn's tool-call ids in a form the provider accepts", async () => {
+    const { ai, calls } = recordingRunBinding();
+    // As `workers-ai-provider` records an id a Workers AI model emitted.
+    const recorded =
+      "call_0dcda0c4f6e64789828c7114::cf-wai-tool-call::hulRjjfhxbteJDA2";
+    await generateText({
+      model: catalogModel({ AI: ai }, { slug: "openai/gpt-6-luna" }),
+      messages: [
+        { role: "user", content: "read it" },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: recorded,
+              toolName: "read",
+              input: {}
+            }
+          ]
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: recorded,
+              toolName: "read",
+              output: { type: "text", value: "done" }
+            }
+          ]
+        }
+      ]
+    }).catch(() => undefined);
+
+    const sent = calls[0]?.body as {
+      messages: { tool_calls?: { id: string }[]; tool_call_id?: string }[];
+    };
+    const resent = "call_0dcda0c4f6e64789828c7114_hulRjjfhxbteJDA2";
+    expect(sent.messages[1]?.tool_calls?.[0]?.id).toBe(resent);
+    expect(sent.messages[2]?.tool_call_id).toBe(resent);
+    // OpenAI's ceiling on a tool-call id.
+    expect(resent.length).toBeLessThanOrEqual(64);
+  });
+
   it("defaults to the account's `default` gateway", async () => {
     const { ai, calls } = recordingRunBinding();
     await generateText({
