@@ -82,27 +82,62 @@ describe("an AI Gateway catalog model", () => {
    * body: the delegate asks for the raw reply so it can read a resume handle
    * off the headers before any provider parses it. The Workers AI binding
    * above answers the parsed shape instead, which is why these cannot share a
-   * stub.
+   * stub. It answers in whichever wire format it was asked in: a Responses
+   * body carries `input`, a Chat Completions one `messages`.
    */
   function recordingRunBinding() {
-    const calls: { model: string; body: unknown; options: unknown }[] = [];
+    const calls: {
+      model: string;
+      body: Record<string, unknown>;
+      options: unknown;
+    }[] = [];
     const ai = {
-      run: async (model: string, body: unknown, options: unknown) => {
+      run: async (
+        model: string,
+        body: Record<string, unknown>,
+        options: unknown
+      ) => {
         calls.push({ model, body, options });
-        return Response.json({
-          id: "chatcmpl-test",
-          object: "chat.completion",
-          created: 0,
-          model,
-          choices: [
-            {
-              index: 0,
-              message: { role: "assistant", content: "ok" },
-              finish_reason: "stop"
-            }
-          ],
-          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }
-        });
+        return Response.json(
+          "input" in body
+            ? {
+                id: "resp_test",
+                object: "response",
+                created_at: 0,
+                status: "completed",
+                model,
+                output: [
+                  {
+                    type: "message",
+                    id: "msg_test",
+                    role: "assistant",
+                    status: "completed",
+                    content: [
+                      { type: "output_text", text: "ok", annotations: [] }
+                    ]
+                  }
+                ],
+                usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 }
+              }
+            : {
+                id: "chatcmpl-test",
+                object: "chat.completion",
+                created: 0,
+                model,
+                choices: [
+                  {
+                    index: 0,
+                    message: { role: "assistant", content: "ok" },
+                    finish_reason: "stop"
+                  }
+                ],
+                usage: {
+                  prompt_tokens: 1,
+                  completion_tokens: 1,
+                  total_tokens: 2
+                }
+              }
+        );
       }
     } as unknown as Ai;
     return { ai, calls };
@@ -171,14 +206,63 @@ describe("an AI Gateway catalog model", () => {
       ]
     }).catch(() => undefined);
 
-    const sent = calls[0]?.body as {
-      messages: { tool_calls?: { id: string }[]; tool_call_id?: string }[];
-    };
+    const sent = calls[0]?.body as { input: { call_id?: string }[] };
     const resent = "call_0dcda0c4f6e64789828c7114_hulRjjfhxbteJDA2";
-    expect(sent.messages[1]?.tool_calls?.[0]?.id).toBe(resent);
-    expect(sent.messages[2]?.tool_call_id).toBe(resent);
+    expect(sent.input[1]?.call_id).toBe(resent);
+    expect(sent.input[2]?.call_id).toBe(resent);
     // OpenAI's ceiling on a tool-call id.
     expect(resent.length).toBeLessThanOrEqual(64);
+  });
+
+  it("writes an OpenAI slug as an unstored Responses request on the run path", async () => {
+    const { ai, calls } = recordingRunBinding();
+    await generateText({
+      model: catalogModel(
+        { AI: ai },
+        { slug: "openai/gpt-6-luna", sessionAffinity: "caller-1" }
+      ),
+      prompt: "hi",
+      providerOptions: { openai: { reasoningEffort: "max" } }
+    });
+
+    const body = calls[0]?.body;
+    expect(body).toHaveProperty("input");
+    expect(body).not.toHaveProperty("messages");
+    expect(body).toEqual(
+      expect.objectContaining({
+        store: false,
+        include: ["reasoning.encrypted_content"],
+        prompt_cache_key: "caller-1",
+        reasoning: expect.objectContaining({ effort: "max" })
+      })
+    );
+  });
+
+  it("lets a caller's own `store` win", async () => {
+    const { ai, calls } = recordingRunBinding();
+    await generateText({
+      model: catalogModel({ AI: ai }, { slug: "openai/gpt-6-luna" }),
+      prompt: "hi",
+      providerOptions: { openai: { store: true } }
+    });
+
+    expect(calls[0]?.body.store).toBe(true);
+  });
+
+  it("keeps Chat Completions for another OpenAI-wire provider", async () => {
+    const { ai, calls } = recordingRunBinding();
+    await generateText({
+      model: catalogModel(
+        { AI: ai },
+        { slug: "xai/grok-4", sessionAffinity: "caller-1" }
+      ),
+      prompt: "hi"
+    });
+
+    expect(calls[0]?.model).toBe("xai/grok-4");
+    expect(calls[0]?.body).toHaveProperty("messages");
+    expect(calls[0]?.body).not.toHaveProperty("store");
+    expect(calls[0]?.body).not.toHaveProperty("prompt_cache_key");
   });
 
   it("defaults to the account's `default` gateway", async () => {
