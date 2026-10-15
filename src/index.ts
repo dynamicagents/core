@@ -2,9 +2,10 @@
  * `@dynamicagents/core` — the mandatory foundation for a Dynamic Agent.
  *
  * This root entry carries only what nearly every consumer touches: the plugin
- * contract and the env slices. Everything else lives behind a subpath
+ * contract, the env slices, and the dependency-free helpers a plugin's tools
+ * reach for. Everything else lives behind a subpath
  * (`/task`, `/workflow`, `/agent`, `/subagent`, `/model`, `/a2a`, `/worker`,
- * `/alarm`, `/job`, `/artifacts`, `/testing`), so importing the contract does not pull in Think, and importing
+ * `/alarm`, `/job`, `/artifacts`, `/mcp`, `/testing`), so importing the contract does not pull in Think, and importing
  * the test harness never reaches a production bundle.
  */
 
@@ -35,3 +36,7 @@ export {
 } from "./env.js";
 
 export { withAbort } from "./abort.js";
+
+export { truncateOutput } from "./tool-output.js";
+
+export { sha256Hex } from "./digest.js";
