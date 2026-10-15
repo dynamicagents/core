@@ -44,6 +44,7 @@
  */
 import {
   Client,
+  ProtocolError,
   SdkError,
   SdkErrorCode,
   SdkHttpError,
@@ -130,6 +131,22 @@ const pools = new WeakMap<object, Map<string, Promise<Connection>>>();
  * so the message reaches {@link McpAnswer} as written.
  */
 class McpCallerError extends Error {}
+
+/**
+ * A caller's thunk failing, as the sentence the model will read.
+ *
+ * An `Error` the caller threw owns its own wording: a host explaining that a
+ * secret is unbound has written that for a model, and framing it again would
+ * bury it. Anything else — a thrown string, a rejected value — gets this
+ * module's framing, because there is no sentence in it to keep.
+ */
+function fromCaller(err: unknown, framing: string): McpCallerError {
+  return new McpCallerError(
+    err instanceof Error && err.message
+      ? err.message
+      : `${framing}: ${String(err)}`
+  );
+}
 
 /** The caller's sentence, if one of its thunks is why this failed. */
 function callerFailure(err: unknown): string | undefined {
@@ -224,9 +241,7 @@ export function mcpClient(config: McpClientConfig) {
     try {
       supplied = config.headers?.() ?? {};
     } catch (err) {
-      throw new McpCallerError(
-        `the headers for ${config.url} could not be read: ${String(err)}`
-      );
+      throw fromCaller(err, `the headers for ${config.url} could not be read`);
     }
     for (const name of Object.keys(supplied)) {
       if (RESERVED_HEADERS.has(name.toLowerCase())) {
@@ -274,8 +289,9 @@ export function mcpClient(config: McpClientConfig) {
     try {
       token = await config.token();
     } catch (err) {
-      throw new McpCallerError(
-        `the credential for ${config.url} could not be read: ${String(err)}`
+      throw fromCaller(
+        err,
+        `the credential for ${config.url} could not be read`
       );
     }
     headers.set("authorization", `Bearer ${token}`);
@@ -354,12 +370,22 @@ export function mcpClient(config: McpClientConfig) {
         `${reason instanceof Error ? reason.message : String(reason)}`
       );
     }
-    // What a tool the server never registered looks like: a JSON-RPC error
-    // rather than an empty result. Said as a refusal, because the alternative is
-    // somebody reading it as the server being down — or worse, a model reading
-    // an empty render as "there is nothing there".
-    if (err instanceof SdkError) {
+    // A JSON-RPC error response, which is what a tool the server never
+    // registered looks like — an enable-list refusal above all. Said as a
+    // refusal because the alternatives are both worse: "could not reach" reads
+    // as the server being down, and an empty render reads to a model as "there
+    // is nothing there", which on a busy review is the dangerous one.
+    //
+    // `ProtocolError` rather than `SdkError`: the two are siblings, not parent
+    // and child, and it is this one the server's own `error` arrives as.
+    if (err instanceof ProtocolError) {
       return `${config.url} refused ${name}: ${err.message}`;
+    }
+    // The client's own protocol complaint — an encoding it could not read, a
+    // transport that was not connected. Not the server refusing, and not the
+    // network failing, so it says neither.
+    if (err instanceof SdkError) {
+      return `${config.url} answered ${name} in a way this client could not read: ${err.message}`;
     }
     return `could not reach ${config.url} for ${name}: ${String(err)}`;
   };

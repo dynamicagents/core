@@ -229,10 +229,28 @@ describe("mcpClient", () => {
 
     const answered = await call("a", {});
 
+    // Equality, not a substring: a caller's `Error` message is the whole
+    // sentence, unframed. A host writes that wording for a model to read.
     expect(answered).toEqual({
       ok: false,
-      message: expect.stringContaining("GITHUB_TOKEN is not bound")
+      message: "GITHUB_TOKEN is not bound — ask the operator"
     });
+  });
+
+  it("frames a thrown value that carries no sentence of its own", async () => {
+    server({ "tools/call": ({ id }) => json(id, content("{}")) });
+    const call = client({
+      token: () => {
+        throw "nope";
+      }
+    });
+
+    const answered = await call("a", {});
+
+    expect(answered.ok).toBe(false);
+    expect(answered.ok === false && answered.message).toBe(
+      "the credential for https://mcp.test/readonly could not be read: nope"
+    );
   });
 
   it("hands a concurrent caller the same handshake", async () => {
@@ -416,8 +434,29 @@ describe("mcpClient", () => {
     const answered = await client()("pull_request_write", {});
 
     expect(answered.ok).toBe(false);
-    expect(answered.ok === false && answered.message).toMatch(
-      /refused|not found/
+    // "refused", not "could not reach": the server answered, and said no. Its
+    // `error` arrives as a `ProtocolError`, which is `SdkError`'s sibling rather
+    // than its subclass — matching the wrong one of the two sends a reader off
+    // to check whether the server is up.
+    expect(answered.ok === false && answered.message).toBe(
+      "https://mcp.test/readonly refused pull_request_write: Tool pull_request_write not found"
+    );
+  });
+
+  it("says so when the server answers in an encoding it cannot read", async () => {
+    server({
+      "tools/call": () =>
+        new Response("hello", {
+          status: 200,
+          headers: { "content-type": "text/plain" }
+        })
+    });
+
+    const answered = await client()("a", {});
+
+    expect(answered.ok).toBe(false);
+    expect(answered.ok === false && answered.message).toContain(
+      "could not read"
     );
   });
 
