@@ -33,6 +33,9 @@
  *    Read here, inside this module's own `try`, it comes back as written. Read
  *    inside the SDK it arrives wrapped, and the wrapping is not ours to predict.
  *
+ * That same boundary is why a redirect is not followed either — see
+ * {@link policyFetch}, where the header carrying the token is set.
+ *
  * ## Headers, and which of them are not a caller's to set
  *
  * `requestInit.headers` does reach the wire — the transport spreads it *over* its
@@ -116,14 +119,14 @@ export interface McpClientConfig {
    * paid once per instance rather than once per turn. A `WeakMap`, so a discarded
    * instance takes its connections with it.
    *
-   * **It has to identify the credential and the header policy too, not just the
-   * instance.** A connection is shared by everything that keys to it at one
-   * `url`, and the `token` and `headers` on the wire are those of whichever
-   * client opened it — the transport holds one `fetch`, built once. Two clients
-   * on one `keyedOn` and one `url` that answer `token` differently would
-   * therefore both call as the first; give them separate objects. The consumer
-   * in this train passes the config that carries the credential, which makes
-   * that true by construction.
+   * **It names the caller, not the caller's policy.** A connection sends as one
+   * client at a time and a later one takes it over, so rebuilding the same
+   * policy on this key costs nothing and a replacement credential is the one
+   * that goes out — {@link Pooled} holds how, and why a client whose policy is
+   * not the one in force waits rather than borrowing another's. Two clients on
+   * one key that answer `token` differently therefore take turns instead of one
+   * calling as the other; they still want separate keys, because taking turns
+   * costs a wait that separate connections would not.
    */
   keyedOn: object;
   /**
@@ -131,9 +134,8 @@ export interface McpClientConfig {
    * cached. A throw is the caller's own sentence and comes back as
    * `{ ok: false, message }` unchanged.
    *
-   * Read by the client that opened the connection — see
-   * {@link McpClientConfig.keyedOn} for what that means for a key two clients
-   * share.
+   * Read by the client whose call it is, on a connection it may have inherited
+   * from another — {@link Pooled} holds what that costs.
    */
   token: () => string | Promise<string>;
   /**
@@ -162,12 +164,40 @@ interface Connection {
 }
 
 /**
+ * A pooled connection, and whose policy its requests go out under.
+ *
+ * **One policy at a time, and it is the calling client's.** The transport holds
+ * a single `fetch`, built at the handshake, so a connection cannot send as two
+ * clients at once — and the session the server opened belongs to the credential
+ * that opened it. `sending.policy` is therefore read on every request rather
+ * than closed over: a client that finds another's policy in force takes the
+ * connection over, which is what makes a replacement credential or a narrowed
+ * `x-mcp-tools` the one that goes out rather than the opener's.
+ *
+ * `active` and `waiting` are what keep the two from mixing. A takeover happens
+ * only with nothing in flight, so no call ever sends a policy other than its own
+ * caller's; a client that arrives while another's calls are outstanding waits for
+ * them, bounded by its own deadline. Rebuilding one caller's client — the case
+ * `keyedOn` exists for — never waits, because its own policy is already in force.
+ */
+interface Pooled {
+  /** The handshake in flight, and then the connection it produced. */
+  connection: Promise<Connection>;
+  /** A cell, because the transport's `fetch` is built once and reads it. */
+  sending: { policy: McpClientConfig };
+  /** Calls in flight under `sending.policy`, the handshake included. */
+  active: number;
+  /** Clients waiting to send as themselves, woken when it goes idle. */
+  waiting: (() => void)[];
+}
+
+/**
  * Connections, per caller instance and then per URL.
  *
  * Two URLs under one `keyedOn` keep separate connections: the key identifies the
  * caller, not the server.
  */
-const pools = new WeakMap<object, Map<string, Promise<Connection>>>();
+const pools = new WeakMap<object, Map<string, Pooled>>();
 
 /**
  * A failure that belongs to the caller's own thunk, carried out through the SDK
@@ -278,6 +308,80 @@ function toolAnswer(result: {
 const FORGOTTEN = Symbol("mcp.session.forgotten");
 
 /**
+ * One client's policy headers, checked.
+ *
+ * A function of the policy rather than of the client that negotiated the
+ * connection: the transport's `fetch` is the opener's closure, and the policy it
+ * applies is whichever client is holding the connection — see {@link Pooled}.
+ */
+function policyHeaders(policy: McpClientConfig): Record<string, string> {
+  let supplied: Record<string, string>;
+  try {
+    supplied = policy.headers?.() ?? {};
+  } catch (err) {
+    throw fromCaller(err, `the headers for ${policy.url} could not be read`);
+  }
+  for (const name of Object.keys(supplied)) {
+    if (RESERVED_HEADERS.has(name.toLowerCase())) {
+      throw new McpCallerError(
+        `"${name}" is the MCP transport's own header and cannot be set by a ` +
+          `caller — a credential goes through this client's token instead`
+      );
+    }
+  }
+  return supplied;
+}
+
+/**
+ * Every request the transport makes, with the credential and the policy of the
+ * client the connection is sending as.
+ *
+ * The transport has already built its own headers by the time this runs, so the
+ * caller's are applied where it has not spoken and `authorization` is set here
+ * because nothing else sets it.
+ */
+async function policyFetch(
+  policy: McpClientConfig,
+  input: Parameters<typeof fetch>[0],
+  init?: RequestInit
+): Promise<Response> {
+  // A call is a POST and its response. The transport may also try to open the
+  // server's event stream with a `GET` — after a `202` to
+  // `notifications/initialized` — and nothing here has any use for a
+  // server-initiated message: no sampling, no elicitation, no notification
+  // acted on. Opening it would leave a Worker holding a long-lived connection
+  // for the life of an object that will never read it, so it is refused here
+  // rather than merely discouraged. `405` is what the spec has a client
+  // expect from a server that does not offer the stream, and the transport
+  // reads it as exactly that: it stops trying to open one and raises nothing.
+  if ((init?.method ?? "GET").toUpperCase() !== "POST") {
+    return new Response(null, {
+      status: 405,
+      statusText: "Method Not Allowed"
+    });
+  }
+  const headers = new Headers(init?.headers as HeadersInit | undefined);
+  for (const [name, value] of Object.entries(policyHeaders(policy))) {
+    if (!headers.has(name)) headers.set(name, value);
+  }
+  let token: string;
+  try {
+    token = await policy.token();
+  } catch (err) {
+    throw fromCaller(err, `the credential for ${policy.url} could not be read`);
+  }
+  headers.set("authorization", `Bearer ${token}`);
+  // **Redirects are not followed.** A Worker's `fetch` follows one by default
+  // and carries every header it was given to wherever it points, so a `307`
+  // from this endpoint would hand this `Authorization` to another host without
+  // passing back through here — and this function is the whole of the "this
+  // token, this host" boundary. Manual, so a redirect arrives at the transport
+  // as the non-OK response it is and the call fails naming the status; a server
+  // whose endpoint redirects has to be configured at the URL it redirects to.
+  return fetch(input, { ...init, headers, redirect: "manual" });
+}
+
+/**
  * One MCP client, for one caller instance.
  *
  * Returns the call. A tool body reads the same whichever server it is pointed at,
@@ -290,72 +394,14 @@ export function mcpClient(config: McpClientConfig) {
     version: "1"
   };
 
-  /** The caller's policy headers, checked. */
-  const policyHeaders = (): Record<string, string> => {
-    let supplied: Record<string, string>;
-    try {
-      supplied = config.headers?.() ?? {};
-    } catch (err) {
-      throw fromCaller(err, `the headers for ${config.url} could not be read`);
-    }
-    for (const name of Object.keys(supplied)) {
-      if (RESERVED_HEADERS.has(name.toLowerCase())) {
-        throw new McpCallerError(
-          `"${name}" is the MCP transport's own header and cannot be set by a ` +
-            `caller — a credential goes through this client's token instead`
-        );
-      }
-    }
-    return supplied;
-  };
-
-  /**
-   * Every request the transport makes, with the credential and the caller's
-   * policy on it.
-   *
-   * The transport has already built its own headers by the time this runs, so the
-   * caller's are applied where it has not spoken and `authorization` is set here
-   * because nothing else sets it.
-   */
-  const policyFetch = async (
-    input: Parameters<typeof fetch>[0],
-    init?: RequestInit
-  ): Promise<Response> => {
-    // A call is a POST and its response. The transport may also try to open the
-    // server's event stream with a `GET` — after a `202` to
-    // `notifications/initialized` — and nothing here has any use for a
-    // server-initiated message: no sampling, no elicitation, no notification
-    // acted on. Opening it would leave a Worker holding a long-lived connection
-    // for the life of an object that will never read it, so it is refused here
-    // rather than merely discouraged. `405` is what the spec has a client
-    // expect from a server that does not offer the stream, and the transport
-    // reads it as exactly that: it stops trying to open one and raises nothing.
-    if ((init?.method ?? "GET").toUpperCase() !== "POST") {
-      return new Response(null, {
-        status: 405,
-        statusText: "Method Not Allowed"
-      });
-    }
-    const headers = new Headers(init?.headers as HeadersInit | undefined);
-    for (const [name, value] of Object.entries(policyHeaders())) {
-      if (!headers.has(name)) headers.set(name, value);
-    }
-    let token: string;
-    try {
-      token = await config.token();
-    } catch (err) {
-      throw fromCaller(
-        err,
-        `the credential for ${config.url} could not be read`
-      );
-    }
-    headers.set("authorization", `Bearer ${token}`);
-    return fetch(input, { ...init, headers });
-  };
-
-  const negotiate = async (): Promise<Connection> => {
+  const negotiate = async (sending: {
+    policy: McpClientConfig;
+  }): Promise<Connection> => {
     const transport = new StreamableHTTPClientTransport(new URL(config.url), {
-      fetch: policyFetch,
+      // Read off the cell on each request rather than closed over, so the
+      // policy on the wire is the calling client's and not this one's — see
+      // {@link Pooled}.
+      fetch: (input, init) => policyFetch(sending.policy, input, init),
       // **Load-bearing for the POST, not only for the stream the GET would
       // open.** The transport serves a POST's own SSE response through the same
       // reader, and a stream that ends after an event carrying an `id` but
@@ -379,38 +425,78 @@ export function mcpClient(config: McpClientConfig) {
     return { client, transport };
   };
 
-  const pool = (): Map<string, Promise<Connection>> => {
+  const pool = (): Map<string, Pooled> => {
     const held = pools.get(config.keyedOn);
     if (held) return held;
-    const fresh = new Map<string, Promise<Connection>>();
+    const fresh = new Map<string, Pooled>();
     pools.set(config.keyedOn, fresh);
     return fresh;
   };
 
   /**
-   * The connection, negotiating one if there is none.
+   * The pooled entry, negotiating one if there is none.
    *
    * **The handshake in flight is what is held, not the connection it produces.**
    * A model step may call two tools at once, and both would otherwise open their
    * own — or worse, the second would send a `tools/call` while the first's
    * handshake was still on the wire, which a server is entitled to reject.
    */
-  const open = (): Promise<Connection> => {
+  const open = (): Pooled => {
     const held = pool().get(config.url);
     if (held) return held;
-    const opening = negotiate();
-    pool().set(config.url, opening);
+    // The cell before the handshake, because the transport the handshake builds
+    // reads it: see {@link Pooled}.
+    const sending = { policy: config };
+    const entry: Pooled = {
+      connection: negotiate(sending),
+      sending,
+      active: 0,
+      waiting: []
+    };
+    pool().set(config.url, entry);
     // A handshake that failed must not be the answer the next call gets.
     // Guarded on identity so a rejection arriving after somebody else has stored
-    // a fresh promise does not take theirs out.
-    opening.catch(() => {
-      if (pool().get(config.url) === opening) pool().delete(config.url);
+    // a fresh entry does not take theirs out.
+    entry.connection.catch(() => {
+      if (pool().get(config.url) === entry) pool().delete(config.url);
     });
-    return opening;
+    return entry;
   };
 
-  const forget = (opening: Promise<Connection>): void => {
-    if (pool().get(config.url) === opening) pool().delete(config.url);
+  /**
+   * The connection, sending as this client.
+   *
+   * Taking it over is free with nothing in flight, and waits otherwise — which
+   * is what keeps one call from ever going out under another caller's
+   * credential. {@link Pooled} holds why a connection carries one policy at a
+   * time, and `keyedOn` why the common case never waits.
+   */
+  const claim = async (): Promise<Pooled> => {
+    for (;;) {
+      const entry = open();
+      if (entry.sending.policy === config || entry.active === 0) {
+        entry.sending.policy = config;
+        entry.active += 1;
+        return entry;
+      }
+      await new Promise<void>((resolve) => entry.waiting.push(resolve));
+      // Contending again rather than trusting the wake-up: the pool may have
+      // moved on while this waited — a forgotten session renegotiates a fresh
+      // entry — and another waiter may have taken this one first.
+    }
+  };
+
+  const release = (entry: Pooled): void => {
+    entry.active -= 1;
+    if (entry.active > 0) return;
+    // All of them, not the first in line: a waiter that has since given up on
+    // its own deadline would otherwise swallow the wake-up the rest need, and
+    // every one of them re-checks before claiming anything.
+    for (const wake of entry.waiting.splice(0)) wake();
+  };
+
+  const forget = (entry: Pooled): void => {
+    if (pool().get(config.url) === entry) pool().delete(config.url);
   };
 
   const failure = (name: string, err: unknown, signal: AbortSignal): string => {
@@ -460,41 +546,60 @@ export function mcpClient(config: McpClientConfig) {
     if (signal.aborted) {
       return { ok: false, message: failure(name, signal.reason, signal) };
     }
-    const opening = open();
-    let connection: Connection;
+    const claimed = claim();
+    let entry: Pooled;
     try {
-      connection = await withAbort(signal, opening);
+      entry = await withAbort(signal, claimed);
     } catch (err) {
+      // A claim abandoned on the way in still lands, and one nobody released
+      // would leave the connection busy for every later policy.
+      void claimed.then(release, () => {});
       const caller = callerFailure(err);
       return { ok: false, message: caller ?? failure(name, err, signal) };
     }
     try {
-      const result = await connection.client.callTool(
-        { name, arguments: args },
-        { timeout: timeoutMs, signal }
-      );
-      return toolAnswer(result);
-    } catch (err) {
-      const caller = callerFailure(err);
-      if (caller) return { ok: false, message: caller };
-      // Only with a session to have forgotten. A `404` without one is the wrong
-      // endpoint, and renegotiating against it would just fail twice.
-      //
-      // **De-pooled but not closed, and that is the whole of it.** This
-      // connection is shared — `open` exists so a model step's parallel tool
-      // calls join one handshake — and `close()` aborts the transport's
-      // controller, rejecting every *sibling* call in flight with
-      // `ConnectionClosed`. That reaches the caller as "answered in a way this
-      // client could not read", which is the one framing `failure` below says
-      // a session invalidation must not get. Left unclosed it holds nothing:
-      // `reconnectionScheduler` refuses to schedule, the GET stream is refused,
-      // and once it is out of the pool nothing can reach it. A sibling that
-      // then takes the same `404` renegotiates on its own retry.
-      if (httpFailure(err)?.status === 404 && connection.transport.sessionId) {
-        forget(opening);
-        return FORGOTTEN;
+      let connection: Connection;
+      try {
+        connection = await withAbort(signal, entry.connection);
+      } catch (err) {
+        const caller = callerFailure(err);
+        return { ok: false, message: caller ?? failure(name, err, signal) };
       }
-      return { ok: false, message: failure(name, err, signal) };
+      try {
+        const result = await connection.client.callTool(
+          { name, arguments: args },
+          { timeout: timeoutMs, signal }
+        );
+        return toolAnswer(result);
+      } catch (err) {
+        const caller = callerFailure(err);
+        if (caller) return { ok: false, message: caller };
+        // Only with a session to have forgotten. A `404` without one is the
+        // wrong endpoint, and renegotiating against it would just fail twice.
+        //
+        // **De-pooled but not closed, and that is the whole of it.** This
+        // connection is shared — `open` exists so a model step's parallel tool
+        // calls join one handshake — and `close()` aborts the transport's
+        // controller, rejecting every *sibling* call in flight with
+        // `ConnectionClosed`. That reaches the caller as "answered in a way this
+        // client could not read", which is the one framing `failure` below says
+        // a session invalidation must not get. Left unclosed it holds nothing:
+        // `reconnectionScheduler` refuses to schedule, the GET stream is
+        // refused, and once it is out of the pool nothing can reach it. A
+        // sibling that then takes the same `404` renegotiates on its own retry.
+        if (
+          httpFailure(err)?.status === 404 &&
+          connection.transport.sessionId
+        ) {
+          forget(entry);
+          return FORGOTTEN;
+        }
+        return { ok: false, message: failure(name, err, signal) };
+      }
+    } finally {
+      // Held for the handshake as well as the call, so nothing else can take
+      // the connection over while this one's requests are still going out.
+      release(entry);
     }
   };
 

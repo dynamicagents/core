@@ -90,29 +90,49 @@ function server(
     "notifications/initialized": () => new Response(null, { status: 200 })
   };
   const answer = { ...base, ...replies };
-  vi.stubGlobal("fetch", async (input: unknown, init?: RequestInit) => {
-    const url = typeof input === "string" ? input : String(input);
-    const method = (init?.method ?? "GET").toUpperCase();
-    const body: unknown = init?.body
-      ? JSON.parse(String(init.body))
-      : undefined;
-    const rpc = (body as { method?: string } | undefined)?.method;
-    seen.push({
-      method,
-      rpc,
-      url,
-      headers: new Headers(init?.headers as HeadersInit | undefined),
-      body
-    });
-    if (method !== "POST") return new Response(null, { status: 405 });
-    const handler = rpc ? answer[rpc] : undefined;
-    if (!handler) return new Response("no such method", { status: 501 });
-    return handler({
-      id: (body as { id?: unknown } | undefined)?.id,
-      params: (body as { params?: unknown } | undefined)?.params,
-      seen
-    });
-  });
+  vi.stubGlobal(
+    "fetch",
+    async function fetched(
+      input: unknown,
+      init?: RequestInit
+    ): Promise<Response> {
+      const url = typeof input === "string" ? input : String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      const body: unknown = init?.body
+        ? JSON.parse(String(init.body))
+        : undefined;
+      const rpc = (body as { method?: string } | undefined)?.method;
+      seen.push({
+        method,
+        rpc,
+        url,
+        headers: new Headers(init?.headers as HeadersInit | undefined),
+        body
+      });
+      if (method !== "POST") return new Response(null, { status: 405 });
+      const handler = rpc ? answer[rpc] : undefined;
+      if (!handler) return new Response("no such method", { status: 501 });
+      const answered = await handler({
+        id: (body as { id?: unknown } | undefined)?.id,
+        params: (body as { params?: unknown } | undefined)?.params,
+        seen
+      });
+      // The runtime follows a redirect unless it was told not to, and carries
+      // every header it was given — the credential among them — to wherever it
+      // points. Modelled here so the client's refusal to follow one is asserted
+      // on what reaches the other host rather than on the flag that asks for it.
+      const location = answered.headers.get("location");
+      if (
+        answered.status >= 300 &&
+        answered.status < 400 &&
+        location &&
+        (init?.redirect ?? "follow") === "follow"
+      ) {
+        return fetched(location, init);
+      }
+      return answered;
+    }
+  );
   return seen;
 }
 
@@ -522,6 +542,32 @@ describe("mcpClient", () => {
     );
   });
 
+  /**
+   * One token, one host — and a redirect is the other way out of it.
+   *
+   * A Worker's `fetch` follows a redirect by default and carries every header it
+   * was given to the target, so a `307` would hand the credential to whatever
+   * host the server named, without passing back through `policyFetch`. The fake
+   * above follows one exactly as the runtime does, so this fails on the
+   * behaviour rather than on the option that buys it.
+   */
+  it("never follows a redirect to another host", async () => {
+    const seen = server({
+      "tools/call": ({ id, seen: soFar }) =>
+        new URL(soFar.at(-1)?.url ?? URL_A).host === new URL(URL_A).host
+          ? new Response(null, { status: 307, headers: { location: URL_B } })
+          : json(id, content('{"followed":true}'))
+    });
+
+    const answered = await client()("a", {});
+
+    expect(answered.ok).toBe(false);
+    expect(answered.ok === false && answered.message).toContain("307");
+    expect(new Set(seen.map((s) => new URL(s.url).host))).toEqual(
+      new Set([new URL(URL_A).host])
+    );
+  });
+
   it("reports a tool the server never registered as a refusal, not as nothing there", async () => {
     server({
       "tools/call": ({ id }) =>
@@ -614,6 +660,87 @@ describe("mcpClient", () => {
     await client({ keyedOn })("a", {});
     await client({ keyedOn })("b", {});
 
+    expect(calls(seen).filter((m) => m === "initialize")).toHaveLength(1);
+  });
+
+  /**
+   * An inherited connection sends as the client calling on it.
+   *
+   * The thunks are rebuilt with the client every turn, so a connection that kept
+   * the first one's would send a credential its holder has since replaced, and
+   * an `x-mcp-tools` allowlist narrowed from `a,b` to `a` would still go out as
+   * `a,b` — the wider one, which is the dangerous direction for an enable list.
+   */
+  it("sends the calling client's credential and headers, not the opener's", async () => {
+    const seen = server({ "tools/call": ({ id }) => json(id, content("{}")) });
+    const keyedOn = {};
+
+    await client({
+      keyedOn,
+      token: () => "first",
+      headers: () => ({ "x-mcp-tools": "a,b" })
+    })("a", {});
+    await client({
+      keyedOn,
+      token: () => "second",
+      headers: () => ({ "x-mcp-tools": "a" })
+    })("b", {});
+
+    // One handshake, so the second call is genuinely on the first's connection.
+    expect(calls(seen).filter((m) => m === "initialize")).toHaveLength(1);
+    const last = seen.at(-1);
+    expect(last?.rpc).toBe("tools/call");
+    expect(last?.headers.get("authorization")).toBe("Bearer second");
+    expect(last?.headers.get("x-mcp-tools")).toBe("a");
+  });
+
+  /**
+   * Taking over is not borrowing: the two policies take turns.
+   *
+   * A connection has one `fetch` and one session, so it cannot send as two
+   * clients at once. A second client on the same key therefore waits for the
+   * calls in flight rather than putting its own call out under the credential
+   * already in force — the failure this would otherwise hide is one caller
+   * calling as another.
+   */
+  it("holds a second policy back until the first client's call is done", async () => {
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let arrived = () => {};
+    const outstanding = new Promise<void>((resolve) => {
+      arrived = resolve;
+    });
+    const seen = server({
+      "tools/call": async ({ id, params, seen: soFar }) => {
+        const name = (params as { name: string }).name;
+        // Read before the wait: by the time `a` is released, the last request
+        // seen may be somebody else's.
+        const auth = soFar.at(-1)?.headers.get("authorization");
+        if (name === "a") {
+          arrived();
+          await held;
+        }
+        return json(id, content(JSON.stringify({ name, auth })));
+      }
+    });
+    const keyedOn = {};
+
+    const both = Promise.all([
+      client({ keyedOn, token: () => "a-tok" })("a", {}),
+      client({ keyedOn, token: () => "b-tok" })("b", {})
+    ]);
+    // Both clients claim before either reaches the wire, so `a`'s call being
+    // outstanding is the moment `b` would overtake it if nothing held it back.
+    await outstanding;
+    expect(seen.filter((s) => s.rpc === "tools/call")).toHaveLength(1);
+    release();
+
+    expect(await both).toEqual([
+      { ok: true, data: { name: "a", auth: "Bearer a-tok" } },
+      { ok: true, data: { name: "b", auth: "Bearer b-tok" } }
+    ]);
     expect(calls(seen).filter((m) => m === "initialize")).toHaveLength(1);
   });
 
