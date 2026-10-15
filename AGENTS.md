@@ -69,8 +69,14 @@ ref while it is still unreleased: `dist/` is not committed, and npm runs `prepar
 when installing a git dependency. `husky || true` because husky exits non-zero
 outside a git checkout, which is exactly the consumer-install case.
 
-The root carries only the plugin contract; every other area is its own subpath
-export. Four rules follow from that, and all four have already been violated once:
+The root carries the plugin contract, the env slices, and the dependency-free
+helpers a plugin's tools reach for — `withAbort`, `truncateOutput`, `sha256Hex`.
+Those are here rather than in the plugins that use them because
+`@dynamicagents/plugins` fails any subpath whose module graph reaches a sibling's,
+so this package is the only home two plugins can both import from; a helper with
+one plugin's worth of use belongs in that plugin. Every other area is its own
+subpath export. The rules below follow from that, and every one of them has
+already been violated once:
 
 - **Always write `.js` on relative imports.** `moduleResolution: "Bundler"`
   typechecks extensionless specifiers, but `tsc` emits them verbatim and Node ESM
@@ -110,7 +116,20 @@ someone imports it.
 on.** Every agent runs on Think, so a `/think` would distinguish nothing, grow into
 a bucket, and turn an upstream rename into a breaking one here. What a plugin
 exports as data — `SubAgentSpec` — is contract, at the root, so a plugin never
-imports the runtime that hosts it.
+imports the runtime that hosts it. `/mcp` passes that test the way `/a2a` does:
+a wire protocol, not a library.
+
+**`/mcp` wraps `@modelcontextprotocol/client` and re-exports none of it.** The
+protocol is the SDK's; the subpath adds only what a tool needs on top — a failure
+as a value, a connection kept per caller instance, the content-block reader. A
+caller gets `McpAnswer` and `McpCall` and never names the SDK, which is what lets
+a plugin build on this without declaring a dependency of its own. Widening that
+surface makes the SDK every consumer's dependency, so it waits for a caller that
+genuinely needs `tools/list` or elicitation. The SDK is a **required peer at an
+open floor**: `agents` already requires it non-optionally, so it is never absent,
+and an `agents` bump that moves its pin needs nothing here. `src/mcp/client.ts`
+holds the rest — in particular why no `authProvider` is configured, and which
+headers a caller may not set.
 
 ---
 

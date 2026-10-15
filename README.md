@@ -379,22 +379,23 @@ of a Task's state, swept lazily on the next write rather than by an alarm apiece
 Each area is its own subpath, so importing the contract does not drag in Think, and the
 test harness cannot reach a production bundle.
 
-| Subpath                            | What's in it                                                                                   |
-| ---------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `@dynamicagents/core`              | the plugin contract (`definePlugin`, `restrictTools`, `SubAgentSpec`), env slices, `withAbort` |
-| `@dynamicagents/core/task`         | `TaskHost`, the owner of a caller's A2A tasks, and `A2ACopy`                                   |
-| `@dynamicagents/core/workflow`     | `TaskWorkflow` and its step helpers, the job and report types                                  |
-| `@dynamicagents/core/agent`        | `StepAgent`, core's tools (`ask_user`, `check_back`, `search_history`)                         |
-| `@dynamicagents/core/subagent`     | `SubAgent`, the child a `StepAgent` dispatches                                                 |
-| `@dynamicagents/core/model`        | `workersAIModel`, `catalogModel`, `gatewayLogFields`                                           |
-| `@dynamicagents/core/a2a`          | card signing, JWKS, gatekeeper-JWT verify, push notify, task store, executor                   |
-| `@dynamicagents/core/worker`       | `createA2AWorker()`, `defineAgent()` — the whole zero-trust edge                               |
-| `@dynamicagents/core/alarm`        | many deadlines over one Durable Object alarm, for a plain `DurableObject`                      |
-| `@dynamicagents/core/job`          | a long job a Durable Object drives through its alarm                                           |
-| `@dynamicagents/core/artifacts`    | the `Artifacts` object, its routes and viewer, the transcript emission                         |
-| `@dynamicagents/core/testing`      | VCR, scripted models, the A2A harness, DO helpers, fixtures — _workerd realm_                  |
-| `@dynamicagents/core/testing/node` | the VCR recorder + cassette store — _Node realm, never import from a spec_                     |
-| `@dynamicagents/core/eslint`       | the `no-deprecated-object-properties` rule                                                     |
+| Subpath                            | What's in it                                                                                                                  |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `@dynamicagents/core`              | the plugin contract (`definePlugin`, `restrictTools`, `SubAgentSpec`), env slices, `withAbort`, `truncateOutput`, `sha256Hex` |
+| `@dynamicagents/core/task`         | `TaskHost`, the owner of a caller's A2A tasks, and `A2ACopy`                                                                  |
+| `@dynamicagents/core/workflow`     | `TaskWorkflow` and its step helpers, the job and report types                                                                 |
+| `@dynamicagents/core/agent`        | `StepAgent`, core's tools (`ask_user`, `check_back`, `search_history`)                                                        |
+| `@dynamicagents/core/subagent`     | `SubAgent`, the child a `StepAgent` dispatches                                                                                |
+| `@dynamicagents/core/model`        | `workersAIModel`, `catalogModel`, `gatewayLogFields`                                                                          |
+| `@dynamicagents/core/a2a`          | card signing, JWKS, gatekeeper-JWT verify, push notify, task store, executor                                                  |
+| `@dynamicagents/core/worker`       | `createA2AWorker()`, `defineAgent()` — the whole zero-trust edge                                                              |
+| `@dynamicagents/core/alarm`        | many deadlines over one Durable Object alarm, for a plain `DurableObject`                                                     |
+| `@dynamicagents/core/job`          | a long job a Durable Object drives through its alarm                                                                          |
+| `@dynamicagents/core/artifacts`    | the `Artifacts` object, its routes and viewer, the transcript emission                                                        |
+| `@dynamicagents/core/mcp`          | `mcpClient` — calling an MCP server from the Worker, over the official SDK                                                    |
+| `@dynamicagents/core/testing`      | VCR, scripted models, the A2A harness, DO helpers, fixtures — _workerd realm_                                                 |
+| `@dynamicagents/core/testing/node` | the VCR recorder + cassette store — _Node realm, never import from a spec_                                                    |
+| `@dynamicagents/core/eslint`       | the `no-deprecated-object-properties` rule                                                                                    |
 
 `/testing*` and `/eslint` are structurally incapable of entering a runtime graph, and
 `npm run verify:exports` asserts exactly that before every publish.
@@ -581,7 +582,7 @@ The harness both predecessor agents grew, shipped so you don't grow it a third t
 - **Bindings:** `AI`, per tenant a task host, its workflow and its step agents,
   `ARTIFACTS`
 - **Secrets:** `A2A_SIGNING_KEY`, `GATEKEEPER_ORIGINS`
-- **Peers, never bundled:** `@cloudflare/think`, `agents`, `ai`, `workers-ai-provider`
+- **Peers, never bundled:** `@cloudflare/think`, `agents`, `ai`, `workers-ai-provider`, `@modelcontextprotocol/client`
 
 That last point is not stylistic: two copies of `agents` in one Worker breaks the
 `Session` / `SessionMessage` types and every `instanceof`. For local development
