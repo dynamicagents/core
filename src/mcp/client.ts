@@ -14,9 +14,9 @@
  * - **The text block is the answer.** See {@link toolAnswer}.
  * - **No `tools/list`.** A caller names the tool; the model never sees one.
  *
- * Here rather than in a plugin because `@dynamicagents/plugins` fails any subpath
- * whose module graph reaches a sibling's, so two plugins can share code only
- * through this package.
+ * Here rather than in a plugin for the reason
+ * {@link file://../tool-output.ts truncateOutput} is: two plugins can share code
+ * only through this package.
  *
  * ## The credential, and why no `authProvider`
  *
@@ -38,9 +38,11 @@
  * `requestInit.headers` does reach the wire — the transport spreads it *over* its
  * own in `_commonHeaders()` — which is the hazard rather than the feature: a
  * caller could replace `mcp-session-id` or `authorization` and break the
- * transport from outside it. So {@link McpClientConfig.headers} is refused the
- * names in {@link RESERVED_HEADERS}, and what it does supply is applied where the
- * protocol has not already spoken.
+ * transport from outside it. So nothing here passes it, and
+ * {@link McpClientConfig.headers} is applied per request instead, after the
+ * protocol has spoken, where its own names survive. {@link RESERVED_HEADERS} is
+ * refused on top of that, so a caller that believes it is setting one is told
+ * rather than quietly ignored.
  */
 import {
   Client,
@@ -51,6 +53,7 @@ import {
   StreamableHTTPClientTransport
 } from "@modelcontextprotocol/client";
 import { withAbort } from "../abort.js";
+import { truncateOutput } from "../tool-output.js";
 
 /** What a call answers with. A failure is a value, not a rejection. */
 export type McpAnswer =
@@ -60,10 +63,14 @@ export type McpAnswer =
  * Header names the protocol owns, which {@link McpClientConfig.headers} may not
  * set.
  *
- * `authorization` is here because {@link McpClientConfig.token} is the way to
- * send one. `accept` is here because the transport negotiates both encodings on
- * it and a caller narrowing it would have the server refuse the call. The rest
- * are the session and the protocol version, which only the transport knows.
+ * **A loud refusal, not the thing that keeps these off the wire.** Through this
+ * module's seam none of them could land in the first place: `policyFetch`
+ * applies a caller's headers only where the transport has not spoken, and by
+ * then it has spoken for every name here — `authorization` is then set from
+ * {@link McpClientConfig.token}, which is the way to send one. The list is here
+ * so a caller that believes it is setting one of these finds out, and so the
+ * rule still holds if anything ever passes `requestInit.headers`, where the
+ * replacement hazard in this module's header is real.
  */
 const RESERVED_HEADERS: ReadonlySet<string> = new Set([
   "accept",
@@ -74,13 +81,29 @@ const RESERVED_HEADERS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Ceiling on one call, handshake included.
+ * Ceiling on one call, handshake included, when a caller names none.
  *
- * Not a tuning knob: it is what makes a server that stops answering cost a tool
- * call rather than the task. A cold call pays the handshake as well, and the one
- * retry below shares this deadline rather than being given a fresh one.
+ * What is not negotiable is that there is a ceiling: it is what makes a server
+ * that stops answering cost a tool call rather than the task. A cold call pays
+ * the handshake as well, and the one retry below shares this deadline rather
+ * than being given a fresh one.
  */
 const DEFAULT_TIMEOUT_MS = 30_000;
+
+/**
+ * How much of a server's own text may reach an {@link McpAnswer} message.
+ *
+ * Not a budget — a budget is an agent's, and core sets none. Structural: a
+ * message here is one sentence for a model to read, while the SDK puts a non-OK
+ * response's *entire body* on the error it throws, and a tool's unparseable
+ * answer is as long as the tool made it. Unbounded, a proxy's HTML error page
+ * spends the turn's context on itself. Middle-out, so the front of the text and
+ * anything conclusive at its end both survive.
+ */
+const MESSAGE_LIMIT = 2_000;
+
+/** A server's own words, bounded — see {@link MESSAGE_LIMIT}. */
+const theirs = (text: string): string => truncateOutput(text, MESSAGE_LIMIT);
 
 export interface McpClientConfig {
   /** The server's Streamable HTTP endpoint. */
@@ -92,23 +115,43 @@ export interface McpClientConfig {
    * does — passes the object that identifies its instance, so the handshake is
    * paid once per instance rather than once per turn. A `WeakMap`, so a discarded
    * instance takes its connections with it.
+   *
+   * **It has to identify the credential and the header policy too, not just the
+   * instance.** A connection is shared by everything that keys to it at one
+   * `url`, and the `token` and `headers` on the wire are those of whichever
+   * client opened it — the transport holds one `fetch`, built once. Two clients
+   * on one `keyedOn` and one `url` that answer `token` differently would
+   * therefore both call as the first; give them separate objects. The consumer
+   * in this train passes the config that carries the credential, which makes
+   * that true by construction.
    */
   keyedOn: object;
   /**
    * The bearer, read before every request so a rotated credential is never
    * cached. A throw is the caller's own sentence and comes back as
    * `{ ok: false, message }` unchanged.
+   *
+   * Read by the client that opened the connection — see
+   * {@link McpClientConfig.keyedOn} for what that means for a key two clients
+   * share.
    */
   token: () => string | Promise<string>;
   /**
    * Headers the caller's own policy adds — an allowlist header, a user agent.
-   * Read per request, for the same reason the token is. A name in
-   * {@link RESERVED_HEADERS} fails the call rather than being dropped quietly.
+   * Read per request, by the same client the token is, and applied only where
+   * the protocol has not already spoken.
+   *
+   * `accept`, `authorization`, `content-type`, `mcp-protocol-version` and
+   * `mcp-session-id` are the protocol's own: naming one fails the call rather
+   * than being dropped quietly. {@link RESERVED_HEADERS} says why.
    */
   headers?: () => Record<string, string>;
   /** How this client names itself on `initialize`. */
   clientInfo?: { name: string; version: string };
-  /** See {@link DEFAULT_TIMEOUT_MS}. */
+  /**
+   * Ceiling on one call, handshake included; thirty seconds if unset. What is
+   * not negotiable is that there is one — {@link DEFAULT_TIMEOUT_MS} says why.
+   */
   timeoutMs?: number;
 }
 
@@ -199,6 +242,12 @@ function stopped(err: unknown, signal: AbortSignal): boolean {
  * in the method's name would hand each caller a differently-shaped object
  * depending on whether typed schemas were switched on — which shows up as an
  * empty render rather than an error.
+ *
+ * **The text block has to parse as JSON.** A tool answering prose comes back as
+ * a failure carrying that prose, not as data — so this suits a server whose
+ * tools return records, which is what the callers here point at. Content with
+ * no text block at all answers `{}`, and a caller that can tell "nothing there"
+ * from "nothing readable" should check for it.
  */
 function toolAnswer(result: {
   content?: readonly { type: string; text?: string }[];
@@ -209,13 +258,19 @@ function toolAnswer(result: {
     .map((block) => block.text as string)
     .join("\n");
   if (result.isError) {
-    return { ok: false, message: text || "the tool reported a failure" };
+    return {
+      ok: false,
+      message: theirs(text) || "the tool reported a failure"
+    };
   }
   if (!text) return { ok: true, data: {} };
   try {
     return { ok: true, data: JSON.parse(text) as unknown };
   } catch {
-    return { ok: false, message: `the tool's answer did not parse: ${text}` };
+    return {
+      ok: false,
+      message: `the tool's answer did not parse: ${theirs(text)}`
+    };
   }
 }
 
@@ -272,9 +327,9 @@ export function mcpClient(config: McpClientConfig) {
     // server-initiated message: no sampling, no elicitation, no notification
     // acted on. Opening it would leave a Worker holding a long-lived connection
     // for the life of an object that will never read it, so it is refused here
-    // rather than merely discouraged. `405` is what the spec has a client expect
-    // from a server that does not offer the stream, the transport reports it
-    // through `onerror`, and nothing is listening.
+    // rather than merely discouraged. `405` is what the spec has a client
+    // expect from a server that does not offer the stream, and the transport
+    // reads it as exactly that: it stops trying to open one and raises nothing.
     if ((init?.method ?? "GET").toUpperCase() !== "POST") {
       return new Response(null, {
         status: 405,
@@ -301,10 +356,13 @@ export function mcpClient(config: McpClientConfig) {
   const negotiate = async (): Promise<Connection> => {
     const transport = new StreamableHTTPClientTransport(new URL(config.url), {
       fetch: policyFetch,
-      // Reconnection is the GET stream's, and nothing here opens one: a call is
-      // a POST and its response. Refusing to schedule means a Worker can never
-      // be left holding a timer past the request that created it — cheaper than
-      // being sure the stream is never opened.
+      // **Load-bearing for the POST, not only for the stream the GET would
+      // open.** The transport serves a POST's own SSE response through the same
+      // reader, and a stream that ends after an event carrying an `id` but
+      // before the result schedules a reconnection from there. Refusing to
+      // schedule means a Worker can never be left holding a timer past the
+      // request that created it; what it costs is that such a call waits out
+      // the deadline below instead of being resumed.
       reconnectionScheduler: () => undefined
     });
     const client = new Client(clientInfo, {
@@ -358,7 +416,7 @@ export function mcpClient(config: McpClientConfig) {
   const failure = (name: string, err: unknown, signal: AbortSignal): string => {
     const http = httpFailure(err);
     if (http) {
-      return `${config.url} answered ${http.status} for ${name}: ${http.message}`;
+      return `${config.url} answered ${http.status} for ${name}: ${theirs(http.message)}`;
     }
     if (stopped(err, signal)) {
       // Said as "stopped before it answered" rather than as a failure of the
@@ -379,7 +437,7 @@ export function mcpClient(config: McpClientConfig) {
     // `ProtocolError` rather than `SdkError`: the two are siblings, not parent
     // and child, and it is this one the server's own `error` arrives as.
     if (err instanceof ProtocolError) {
-      return `${config.url} refused ${name}: ${err.message}`;
+      return `${config.url} refused ${name}: ${theirs(err.message)}`;
     }
     // The client's own protocol complaint — an encoding it could not read, a
     // transport that was not connected. Not the server refusing, and not the
@@ -395,6 +453,13 @@ export function mcpClient(config: McpClientConfig) {
     args: Record<string, unknown>,
     signal: AbortSignal
   ): Promise<McpAnswer | typeof FORGOTTEN> => {
+    // Asked before `open`, which would otherwise put a handshake on the wire
+    // for a turn that is already over. Nobody is waiting for the answer, and
+    // pooling the connection for a later caller does not pay for traffic this
+    // caller's allowlist never asked for.
+    if (signal.aborted) {
+      return { ok: false, message: failure(name, signal.reason, signal) };
+    }
     const opening = open();
     let connection: Connection;
     try {
@@ -414,9 +479,19 @@ export function mcpClient(config: McpClientConfig) {
       if (caller) return { ok: false, message: caller };
       // Only with a session to have forgotten. A `404` without one is the wrong
       // endpoint, and renegotiating against it would just fail twice.
+      //
+      // **De-pooled but not closed, and that is the whole of it.** This
+      // connection is shared — `open` exists so a model step's parallel tool
+      // calls join one handshake — and `close()` aborts the transport's
+      // controller, rejecting every *sibling* call in flight with
+      // `ConnectionClosed`. That reaches the caller as "answered in a way this
+      // client could not read", which is the one framing `failure` below says
+      // a session invalidation must not get. Left unclosed it holds nothing:
+      // `reconnectionScheduler` refuses to schedule, the GET stream is refused,
+      // and once it is out of the pool nothing can reach it. A sibling that
+      // then takes the same `404` renegotiates on its own retry.
       if (httpFailure(err)?.status === 404 && connection.transport.sessionId) {
         forget(opening);
-        await connection.client.close().catch(() => undefined);
         return FORGOTTEN;
       }
       return { ok: false, message: failure(name, err, signal) };

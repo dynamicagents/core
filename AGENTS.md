@@ -75,8 +75,8 @@ Those are here rather than in the plugins that use them because
 `@dynamicagents/plugins` fails any subpath whose module graph reaches a sibling's,
 so this package is the only home two plugins can both import from; a helper with
 one plugin's worth of use belongs in that plugin. Every other area is its own
-subpath export. Four rules follow from that, and all four have already been
-violated once:
+subpath export. The rules below follow from that, and every one of them has
+already been violated once:
 
 - **Always write `.js` on relative imports.** `moduleResolution: "Bundler"`
   typechecks extensionless specifiers, but `tsc` emits them verbatim and Node ESM

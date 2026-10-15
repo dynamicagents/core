@@ -3,6 +3,12 @@
  *
  * Here for the reason {@link file://./tool-output.ts truncateOutput} is: a plugin
  * cannot import from a sibling plugin, so the alternative is a copy per caller.
+ *
+ * Not the only SHA-256 in the package: {@link file://./workflow/keys.ts digest}
+ * answers base64url, truncated, for a key a workflow derives on both sides. The
+ * encodings stay apart because each is the one its callers can use — a
+ * filename and an idempotency key want hex, a key compared for equality wants
+ * the shorter form — and neither can be built from the other as written.
  */
 
 /**

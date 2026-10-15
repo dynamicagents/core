@@ -15,12 +15,7 @@ describe("truncateOutput", () => {
     expect(out).toContain("omitted from the middle");
   });
 
-  /**
-   * The edge that was a live defect. Without the `half < 1` guard a small `max`
-   * makes `half` zero or negative, and `slice(-0)` is `slice(0)` — the whole
-   * string — so the function returns *more* than it was given: 500 characters
-   * in, 543 out at `max: 80`.
-   */
+  /** The inversion the `half < 1` guard exists for — `./tool-output.ts` says why. */
   it("never returns more than it was given", () => {
     const text = "x".repeat(500);
     for (const max of [0, 1, 40, 60, 80]) {

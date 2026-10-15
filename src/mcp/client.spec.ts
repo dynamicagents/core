@@ -396,6 +396,103 @@ describe("mcpClient", () => {
   });
 
   /**
+   * Recovery is one caller's, and the connection is everybody's.
+   *
+   * Two tools in one model step share a handshake, so de-pooling must not also
+   * close the client: closing aborts every response handler on it, and the
+   * sibling still waiting comes back as an encoding this client could not read —
+   * the one framing a session invalidation must never get.
+   */
+  it("leaves a sibling's call standing while it renegotiates", async () => {
+    let sessions = 0;
+    server({
+      initialize: ({ id }) => {
+        sessions += 1;
+        return json(
+          id,
+          {
+            protocolVersion: PROTOCOL,
+            capabilities: { tools: {} },
+            serverInfo: { name: "fake", version: "1" }
+          },
+          { "mcp-session-id": `s-${sessions}` }
+        );
+      },
+      "tools/call": async ({ id, params, seen: soFar }) => {
+        const name = (params as { name: string }).name;
+        const session = soFar.at(-1)?.headers.get("mcp-session-id");
+        if (name === "a" && session === "s-1") {
+          return new Response("no such session", { status: 404 });
+        }
+        // Held back so it is still outstanding when `a`'s refusal is handled,
+        // which is the moment a close would reject it.
+        if (name === "b")
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        return json(id, content(JSON.stringify({ name, session })));
+      }
+    });
+
+    const mcp = client();
+    const [a, b] = await Promise.all([mcp("a", {}), mcp("b", {})]);
+
+    expect(a).toEqual({ ok: true, data: { name: "a", session: "s-2" } });
+    expect(b).toEqual({ ok: true, data: { name: "b", session: "s-1" } });
+  });
+
+  /**
+   * A message is a sentence for a model, and the SDK puts a non-OK response's
+   * whole body on the error it throws — so a proxy answering with a page of
+   * HTML must not spend the turn's context on it.
+   */
+  it("bounds how much of a server's own text reaches the message", async () => {
+    server({
+      "tools/call": () => new Response("E".repeat(50_000), { status: 502 })
+    });
+
+    const answered = await client()("a", {});
+
+    expect(answered.ok).toBe(false);
+    expect(answered.ok === false && answered.message.length).toBeLessThan(
+      2_500
+    );
+    expect(answered.ok === false && answered.message).toContain("502");
+    expect(answered.ok === false && answered.message).toContain(
+      "omitted from the middle"
+    );
+  });
+
+  it("bounds a tool's unparseable answer too", async () => {
+    server({
+      "tools/call": ({ id }) => json(id, content("not json ".repeat(10_000)))
+    });
+
+    const answered = await client()("a", {});
+
+    expect(answered.ok).toBe(false);
+    expect(answered.ok === false && answered.message.length).toBeLessThan(
+      2_500
+    );
+  });
+
+  it("spends no handshake on a turn that is already over", async () => {
+    const seen = server({ "tools/call": ({ id }) => json(id, content("{}")) });
+
+    const answered = await client()(
+      "a",
+      {},
+      {
+        signal: AbortSignal.abort(new Error("the turn was cancelled"))
+      }
+    );
+
+    expect(answered.ok).toBe(false);
+    expect(answered.ok === false && answered.message).toContain(
+      "the turn was cancelled"
+    );
+    expect(seen).toEqual([]);
+  });
+
+  /**
    * The trust boundary, not just a status code.
    *
    * Every re-authorization branch in the transport is guarded on an
