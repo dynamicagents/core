@@ -72,12 +72,12 @@ function page(status: string | null = null) {
   const stream = FakeEventSource.last!;
   stream.emit("ready", { kind: "session-transcript", status, now: Date.now() });
   let sequence = 0;
-  const entry = (text: string, detail?: unknown) =>
+  const entry = (text: string, detail?: unknown, at = Date.now()) =>
     stream.emit("entry", {
       sequence: ++sequence,
       label: "child 0",
       text,
-      at: Date.now(),
+      at,
       ...(detail ? { detail } : {})
     });
   return {
@@ -151,6 +151,28 @@ describe("the viewer", () => {
     expect(card.querySelector(".sr")?.textContent).toBe("done");
     expect(card.querySelector(".summary-text")?.textContent).toBe("npm test");
     expect(labels(card)).toEqual(["Command", "Output"]);
+  });
+
+  it("times a card from its call's entry to its result's", () => {
+    const { entry, cards } = page();
+    const at = Date.now() - 10_000;
+    entry("npm test", { ref: "t1", status: "running", title: "Bash" }, at);
+    entry("1 passed", { ref: "t1", status: "ok" }, at + 3_000);
+    expect(cards()[0]?.querySelector(".elapsed")?.textContent).toBe("3s");
+  });
+
+  /**
+   * A live page ticks a running card's age. One that ended inside a second
+   * shows no time, rather than the tick it was showing — on a reload, the age
+   * of a call made minutes ago.
+   */
+  it("shows no time for a card that ended within a second", () => {
+    const { entry, cards } = page();
+    const at = Date.now() - 120_000;
+    entry("ls", { ref: "t1", status: "running", title: "Bash" }, at);
+    expect(cards()[0]?.querySelector(".elapsed")?.textContent).toBe("2m 0s");
+    entry("a b", { ref: "t1", status: "ok" }, at + 200);
+    expect(cards()[0]?.querySelector(".elapsed")?.textContent).toBe("");
   });
 
   /**

@@ -1363,7 +1363,8 @@ export abstract class StepAgent<
           source,
           text: note.text,
           key: note.key,
-          ...(note.detail ? { detail: note.detail } : {})
+          ...(note.detail ? { detail: note.detail } : {}),
+          ...(note.at !== undefined ? { at: note.at } : {})
         },
         (line) => this.#hostProgress(job, line, note.key)
       )
@@ -1585,5 +1586,12 @@ function readNote(data: unknown): NoteData | null {
   )
     return null;
   const detail = readEntryDetail(note.detail);
-  return { key: note.key, text: note.text, ...(detail ? { detail } : {}) };
+  return {
+    key: note.key,
+    text: note.text,
+    ...(detail ? { detail } : {}),
+    ...(typeof note.at === "number" && Number.isFinite(note.at)
+      ? { at: note.at }
+      : {})
+  };
 }

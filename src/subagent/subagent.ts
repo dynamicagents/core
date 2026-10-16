@@ -58,6 +58,12 @@ export interface NoteData {
    * transcript ever sees it.
    */
   detail?: ArtifactEntryDetail;
+  /**
+   * When it happened, in epoch ms, for a child that reports it later than
+   * that — one that polls a container and files a batch at once. Absent, the
+   * transcript's own clock at filing. See `ArtifactEntryInput.at`.
+   */
+  at?: number;
 }
 
 export abstract class SubAgent<
@@ -262,13 +268,19 @@ export abstract class SubAgent<
     this.#flushed = false;
   }
 
-  /** Report one note to the parent's transcript. For tools with news. */
+  /** Report one note to the parent's transcript. For tools with news. `at` as {@link NoteData.at}. */
   protected async note(
     key: string,
     text: string,
-    detail?: ArtifactEntryDetail
+    detail?: ArtifactEntryDetail,
+    at?: number
   ): Promise<void> {
-    const data: NoteData = { key, text, ...(detail ? { detail } : {}) };
+    const data: NoteData = {
+      key,
+      text,
+      ...(detail ? { detail } : {}),
+      ...(at !== undefined ? { at } : {})
+    };
     await this.reportProgress(
       { milestone: NOTE_MILESTONE, message: text, data },
       { persist: true }

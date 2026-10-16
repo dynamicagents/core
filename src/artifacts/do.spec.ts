@@ -188,6 +188,30 @@ describe("Artifacts — appending", () => {
       await artifacts.addEntry("Z".repeat(40), { label: "a 0", text: "lost" })
     ).toBeNull();
   });
+
+  /** A writer that polls its notes files them late, and says when they happened. */
+  it("keeps the time a note says it happened, and never a later one than its own", async () => {
+    const artifacts = fresh("at");
+    const token = await artifacts.createArtifact(KIND);
+    const earlier = Date.now() - 5_000;
+    await artifacts.addEntry(token, {
+      label: "a 0",
+      text: "then",
+      at: earlier
+    });
+    const before = Date.now();
+    await artifacts.addEntry(token, {
+      label: "a 0",
+      text: "ahead",
+      at: Date.now() + 60_000
+    });
+    const after = Date.now();
+
+    const entries = (await artifacts.readArtifact(token))?.entries ?? [];
+    expect(entries[0]?.at).toBe(earlier);
+    expect(entries[1]?.at).toBeGreaterThanOrEqual(before);
+    expect(entries[1]?.at).toBeLessThanOrEqual(after);
+  });
 });
 
 describe("Artifacts — announcing the link", () => {

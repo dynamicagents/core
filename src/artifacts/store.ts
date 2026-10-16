@@ -112,6 +112,13 @@ export interface ArtifactEntryInput {
    * beside it. See {@link file://../a2a/push.ts PushChannel.working}.
    */
   key?: string;
+  /**
+   * When it happened, for a writer that files it later: the viewer times a
+   * card from its call's entry to its result's, so two filed in one batch
+   * would read as taking no time at all. Kept only when it is a finite time
+   * no later than the append; otherwise the append's own.
+   */
+  at?: number;
 }
 
 /**
@@ -457,7 +464,13 @@ export function makeArtifactStore(
             token
           )
           .toArray()[0]?.next ?? 1;
-      const at = now();
+      const appendedAt = now();
+      const at =
+        typeof entry.at === "number" &&
+        Number.isFinite(entry.at) &&
+        entry.at <= appendedAt
+          ? entry.at
+          : appendedAt;
       const detail = readEntryDetail(entry.detail);
       sql.exec(
         `INSERT INTO artifact_entries

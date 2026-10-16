@@ -87,6 +87,8 @@ export interface SubagentNote {
    * still be the note that posts the link.
    */
   detail?: ArtifactEntryDetail;
+  /** When it happened — see `ArtifactEntryInput.at`. */
+  at?: number;
 }
 
 /**
@@ -123,7 +125,8 @@ export async function transcribeNote(
     key: note.key,
     label: subagentNoteLabel(note.source),
     text: note.text,
-    ...(note.detail ? { detail: note.detail } : {})
+    ...(note.detail ? { detail: note.detail } : {}),
+    ...(note.at !== undefined ? { at: note.at } : {})
   });
   // `null` is retention having swept the artifact between the two calls. Rare,
   // and not worth a retry: the note is a month old by construction, so the
