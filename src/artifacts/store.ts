@@ -115,8 +115,9 @@ export interface ArtifactEntryInput {
   /**
    * When it happened, for a writer that files it later: the viewer times a
    * card from its call's entry to its result's, so two filed in one batch
-   * would read as taking no time at all. Kept only when it is a finite time
-   * no later than the append; otherwise the append's own.
+   * would read as taking no time at all. Kept only when it falls between the
+   * epoch and the append, which every reader's `Date` can show; otherwise the
+   * append's own.
    */
   at?: number;
 }
@@ -466,9 +467,7 @@ export function makeArtifactStore(
           .toArray()[0]?.next ?? 1;
       const appendedAt = now();
       const at =
-        typeof entry.at === "number" &&
-        Number.isFinite(entry.at) &&
-        entry.at <= appendedAt
+        typeof entry.at === "number" && entry.at >= 0 && entry.at <= appendedAt
           ? entry.at
           : appendedAt;
       const detail = readEntryDetail(entry.detail);
