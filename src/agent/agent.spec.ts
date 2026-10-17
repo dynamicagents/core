@@ -30,6 +30,7 @@ import { SESSION_TRANSCRIPT_KIND } from "../artifacts/transcript.js";
 import type { StepJob, TaskParams } from "../workflow/types.js";
 import worker, {
   COPY,
+  EARLIER_NOTE_AT,
   type JobDebug,
   type TestAgent,
   type TestEnv
@@ -744,6 +745,23 @@ describe("an awaited sub-agent", () => {
     expect(
       working(harness, accepted.id).filter((text) => text.includes("/a/"))
     ).toHaveLength(1);
+  });
+
+  it("files a note at the time the child says it happened", async () => {
+    const { harness, debug } = harnessFor("delegate-at");
+    using _ = harness.interceptGatekeeper();
+
+    const accepted = await harness.send("delegate:note-at");
+    await harness.waitForTerminal(accepted.id);
+    const runId = (await debug(accepted.id)).work[0]!.workId;
+    const token = await requireArtifactsStub(testEnv).tokenFor(
+      SESSION_TRANSCRIPT_KIND,
+      runId
+    );
+    const read = await requireArtifactsStub(testEnv).readArtifact(token!);
+    expect(
+      read?.entries.find((entry) => entry.text === "an earlier note")?.at
+    ).toBe(EARLIER_NOTE_AT);
   });
 
   it("files a note the live path missed, from the replay", async () => {

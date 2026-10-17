@@ -451,6 +451,9 @@ const SCRIPT = `
       card.elapsed.textContent = live ? duration(serverNow() - card.startAt) : "";
     } else if (card.endAt !== null && card.endAt - card.startAt >= 1000) {
       card.elapsed.textContent = duration(card.endAt - card.startAt);
+    } else {
+      // Not the last tick it ran with: that was its age when it ended.
+      card.elapsed.textContent = "";
     }
   }
 

@@ -292,6 +292,21 @@ describe("transcribeNote", () => {
         detail: CARD
       });
     });
+
+    it("is recorded at the time it says it happened", async () => {
+      const transcript = crypto.randomUUID();
+      const at = Date.now() - 5_000;
+      await transcribeNote(
+        wired,
+        note({ transcript, text: "npm test", detail: CARD, at }),
+        poster().post
+      );
+      const token = await artifacts().tokenFor(
+        SESSION_TRANSCRIPT_KIND,
+        transcript
+      );
+      expect((await artifacts().readArtifact(token!))?.entries[0]?.at).toBe(at);
+    });
   });
 
   it("lets an unreachable store throw, so the step can retry", async () => {

@@ -218,6 +218,11 @@ function parentRule(view: ModelTurnView): MockStep {
 function childRule(view: ModelTurnView): MockStep {
   const text = view.lastUserText;
   if (text === "fail") return { error: "child told to fail" };
+  if (text === "note-at") {
+    return view.answered
+      ? { text: "child did: note-at" }
+      : call("child_note_at", {}, "noting");
+  }
   // Says something, so the run files notes on the page it was given.
   if (text.startsWith("same-page:")) {
     return view.answered
@@ -323,6 +328,9 @@ const BACKGROUND_SPEC: SubAgentSpec<{ task: string }, TestEnv> = {
   detached: true
 };
 
+/** When `child_note_at`'s note says it happened. */
+export const EARLIER_NOTE_AT = 1_700_000_000_000;
+
 abstract class TestSubAgentBase extends SubAgent<TestEnv> {
   getModel(): ThinkModel {
     return scriptedModel(childRule);
@@ -337,6 +345,19 @@ abstract class TestSubAgentBase extends SubAgent<TestEnv> {
         execute: async ({ seconds }, { abortSignal }) => {
           await sleep(seconds * 1000, abortSignal);
           return { slept: seconds };
+        }
+      }),
+      child_note_at: tool({
+        description: "File a note that happened before it is filed.",
+        inputSchema: z.object({}),
+        execute: async () => {
+          await this.note(
+            "child:at",
+            "an earlier note",
+            undefined,
+            EARLIER_NOTE_AT
+          );
+          return { noted: true };
         }
       }),
       child_park: tool({
