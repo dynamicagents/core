@@ -902,7 +902,7 @@ describe("a message on an existing task", () => {
   function parkedTenant(
     options: {
       recording?: "throws";
-      answer?: "ends" | "beaten";
+      answer?: "ends" | "beaten" | "refused";
       closed?: true;
     } = {}
   ) {
@@ -935,6 +935,9 @@ describe("a message on an existing task", () => {
           throw new Error("Durable Object reset");
         }
         answered.push(input);
+        if (options.answer === "refused") {
+          return { refused: 'question "q1" offers no option "q1.o9"' };
+        }
         if (options.answer === "beaten") {
           stored = {
             ...stored,
@@ -999,7 +1002,7 @@ describe("a message on an existing task", () => {
       data: {
         type: HITL_RESPONSE_TYPE,
         requestId: "q1",
-        optionId: "option_2",
+        answers: { q1: { optionIds: ["q1.o2"] } },
         answeredBy: "U1"
       },
       mediaType: "application/json"
@@ -1071,6 +1074,24 @@ describe("a message on an existing task", () => {
       /must answer the question the task asked/
     );
     expect(answered).toEqual([]);
+  });
+
+  it("refuses an answer that does not fit the question, saying why, and leaves the task waiting", async () => {
+    // Answered with the waiting Task instead, the gatekeeper would take the
+    // question as answered on an answer the agent never took.
+    const { call, state } = parkedTenant({ answer: "refused" });
+
+    const res = await call(onto(answer));
+    const body = await res.json<{
+      error?: { code: number; message: string };
+      result?: unknown;
+    }>();
+
+    expect(body.result).toBeUndefined();
+    expect(body.error?.message).toBe(
+      'the answer does not fit the question: question "q1" offers no option "q1.o9"'
+    );
+    expect(state()).toBe(TaskState.TASK_STATE_INPUT_REQUIRED);
   });
 
   it("refuses an over-long answer, and leaves the task waiting", async () => {

@@ -25,21 +25,28 @@ export {
   endpointUrl,
   jwksUrl,
   HITL_APPROVE_OPTION_ID,
+  HITL_QUESTION_KINDS,
   HITL_REJECT_OPTION_ID,
-  HITL_REQUEST_KINDS,
   HITL_REQUEST_TYPE,
   HITL_RESPONSE_TYPE,
   HITL_TIMEOUT_TYPE,
   MAX_MESSAGE_TEXT_BYTES,
+  type HitlAnswer,
+  type HitlApprovalQuestion,
+  type HitlArtifact,
+  type HitlChoiceQuestion,
   type HitlOption,
+  type HitlQuestion,
+  type HitlQuestionKind,
   type HitlRequestData,
-  type HitlRequestKind,
   type HitlResponseData,
+  type HitlTextQuestion,
   type HitlTimeoutData
 } from "@dynamicagents/g2a-protocol";
 
 export {
   buildInputRequiredTask,
+  formRequestText,
   readHumanReply,
   type HumanAnswer,
   type HumanReply

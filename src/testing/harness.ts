@@ -5,7 +5,8 @@ import {
   HITL_TIMEOUT_TYPE,
   NOTIFICATION_TOKEN_HEADER,
   endpointUrl,
-  jwksUrl
+  jwksUrl,
+  type HitlAnswer
 } from "@dynamicagents/g2a-protocol";
 import type { PlainTask } from "../a2a/task.js";
 import { makeGatekeeperToken, TEST_TENANT } from "./auth.js";
@@ -107,17 +108,17 @@ export interface AgentHarness {
    * this twice delivers the same answer twice, not a second answer. Throws on a
    * JSON-RPC error, like {@link send}.
    *
-   * The text part beside the answer carries `text`, or the option id when there
-   * is none. The gatekeeper puts the option's label there, which the harness
-   * cannot know without the question. Nothing an agent does turns on it: core
-   * takes the answer from the data part, and shows the model the label from the
-   * question it stored.
+   * `answers` holds one answer per question, keyed by the question's id. The
+   * text part beside them carries each answer's text, or its option ids when
+   * there is none. The gatekeeper puts the options' labels there, which the
+   * harness cannot know without the questions. Nothing an agent does turns on
+   * it: core takes the answers from the data part, and shows the model the
+   * labels from the questions it stored.
    */
   answer(
     taskId: string,
     requestId: string,
-    answer:
-      { optionId: string; text?: string } | { optionId?: string; text: string },
+    answers: Record<string, HitlAnswer>,
     options?: { answeredBy?: string }
   ): Promise<PlainTask>;
   /** Tell a Task its question expired unanswered, as the gatekeeper does. */
@@ -348,18 +349,22 @@ export function createAgentHarness<TEnv>(
       });
     },
 
-    answer(taskId, requestId, answer, answerOptions = {}) {
+    answer(taskId, requestId, answers, answerOptions = {}) {
       return sendMessage({
         messageId: `${pushToken}:r:${requestId}`,
         role: "ROLE_USER",
         taskId,
         parts: [
-          { text: answer.text ?? answer.optionId },
+          {
+            text: Object.values(answers)
+              .map((a) => a.text ?? a.optionIds?.join(", "))
+              .join("\n")
+          },
           {
             data: {
               type: HITL_RESPONSE_TYPE,
               requestId,
-              ...answer,
+              answers,
               answeredBy: answerOptions.answeredBy ?? "harness-person"
             },
             mediaType: "application/json"

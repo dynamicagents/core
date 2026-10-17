@@ -3,7 +3,10 @@ import {
   type WorkflowEvent,
   type WorkflowStep
 } from "cloudflare:workers";
-import { HITL_APPROVE_OPTION_ID } from "@dynamicagents/g2a-protocol";
+import {
+  HITL_APPROVE_OPTION_ID,
+  HITL_REJECT_OPTION_ID
+} from "@dynamicagents/g2a-protocol";
 import { installScheduler } from "../src/alarm/index.js";
 import type { TaskState } from "@a2a-js/sdk";
 import { Think, type ThinkModel } from "@cloudflare/think";
@@ -24,6 +27,9 @@ import type { SubAgentSpec } from "../src/contract/subagent.js";
 import { SubAgent, type SubAgentClass } from "../src/subagent/subagent.js";
 import { createA2AWorker, defineAgent } from "../src/worker/index.js";
 import {
+  askApproval,
+  askForm,
+  askUser,
   call,
   scriptedModel,
   type MockStep,
@@ -98,15 +104,51 @@ function parentRule(view: ModelTurnView): MockStep {
   }
   const ask = after(text, "ask:");
   if (ask !== undefined) {
-    return answered
-      ? { text: "asked" }
-      : call("ask_user", { question: ask, options: ["Yes", "No"] });
+    return answered ? { text: "asked" } : askUser(ask, ["Yes", "No"]);
   }
   const artifact = after(text, "approve-artifact:");
   if (artifact !== undefined) {
     return answered
       ? { text: lastToolOutput(view) }
-      : call("ask_user", { question: "Approve this?", artifact });
+      : askApproval("Approve this?", artifact);
+  }
+  // Several questions in one call: a choice explained, a choice of many, and
+  // words. The answers come back as one message, which is echoed.
+  if (text === "form:") {
+    return askForm({
+      prompt: "Before I start:",
+      questions: [
+        {
+          question: "Which database?",
+          header: "Database",
+          options: [
+            { label: "Postgres", description: "The one in production." },
+            { label: "SQLite" }
+          ]
+        },
+        {
+          question: "Which checks must pass?",
+          options: [{ label: "lint" }, { label: "test" }],
+          multiple: true
+        },
+        { question: "What should it be called?" }
+      ]
+    });
+  }
+  // A choice beside an approval, in one call.
+  const approveForm = after(text, "approve-form:");
+  if (approveForm !== undefined) {
+    return answered
+      ? { text: lastToolOutput(view) }
+      : askForm({
+          questions: [
+            {
+              question: "Which merge?",
+              options: [{ label: "Squash" }, { label: "Rebase" }]
+            },
+            { question: "Approve this?", artifact: approveForm }
+          ]
+        });
   }
   const wait = after(text, "wait:");
   if (wait !== undefined) {
@@ -133,7 +175,7 @@ function parentRule(view: ModelTurnView): MockStep {
   const bgask = after(text, "bgask:");
   if (bgask !== undefined) {
     return answered
-      ? call("ask_user", { question: "Carry on?", options: ["Yes", "No"] })
+      ? askUser("Carry on?", ["Yes", "No"])
       : call("test_background", { task: bgask }, "Started in the background.");
   }
   // A background result that needs the person: its follow-up turn asks about
@@ -142,10 +184,7 @@ function parentRule(view: ModelTurnView): MockStep {
   if (result !== undefined) {
     return answered
       ? { text: lastToolOutput(view) }
-      : call("ask_user", {
-          question: `About ${result}?`,
-          options: ["Yes", "No"]
-        });
+      : askUser(`About ${result}?`, ["Yes", "No"]);
   }
   const bg2 = after(text, "bgdelegate2:");
   if (bg2 !== undefined) {
@@ -768,12 +807,20 @@ export class TestTask extends TaskWorkflow<TestEnv> {
           role: "plan",
           key: String(n)
         });
-        const answer = await step.ask(`approve:${n}`, {
-          kind: "approval",
-          prompt: plan,
-          allowFreeform: true
+        const { answers } = await step.ask(`approve:${n}`, {
+          questions: [
+            {
+              kind: "choice",
+              id: "plan",
+              prompt: plan,
+              options: [
+                { id: HITL_APPROVE_OPTION_ID, label: "Approve" },
+                { id: HITL_REJECT_OPTION_ID, label: "Reject" }
+              ]
+            }
+          ]
         });
-        if (answer.optionId === HITL_APPROVE_OPTION_ID) {
+        if (answers.plan?.optionIds?.[0] === HITL_APPROVE_OPTION_ID) {
           const done = await step.agent("code", {
             agent: "TEST_AGENT",
             input: `echo:did ${plan}`,
@@ -781,7 +828,7 @@ export class TestTask extends TaskWorkflow<TestEnv> {
           });
           return { reply: done };
         }
-        feedback = ` (${answer.text ?? "rejected"})`;
+        feedback = ` (${answers.plan?.text ?? "rejected"})`;
         await step.say("Replanning.");
       }
     }
@@ -819,7 +866,9 @@ export class TestTask extends TaskWorkflow<TestEnv> {
     if (text === "asks:") {
       await Promise.all(
         ["one", "two"].map((name) =>
-          step.ask(name, { kind: "approval", prompt: name })
+          step.ask(name, {
+            questions: [{ kind: "text", id: "q1", prompt: name }]
+          })
         )
       );
       return { reply: "never" };

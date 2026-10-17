@@ -1,6 +1,6 @@
 {
   "name": "@dynamicagents/core",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "description": "Shared, mandatory foundation for Dynamic Agents on Cloudflare Workers: zero-trust A2A, a durable task host, task workflows, and step agents on @cloudflare/think.",
   "keywords": [
     "a2a",
@@ -122,7 +122,7 @@
   },
   "dependencies": {
     "@a2a-js/sdk": "^1.2.0",
-    "@dynamicagents/g2a-protocol": "^0.4.2",
+    "@dynamicagents/g2a-protocol": "^0.5.0",
     "jose": "^6.2.12",
     "zod": "^4.6.5"
   },
