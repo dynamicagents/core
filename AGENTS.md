@@ -251,18 +251,22 @@ and every subpath core reaches past the root. That ceiling is not a number anyon
 deliberate act after a green suite rather than a guess made in advance.
 
 **`vitest` has a ceiling for a failure that is not core's**, and it is the one to
-re-read on a dependency round. On vitest 5 the Workers pool crashes workerd:
-every module's code and inline source map crosses a WebSocket to the runtime,
-and past a Worker's module-graph size workerd closes it with `1009: Message is
-too large`. The spec file is never reported, so it reads as a missing test
-rather than a broken runtime. It is a cliff, not a slope — a suite that passes
-today breaks on the commit that widens its graph — which is why every repo of
-the train that runs the pool sits below it together, rather than each on
-whichever side it happens to land. cloudflare/workers-sdk#16331 is the upstream
-bug. **Check it when bumping**, and when it closes, move core, plugins and
-starter to vitest 5 in one round and lift this ceiling with them; `--latest`
-reports the range excluding a published vitest, so the prompt arrives on its
-own.
+re-read on a dependency round. On vitest 5 the Workers pool crashes workerd
+mid-suite: spec files die before reporting a test, and workerd's log names the
+reason — `WebSocket protocol error; statusCode = 1009; description = Message is
+too large`. A file that dies that way leaves the run red but its tests absent
+from the count rather than failed, so what is lost shows up in the totals and
+nowhere else. **Which suites it takes, and why, is not established.**
+cloudflare/workers-sdk#16331 is the upstream bug and reports the same crash
+reason, but its trigger is a `setupFiles` entry importing `cloudflare:test` with
+one worker running several files — this suite has no setup file — and its
+reporter rules out module count and load time on their own. So the suite is the
+measurement and the issue is not: **check it when bumping**, and re-run rather
+than take a closed issue as proof this is fixed. When it is, core, plugins,
+starter and the toolchain `create-dynamicagents` writes into a new project move
+to vitest 5 in one round and the ceiling lifts with them — together, because
+nothing here can say which side of it a given suite sits on, and plugins
+passing on 5 today is a margin nobody has measured.
 
 ---
 
