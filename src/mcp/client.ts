@@ -33,7 +33,7 @@
  *    Read here, inside this module's own `try`, it comes back as written. Read
  *    inside the SDK it arrives wrapped, and the wrapping is not ours to predict.
  *
- * That same boundary is why a redirect is not followed either — see
+ * That same boundary is why a redirect never leaves this origin — see
  * {@link policyFetch}, where the header carrying the token is set.
  *
  * ## Headers, and which of them are not a caller's to set
@@ -371,13 +371,22 @@ async function policyFetch(
     throw fromCaller(err, `the credential for ${policy.url} could not be read`);
   }
   headers.set("authorization", `Bearer ${token}`);
-  // **Redirects are not followed.** A Worker's `fetch` follows one by default
-  // and carries every header it was given to wherever it points, so a `307`
-  // from this endpoint would hand this `Authorization` to another host without
-  // passing back through here — and this function is the whole of the "this
-  // token, this host" boundary. Manual, so a redirect arrives at the transport
-  // as the non-OK response it is and the call fails naming the status; a server
-  // whose endpoint redirects has to be configured at the URL it redirects to.
+  // **The token reaches this origin and nowhere else.** A Worker's `fetch`
+  // follows a redirect by default and carries every header it was given to
+  // wherever it points, so a `307` from this endpoint would hand this
+  // `Authorization` to another host without passing back through here — and
+  // this function is the whole of the "this token, this host" boundary. Manual
+  // keeps that decision out of the runtime, which this function cannot see
+  // inside: a redirect comes back as the response it is.
+  //
+  // The transport follows one from there only while it stays on this origin,
+  // and every hop re-enters this function — the credential is read again and
+  // still goes nowhere but here. One that leaves the origin it does not
+  // follow: that response reaches the caller as the failure naming its status,
+  // so a server redirecting elsewhere has to be configured at the URL it
+  // points to. `client.spec.ts` asserts the hosts that were reached rather
+  // than this flag, which is what holds the boundary however a transport
+  // treats a redirect of its own.
   return fetch(input, { ...init, headers, redirect: "manual" });
 }
 
