@@ -1,6 +1,6 @@
 /**
  * `@dynamicagents/core/job` — a long job a Durable Object owns through its
- * alarm, such as the workspace object's dependency install.
+ * alarm, such as a sandbox's dependency install.
  *
  * **The sibling of `@dynamicagents/core/alarm`, and the pairing is the point.**
  * A `Scheduler` owns *when* an object wakes; this owns *what a job owes on
