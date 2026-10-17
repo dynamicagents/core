@@ -154,13 +154,13 @@
   "devDependencies": {
     "@ai-sdk/openai": "^4.0.91",
     "@cloudflare/think": "^0.20.2",
-    "@cloudflare/vitest-plugin": "^1.1.9",
+    "@cloudflare/vitest-plugin": "^1.4.4",
     "@modelcontextprotocol/client": "^2.0.0",
     "@types/node": "^26.5.1",
     "agents": "^0.28.0",
     "ai": "^7.0.101",
     "eslint": "^10.10.0",
-    "happy-dom": "^20.14.5",
+    "happy-dom": "^21.0.3",
     "husky": "^9.1.7",
     "prettier": "^3.9.6",
     "semver": "^7.8.5",
@@ -168,7 +168,7 @@
     "typescript-eslint": "^8.70.0",
     "vitest": "^4.1.11",
     "workers-ai-provider": "^4.0.0",
-    "wrangler": "^4.131.2"
+    "wrangler": "^4.151.1"
   },
   "engines": {
     "node": ">=24"
