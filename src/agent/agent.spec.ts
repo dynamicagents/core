@@ -11,6 +11,8 @@ import type {
 import type { UIMessage } from "ai";
 import {
   HITL_REQUEST_TYPE,
+  type HitlAnswer,
+  type HitlChoiceQuestion,
   type HitlRequestData
 } from "@dynamicagents/g2a-protocol";
 import {
@@ -116,6 +118,19 @@ function working(harness: AgentHarness, taskId: string): string[] {
   return harness.callbacks
     .filter((c) => c.taskId === taskId && c.state === "TASK_STATE_WORKING")
     .map((c) => c.text);
+}
+
+/** The one question a request asked, which a spec expects to be a choice. */
+function choiceOf(request: HitlRequestData): HitlChoiceQuestion {
+  const [question] = request.questions;
+  if (question?.kind !== "choice") throw new Error("not a choice");
+  return question;
+}
+
+/** The answer picking a request's first option, of its first question. */
+function firstOption(request: HitlRequestData): Record<string, HitlAnswer> {
+  const question = choiceOf(request);
+  return { [question.id]: { optionIds: [question.options[0]!.id] } };
 }
 
 function questionOf(callback: CapturedCallback): HitlRequestData {
@@ -404,22 +419,73 @@ describe("asking the caller", () => {
       "TASK_STATE_INPUT_REQUIRED"
     );
     const question = questionOf(parked);
-    expect(question.prompt).toBe("which one?");
     expect(question.requestId.startsWith(`${accepted.id}:main:`)).toBe(true);
-    expect(question.options?.map((o) => o.label)).toEqual(["Yes", "No"]);
+    expect(choiceOf(question)).toEqual({
+      kind: "choice",
+      id: "q1",
+      prompt: "which one?",
+      options: [
+        { id: "q1.o1", label: "Yes" },
+        { id: "q1.o2", label: "No" }
+      ]
+    });
     expect(terminals(harness, accepted.id)).toHaveLength(0);
 
-    await harness.answer(accepted.id, question.requestId, {
-      optionId: question.options![0].id
-    });
+    await harness.answer(
+      accepted.id,
+      question.requestId,
+      firstOption(question)
+    );
     const done = await harness.waitForTerminal(accepted.id);
     // The label the person saw, not the id the wire carried.
     expect(done.text).toBe("Yes");
     expect(terminals(harness, accepted.id)).toHaveLength(1);
   });
 
-  it("ignores a reply picking an option the question never offered", async () => {
-    const { harness, debug } = harnessFor("bad-option");
+  /**
+   * Refused out loud: a gatekeeper told nothing would show the question
+   * answered while the task waits on, until something cancels it.
+   */
+  it.each([
+    [
+      "an option the question never offered",
+      { q1: { optionIds: ["q1.o9"] } },
+      /offers no option "q1\.o9"/
+    ],
+    [
+      "two options of a question that takes one",
+      { q1: { optionIds: ["q1.o1", "q1.o2"] } },
+      /takes one option/
+    ],
+    ["no answer to a question", {}, /"q1" has no answer/],
+    [
+      "an answer to a question never asked",
+      { q1: { text: "yes" }, q9: { text: "?" } },
+      /no question "q9"/
+    ]
+  ])(
+    "refuses a reply with %s, and stays parked",
+    async (_label, answers, why) => {
+      const { harness, debug } = harnessFor("bad-answer");
+      using _ = harness.interceptGatekeeper();
+
+      const accepted = await harness.send("ask:which one?");
+      const [parked] = await harness.waitForState(
+        accepted.id,
+        "TASK_STATE_INPUT_REQUIRED"
+      );
+      await expect(
+        harness.answer(accepted.id, questionOf(parked).requestId, answers)
+      ).rejects.toThrow(why);
+      await pause(500);
+
+      expect((await debug(accepted.id)).row?.state).toBe("input-required");
+      expect(terminals(harness, accepted.id)).toHaveLength(0);
+    }
+  );
+
+  it("takes a typed answer in place of an option", async () => {
+    const { harness } = harnessFor("typed");
     using _ = harness.interceptGatekeeper();
 
     const accepted = await harness.send("ask:which one?");
@@ -428,30 +494,64 @@ describe("asking the caller", () => {
       "TASK_STATE_INPUT_REQUIRED"
     );
     await harness.answer(accepted.id, questionOf(parked).requestId, {
-      optionId: "option_9"
+      q1: { text: "neither, the third" }
     });
-    await pause(500);
-
-    expect((await debug(accepted.id)).row?.state).toBe("input-required");
-    expect(terminals(harness, accepted.id)).toHaveLength(0);
+    expect((await harness.waitForTerminal(accepted.id)).text).toBe(
+      "neither, the third"
+    );
   });
 
-  it("ignores a typed reply to a question that takes only its options", async () => {
-    const { harness, debug } = harnessFor("typed");
+  it("asks several questions in one call, and reads every answer in one message", async () => {
+    const { harness } = harnessFor("form");
     using _ = harness.interceptGatekeeper();
 
-    const accepted = await harness.send("ask:which one?");
+    const accepted = await harness.send("form:");
     const [parked] = await harness.waitForState(
       accepted.id,
       "TASK_STATE_INPUT_REQUIRED"
     );
-    await harness.answer(accepted.id, questionOf(parked).requestId, {
-      text: "maybe"
-    });
-    await pause(500);
+    const question = questionOf(parked);
+    expect(question.prompt).toBe("Before I start:");
+    expect(question.questions).toEqual([
+      {
+        kind: "choice",
+        id: "q1",
+        prompt: "Which database?",
+        header: "Database",
+        options: [
+          {
+            id: "q1.o1",
+            label: "Postgres",
+            description: "The one in production."
+          },
+          { id: "q1.o2", label: "SQLite" }
+        ]
+      },
+      {
+        kind: "choice",
+        id: "q2",
+        prompt: "Which checks must pass?",
+        multiple: true,
+        options: [
+          { id: "q2.o1", label: "lint" },
+          { id: "q2.o2", label: "test" }
+        ]
+      },
+      { kind: "text", id: "q3", prompt: "What should it be called?" }
+    ]);
 
-    expect((await debug(accepted.id)).row?.state).toBe("input-required");
-    expect(terminals(harness, accepted.id)).toHaveLength(0);
+    await harness.answer(accepted.id, question.requestId, {
+      q1: { optionIds: ["q1.o1"] },
+      q2: { optionIds: ["q2.o1", "q2.o2"], text: "and typecheck" },
+      q3: { text: "forms" }
+    });
+    expect((await harness.waitForTerminal(accepted.id)).text).toBe(
+      [
+        "1. Which database?\nPostgres",
+        "2. Which checks must pass?\nlint, test\n\nand typecheck",
+        "3. What should it be called?\nforms"
+      ].join("\n\n")
+    );
   });
 
   it("ignores a reply naming a question this task never asked", async () => {
@@ -460,7 +560,9 @@ describe("asking the caller", () => {
 
     const accepted = await harness.send("ask:which one?");
     await harness.waitForState(accepted.id, "TASK_STATE_INPUT_REQUIRED");
-    await harness.answer(accepted.id, "another-question", { optionId: "x" });
+    await harness.answer(accepted.id, "another-question", {
+      q1: { optionIds: ["q1.o1"] }
+    });
     await pause(500);
 
     expect((await debug(accepted.id)).row?.state).toBe("input-required");
@@ -503,17 +605,17 @@ describe("asking the caller to approve an artifact", () => {
       accepted.id,
       "TASK_STATE_INPUT_REQUIRED"
     );
-    const question = questionOf(parked);
-    expect(question.requestKind).toBe("approval");
-    expect(question.options).toBeUndefined();
-    expect(question.allowFreeform).toBe(true);
-    expect(question.prompt).toMatch(
-      new RegExp(`^Approve this\\?\\n\\nhttps?://[^/]+/a/${token}$`)
-    );
-    expect(question.artifact).toEqual({
-      id: token,
-      url: question.prompt.split("\n\n").at(-1)
-    });
+    expect(questionOf(parked).questions).toEqual([
+      {
+        kind: "approval",
+        id: "q1",
+        prompt: "Approve this?",
+        artifact: {
+          id: token,
+          url: expect.stringMatching(new RegExp(`^https?://[^/]+/a/${token}$`))
+        }
+      }
+    ]);
   });
 
   it("locks an approved artifact, and tells the model", async () => {
@@ -527,7 +629,7 @@ describe("asking the caller to approve an artifact", () => {
       "TASK_STATE_INPUT_REQUIRED"
     );
     await harness.answer(accepted.id, questionOf(parked).requestId, {
-      optionId: "approve"
+      q1: { optionIds: ["approve"] }
     });
 
     expect((await harness.waitForTerminal(accepted.id)).text).toBe("Approved.");
@@ -559,7 +661,7 @@ describe("asking the caller to approve an artifact", () => {
       "TASK_STATE_INPUT_REQUIRED"
     );
     await harness.answer(accepted.id, questionOf(parked).requestId, {
-      optionId: "approve"
+      q1: { optionIds: ["approve"] }
     });
     await harness.waitForTerminal(accepted.id);
 
@@ -572,7 +674,7 @@ describe("asking the caller to approve an artifact", () => {
       expect.objectContaining({
         type: "tool-ask_user",
         state: "output-available",
-        input: { question: "Approve this?", artifact: token },
+        input: { questions: [{ question: "Approve this?", artifact: token }] },
         output: ASKED
       })
     );
@@ -592,7 +694,7 @@ describe("asking the caller to approve an artifact", () => {
       "TASK_STATE_INPUT_REQUIRED"
     );
     await harness.answer(rejected.id, questionOf(first).requestId, {
-      optionId: "reject"
+      q1: { optionIds: ["reject"] }
     });
     expect((await harness.waitForTerminal(rejected.id)).text).toBe("Rejected.");
 
@@ -602,7 +704,7 @@ describe("asking the caller to approve an artifact", () => {
       "TASK_STATE_INPUT_REQUIRED"
     );
     await harness.answer(commented.id, questionOf(second).requestId, {
-      text: "leave the tests alone"
+      q1: { text: "leave the tests alone" }
     });
     expect((await harness.waitForTerminal(commented.id)).text).toBe(
       "Comment: leave the tests alone"
@@ -643,12 +745,12 @@ describe("asking the caller to approve an artifact", () => {
     );
 
     await harness.answer(first.id, questionOf(a).requestId, {
-      optionId: "approve"
+      q1: { optionIds: ["approve"] }
     });
     expect((await harness.waitForTerminal(first.id)).text).toBe("Approved.");
 
     await harness.answer(second.id, questionOf(b).requestId, {
-      optionId: "reject"
+      q1: { optionIds: ["reject"] }
     });
     expect((await harness.waitForTerminal(second.id)).text).toBe(
       unrecordedApprovalText("Rejected.")
@@ -658,6 +760,40 @@ describe("asking the caller to approve an artifact", () => {
         (entry) => entry.text
       )
     ).toEqual(["the plan", "Approved."]);
+  });
+
+  it("files only the approval of a form that also asks a choice", async () => {
+    const { harness } = harnessFor("approve-form");
+    using _ = harness.interceptGatekeeper();
+    const token = await plan();
+
+    const accepted = await harness.send(`approve-form:${token}`);
+    const [parked] = await harness.waitForState(
+      accepted.id,
+      "TASK_STATE_INPUT_REQUIRED"
+    );
+    const question = questionOf(parked);
+    expect(question.questions.map((q) => q.kind)).toEqual([
+      "choice",
+      "approval"
+    ]);
+    await harness.answer(accepted.id, question.requestId, {
+      q1: { optionIds: ["q1.o2"] },
+      q2: { optionIds: ["approve"], text: "ship it" }
+    });
+
+    expect((await harness.waitForTerminal(accepted.id)).text).toBe(
+      "1. Which merge?\nRebase\n\n2. Approve this?\nApproved.\n\nship it"
+    );
+    expect(
+      (await requireArtifactsStub(testEnv).readArtifact(token))?.entries
+    ).toEqual([
+      expect.objectContaining({ label: "plan" }),
+      expect.objectContaining({
+        label: "approval",
+        text: "Approved.\n\nship it"
+      })
+    ]);
   });
 
   /**
@@ -1093,9 +1229,11 @@ describe("a result that lands while the person is being asked", () => {
     expect(terminals(harness, accepted.id)).toHaveLength(0);
 
     const question = questionOf(parked);
-    await harness.answer(accepted.id, question.requestId, {
-      optionId: question.options![0].id
-    });
+    await harness.answer(
+      accepted.id,
+      question.requestId,
+      firstOption(question)
+    );
     const done = await harness.waitForTerminal(accepted.id);
     expect(done.state).toBe("TASK_STATE_COMPLETED");
     expect(done.text).toContain("child did: sleep:1");
@@ -1128,23 +1266,19 @@ describe("a result that lands while the person is being asked", () => {
     expect(await questions()).toHaveLength(1);
     expect(reportsOf(await debug(accepted.id))).toEqual(["input-required"]);
 
-    await harness.answer(accepted.id, first!.requestId, {
-      optionId: first!.options![0].id
-    });
+    await harness.answer(accepted.id, first!.requestId, firstOption(first!));
     const second = await until(
       "the second question",
       questions,
       (qs) => qs.length === 2
     ).then((qs) => qs[1]!);
-    expect([first!.prompt, second.prompt].sort()).toEqual([
+    expect([choiceOf(first!).prompt, choiceOf(second).prompt].sort()).toEqual([
       "About please-ask:1?",
       "About please-ask:2?"
     ]);
     expect(second.requestId).not.toBe(first!.requestId);
 
-    await harness.answer(accepted.id, second.requestId, {
-      optionId: second.options![0].id
-    });
+    await harness.answer(accepted.id, second.requestId, firstOption(second));
     expect((await harness.waitForTerminal(accepted.id)).state).toBe(
       "TASK_STATE_COMPLETED"
     );
@@ -1356,9 +1490,7 @@ describe("recovering what an eviction cut short", () => {
       const request: HitlRequestData = {
         type: HITL_REQUEST_TYPE,
         requestId: `${job.stepJobId}:call-1`,
-        requestKind: "choice",
-        prompt: "Which one?",
-        allowFreeform: true
+        questions: [{ kind: "text", id: "q1", prompt: "Which one?" }]
       };
       instance.ledger.park(job.stepJobId, request);
       // Resumed, and the object gone before the submit.
@@ -1367,7 +1499,9 @@ describe("recovering what an eviction cut short", () => {
         text: "echo:answered"
       });
       // The workflow's retry, then what the start-up sweep queues.
-      await instance.answerStepJob(job.stepJobId, { text: "again" });
+      await instance.answerStepJob(job.stepJobId, {
+        answers: { q1: { text: "again" } }
+      });
       await instance.submitAnswer({ stepJobId: job.stepJobId });
       return job;
     });

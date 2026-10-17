@@ -7,7 +7,11 @@ import {
   MAX_MESSAGE_TEXT_BYTES,
   type HitlRequestData
 } from "@dynamicagents/g2a-protocol";
-import { buildInputRequiredTask, readHumanReply } from "./hitl.js";
+import {
+  buildInputRequiredTask,
+  formRequestText,
+  readHumanReply
+} from "./hitl.js";
 
 /**
  * Core's half of asking a person something: the question it posts, and what it
@@ -22,11 +26,55 @@ import { buildInputRequiredTask, readHumanReply } from "./hitl.js";
 const question: HitlRequestData = {
   type: HITL_REQUEST_TYPE,
   requestId: "task_t1_round_2_ask",
-  requestKind: "choice",
-  prompt: "Which repository did you mean?",
-  options: [
-    { id: "option_1", label: "org/api" },
-    { id: "option_2", label: "org/web" }
+  questions: [
+    {
+      kind: "choice",
+      id: "q1",
+      prompt: "Which repository did you mean?",
+      options: [
+        { id: "q1.o1", label: "org/api" },
+        { id: "q1.o2", label: "org/web" }
+      ]
+    }
+  ]
+};
+
+const form: HitlRequestData = {
+  type: HITL_REQUEST_TYPE,
+  requestId: "task_t1_round_3_ask",
+  prompt: "Before I open the PR:",
+  questions: [
+    {
+      kind: "choice",
+      id: "q1",
+      prompt: "How should it merge?",
+      options: [
+        {
+          id: "q1.o1",
+          label: "Squash",
+          description: "One commit on main.",
+          example: "feat: forms (#1)"
+        },
+        { id: "q1.o2", label: "Rebase" }
+      ]
+    },
+    {
+      kind: "choice",
+      id: "q2",
+      prompt: "Which checks must pass?",
+      multiple: true,
+      options: [
+        { id: "q2.o1", label: "lint" },
+        { id: "q2.o2", label: "test" }
+      ]
+    },
+    { kind: "text", id: "q3", prompt: "What should the branch be called?" },
+    {
+      kind: "approval",
+      id: "q4",
+      prompt: "Approve the plan?",
+      artifact: { id: "plan-1", url: "https://agents.example/a/tok" }
+    }
   ]
 };
 
@@ -70,7 +118,7 @@ describe("the question an agent posts", () => {
     // is what the gatekeeper renders as something to pick from.
     expect(parts[0]?.content).toEqual({
       $case: "text",
-      value: question.prompt
+      value: formRequestText(question)
     });
     expect(parts[1]?.content).toEqual({ $case: "data", value: question });
     expect(parts[1]?.mediaType).toBe("application/json");
@@ -87,6 +135,34 @@ describe("the question an agent posts", () => {
   });
 });
 
+describe("the questions in words", () => {
+  it("asks one question without numbering it, with its options and a way out", () => {
+    expect(formRequestText(question)).toBe(
+      [
+        "Which repository did you mean?",
+        "   a) org/api",
+        "   b) org/web",
+        "   (or answer in your own words)"
+      ].join("\n")
+    );
+  });
+
+  it("numbers a form's questions and shows everything a renderer would", () => {
+    const text = formRequestText(form);
+    expect(
+      text.startsWith("Before I open the PR:\n\n1. How should it merge?")
+    ).toBe(true);
+    expect(text).toContain("   a) Squash — One commit on main.");
+    expect(text).toContain("      feat: forms (#1)");
+    expect(text).toContain("2. Which checks must pass?");
+    expect(text).toContain("(pick any, or answer in your own words)");
+    expect(text).toContain("3. What should the branch be called?");
+    expect(text).toContain(
+      "4. Approve the plan?\n   https://agents.example/a/tok"
+    );
+  });
+});
+
 describe("reading a reply", () => {
   it("reads an answer picked from the options", () => {
     const reply = readHumanReply(
@@ -95,7 +171,7 @@ describe("reading a reply", () => {
         data({
           type: HITL_RESPONSE_TYPE,
           requestId: question.requestId,
-          optionId: "option_2",
+          answers: { q1: { optionIds: ["q1.o2"] } },
           answeredBy: "U123"
         })
       )
@@ -104,7 +180,7 @@ describe("reading a reply", () => {
     expect(reply).toEqual({
       kind: "answer",
       requestId: question.requestId,
-      answer: { optionId: "option_2", answeredBy: "U123" }
+      answer: { answers: { q1: { optionIds: ["q1.o2"] } }, answeredBy: "U123" }
     });
   });
 
@@ -114,7 +190,7 @@ describe("reading a reply", () => {
         data({
           type: HITL_RESPONSE_TYPE,
           requestId: question.requestId,
-          text: "the one with the failing build",
+          answers: { q1: { text: "the one with the failing build" } },
           answeredBy: "U123"
         })
       )
@@ -122,7 +198,31 @@ describe("reading a reply", () => {
 
     expect(reply).toMatchObject({
       kind: "answer",
-      answer: { text: "the one with the failing build" }
+      answer: { answers: { q1: { text: "the one with the failing build" } } }
+    });
+  });
+
+  it("reads a form's answers, each keyed by its question", () => {
+    const answers = {
+      q1: { optionIds: ["q1.o1"], text: "and delete the branch" },
+      q2: { optionIds: ["q2.o1", "q2.o2"] },
+      q3: { text: "feat/forms" },
+      q4: { optionIds: ["approve"] }
+    };
+    const reply = readHumanReply(
+      message(
+        data({
+          type: HITL_RESPONSE_TYPE,
+          requestId: form.requestId,
+          answers,
+          answeredBy: "U123"
+        })
+      )
+    );
+    expect(reply).toEqual({
+      kind: "answer",
+      requestId: form.requestId,
+      answer: { answers, answeredBy: "U123" }
     });
   });
 
@@ -143,17 +243,20 @@ describe("reading a reply", () => {
   });
 
   it("refuses an answer that carries neither an option nor text", () => {
-    expect(
-      readHumanReply(
-        message(
-          data({
-            type: HITL_RESPONSE_TYPE,
-            requestId: question.requestId,
-            answeredBy: "U123"
-          })
+    for (const answers of [undefined, { q1: {} }, { q1: { optionIds: [] } }]) {
+      expect(
+        readHumanReply(
+          message(
+            data({
+              type: HITL_RESPONSE_TYPE,
+              requestId: question.requestId,
+              answers,
+              answeredBy: "U123"
+            })
+          )
         )
-      )
-    ).toBeNull();
+      ).toBeNull();
+    }
   });
 
   it("refuses an answer longer than a turn may be", () => {
@@ -165,7 +268,27 @@ describe("reading a reply", () => {
           data({
             type: HITL_RESPONSE_TYPE,
             requestId: question.requestId,
-            text: "x".repeat(MAX_MESSAGE_TEXT_BYTES + 1),
+            answers: { q1: { text: "x".repeat(MAX_MESSAGE_TEXT_BYTES + 1) } },
+            answeredBy: "U123"
+          })
+        )
+      )
+    ).toBeNull();
+  });
+});
+
+describe("the bound on a form's answers", () => {
+  it("measures every answer's text together", () => {
+    // Two answers each under the bound and over it together are held to it as
+    // one: they are kept as one message.
+    const half = "x".repeat(MAX_MESSAGE_TEXT_BYTES / 2 + 1);
+    expect(
+      readHumanReply(
+        message(
+          data({
+            type: HITL_RESPONSE_TYPE,
+            requestId: form.requestId,
+            answers: { q1: { text: half }, q3: { text: half } },
             answeredBy: "U123"
           })
         )

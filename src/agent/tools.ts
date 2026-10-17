@@ -1,7 +1,10 @@
 import { tool, type StopCondition, type Tool, type ToolSet } from "ai";
 import {
   HITL_APPROVE_OPTION_ID,
-  HITL_REJECT_OPTION_ID
+  HITL_REJECT_OPTION_ID,
+  type HitlAnswer,
+  type HitlQuestion,
+  type HitlRequestData
 } from "@dynamicagents/g2a-protocol";
 import { z } from "zod";
 
@@ -26,24 +29,82 @@ export const ASK_USER_TOOL_NAME = "ask_user";
  */
 export const MAX_ASK_OPTIONS = 6;
 
-export const askUserInputSchema = z.object({
+const askOptionSchema = z.object({
+  label: nonBlank("label").describe("What they pick, in a few words."),
+  description: nonBlank("description")
+    .optional()
+    .describe("What picking it means, when the label alone does not say."),
+  example: nonBlank("example")
+    .optional()
+    .describe(
+      "A concrete sample of what picking it produces — a snippet, a draft, a layout — in Markdown, when seeing it helps them choose."
+    )
+});
+
+const askQuestionSchema = z.object({
   question: nonBlank("question").describe(
     "The question, as the person will read it. Say what you need to know and why, briefly — they read it away from everything you have looked at."
   ),
+  header: nonBlank("header")
+    .optional()
+    .describe("A word or two naming the question, shown where room is short."),
   options: z
-    .array(nonBlank("option"))
+    .array(askOptionSchema)
     .min(2)
     .max(MAX_ASK_OPTIONS)
     .optional()
     .describe(
       "Answers they can pick from, when the question has a short list of them. Leave out to have them type an answer."
     ),
+  multiple: z
+    .boolean()
+    .optional()
+    .describe("Whether they may pick more than one of `options`."),
   artifact: nonBlank("artifact")
     .optional()
     .describe(
       "The id of something you made for them to approve, such as a plan. They get its link with your question, and answer Approve, Reject, or with a comment, so leave `options` out. Approving it locks it, so it cannot change afterwards."
     )
 });
+
+export const askUserInputSchema = z
+  .object({
+    prompt: nonBlank("prompt")
+      .optional()
+      .describe(
+        "Why you are asking, when the questions need it: what they read before them."
+      ),
+    questions: z
+      .array(askQuestionSchema)
+      .min(1)
+      .describe(
+        "Every question you need answered now. They answer them together, and you get every answer in one message."
+      )
+  })
+  .superRefine(({ questions }, ctx) => {
+    const seen = new Set<string>();
+    questions.forEach((q, i) => {
+      if (q.artifact === undefined) return;
+      if (q.options) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["questions", i, "options"],
+          message:
+            "An approval is answered Approve or Reject: leave `options` out."
+        });
+      }
+      if (seen.has(q.artifact)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["questions", i, "artifact"],
+          message: "Ask to approve each artifact once."
+        });
+      }
+      seen.add(q.artifact);
+    });
+  });
+
+export type AskUserInput = z.infer<typeof askUserInputSchema>;
 
 /**
  * Ask the person the task is for, and end the turn.
@@ -54,13 +115,9 @@ export const askUserInputSchema = z.object({
  * Think's documented pattern. `needsApproval` would count as pending and park
  * the submission instead, which is a different lifecycle.
  */
-export const askUserTool: Tool<{
-  question: string;
-  options?: string[];
-  artifact?: string;
-}> = tool({
+export const askUserTool: Tool<AskUserInput> = tool({
   description:
-    "Ask the person you are working for a question, and stop. Their answer arrives as their next message, and you continue from there. Use it when you cannot go on well without a decision or a fact only they have — not to announce what you are about to do, and not to confirm what you already know.",
+    "Ask the person you are working for, and stop. Put every question you need answered now in this one call: they answer them together, and the answers arrive as their next message. Give each option a short label, say what it means in its description, and show it in an example when seeing it helps; they can always answer in their own words instead. Use it when you cannot go on well without a decision or a fact only they have — not to announce what you are about to do, and not to confirm what you already know.",
   inputSchema: askUserInputSchema
 });
 
@@ -75,14 +132,12 @@ export const ASKED = "Asked. Their answer arrives as a message of its own.";
  * went, and anything they typed. A typed answer with neither is a comment on
  * the thing they were shown.
  */
-export function approvalAnswerText(answer: {
-  optionId?: string;
-  text?: string;
-}): string {
+export function approvalAnswerText(answer: HitlAnswer): string {
+  const picked = answer.optionIds?.[0];
   const verdict =
-    answer.optionId === HITL_APPROVE_OPTION_ID
+    picked === HITL_APPROVE_OPTION_ID
       ? "Approved."
-      : answer.optionId === HITL_REJECT_OPTION_ID
+      : picked === HITL_REJECT_OPTION_ID
         ? "Rejected."
         : undefined;
   if (!verdict) return `Comment: ${answer.text ?? ""}`.trim();
@@ -108,9 +163,45 @@ export const UNAPPROVABLE_ARTIFACT =
   "Not an artifact you can ask the person to approve: it is unknown here, not one you may ask about, or no longer open. Ask with the id you were given for it, or ask without one.";
 
 /**
- * `ask_user` as an agent offers it, with `artifact` checked when the model
- * calls it. A refused one fails the call, and the model reads the error and
- * carries on in the same turn; see {@link askedUser}.
+ * What the model reads for one question's answer: the labels it picked, and
+ * what it typed. An approval reads as {@link approvalAnswerText}.
+ */
+export function questionAnswerText(
+  question: HitlQuestion,
+  answer: HitlAnswer
+): string {
+  if (question.kind === "approval") return approvalAnswerText(answer);
+  const labels =
+    question.kind === "choice"
+      ? (answer.optionIds ?? []).map(
+          (id) => question.options.find((o) => o.id === id)?.label ?? id
+        )
+      : [];
+  return [labels.join(", "), answer.text]
+    .filter((part): part is string => Boolean(part))
+    .join("\n\n");
+}
+
+/**
+ * What the model reads when the person answered: one question's answer as it
+ * is, several each under the question they answer. `texts` holds each
+ * question's answer text, by question id.
+ */
+export function formAnswerText(
+  request: HitlRequestData,
+  texts: Record<string, string>
+): string {
+  const [only] = request.questions;
+  if (request.questions.length === 1) return texts[only.id] ?? "";
+  return request.questions
+    .map((q, i) => `${i + 1}. ${q.prompt}\n${texts[q.id] ?? ""}`)
+    .join("\n\n");
+}
+
+/**
+ * `ask_user` as an agent offers it, with each `artifact` checked when the
+ * model calls it. A refused one fails the call, and the model reads the error
+ * and carries on in the same turn; see {@link askedUser}.
  *
  * Here rather than in {@link askUserInputSchema}: the check is async, and the
  * turn's outcome is read with that schema synchronously.
@@ -120,11 +211,16 @@ export function askUserToolFor(
 ): typeof askUserTool {
   return {
     ...askUserTool,
-    inputSchema: askUserInputSchema.extend({
-      artifact: askUserInputSchema.shape.artifact.refine(
-        async (id) => id === undefined || (await mayAskApproval(id)),
-        { message: UNAPPROVABLE_ARTIFACT }
-      )
+    inputSchema: askUserInputSchema.superRefine(async ({ questions }, ctx) => {
+      for (const [i, q] of questions.entries()) {
+        if (q.artifact !== undefined && !(await mayAskApproval(q.artifact))) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["questions", i, "artifact"],
+            message: UNAPPROVABLE_ARTIFACT
+          });
+        }
+      }
     })
   };
 }

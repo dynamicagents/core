@@ -188,11 +188,22 @@ export class MyAgentTask extends TaskWorkflow<Env> {
       role: "plan",
       input: event.payload.text
     });
-    const answer = await step.ask("approve", {
-      kind: "approval",
-      prompt: plan
+    const { answers } = await step.ask("approve", {
+      questions: [
+        {
+          kind: "choice",
+          id: "plan",
+          prompt: plan,
+          options: [
+            { id: "approve", label: "Approve" },
+            { id: "reject", label: "Reject" }
+          ]
+        }
+      ]
     });
-    if (answer.optionId !== "approve") return { reply: "Stopped at the plan." };
+    if (answers.plan?.optionIds?.[0] !== "approve") {
+      return { reply: "Stopped at the plan." };
+    }
     await step.say("Building it.");
     return {
       reply: await step.agent("build", { agent: "MyAgent", input: plan })
@@ -220,14 +231,16 @@ export class MyAgent extends StepAgent<Env> {
 
 **The pipeline's helpers.** `step.agent(name, { agent, input, role?, key? })` runs a
 job on a step agent — `agent` is its binding name, and the instance is always the
-caller's — and returns its reply. `step.ask(name, request)` parks the task on a
-question of the pipeline's own and returns the answer. `step.say(text)` pushes one
+caller's — and returns its reply. `step.ask(name, request)` parks the task on
+questions of the pipeline's own, in the g2a form, and returns their answers keyed by
+question id. `step.say(text)` pushes one
 progress line. `step.do` is Workflows' own. A step whose job reports `failed` runs
 once more, as `<name>:retry` with `attempt: 2`; a second failure fails the task, and
 a step named with that suffix is refused. A name used twice in one run — a loop
 without a `key` — fails the task by name, because Workflows would otherwise hand the
-second the first one's result. A task holds one question at a time, so a
-`step.ask`, or a job's `ask_user`, made while another question waits fails the task.
+second the first one's result. A task holds one request at a time, however many
+questions it asks, so a `step.ask`, or a job's `ask_user`, made while another waits
+fails the task.
 
 **Every pipeline declares `run()`,** as the one line above. The agents SDK gives a
 workflow its host and its helpers only on a class that defines `run` itself, and an
@@ -236,11 +249,13 @@ that does not.
 
 **A job spans turns.** It ends the way every Think turn does, when the model stops
 calling tools, and its last words are its reply. On top of that, core gives the model
-`ask_user` — the job parks, the host asks the caller, and the answer is the job's
-next turn — and `search_history` over the conversation's own full-text index. An
-`ask_user` naming an `artifact` is an approval of it: the question carries the
-artifact's id and link, the caller answers Approve, Reject or with a typed comment,
-the answer is filed on the artifact, and approving it locks it. Which artifacts a
+`ask_user` — every question the model needs answered in one call, the job parks, the
+host asks the caller, and the answers are the job's next turn — and
+`search_history` over the conversation's own full-text index. A choice always takes
+a typed answer too, and an answer that does not fit the questions is refused to the
+gatekeeper with why. A question naming an `artifact` is an approval of it: it carries
+the artifact's id and link, the caller answers Approve, Reject or with a typed
+comment, the answer is filed on the artifact, and approving it locks it. Which artifacts a
 model may ask about is `mayAskApproval`'s to say — by default, any still open —
 and it is checked when the model calls `ask_user`, so a refusal is an
 error the model reads in the same turn.

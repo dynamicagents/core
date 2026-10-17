@@ -72,24 +72,30 @@ describe("reading a turn", () => {
     expect(outcome.reply).toBe("second answer");
   });
 
-  it("finds the question a turn ended on", () => {
+  it("finds the questions a turn ended on", () => {
+    const input = {
+      prompt: "Before I start:",
+      questions: [
+        {
+          question: "Which?",
+          header: "Pick",
+          options: [
+            { label: "A", description: "the first", example: "`a()`" },
+            { label: "B" }
+          ],
+          multiple: true
+        },
+        { question: "Name it?" }
+      ]
+    };
     const outcome = readTurn(
       [
         user("u1", "t1"),
-        assistant("a1", [
-          toolPart("ask_user", "input-available", {
-            question: "Which?",
-            options: ["A", "B"]
-          })
-        ])
+        assistant("a1", [toolPart("ask_user", "input-available", input)])
       ],
       "t1"
     );
-    expect(outcome.ask).toEqual({
-      toolCallId: "call-ask_user",
-      question: "Which?",
-      options: ["A", "B"]
-    });
+    expect(outcome.ask).toEqual({ toolCallId: "call-ask_user", ...input });
   });
 
   it("carries the artifact a question asks the person to approve", () => {
@@ -98,8 +104,9 @@ describe("reading a turn", () => {
         user("u1", "t1"),
         assistant("a1", [
           toolPart("ask_user", "input-available", {
-            question: "Approve the plan?",
-            artifact: "plan-token"
+            questions: [
+              { question: "Approve the plan?", artifact: "plan-token" }
+            ]
           })
         ])
       ],
@@ -107,15 +114,34 @@ describe("reading a turn", () => {
     );
     expect(outcome.ask).toEqual({
       toolCallId: "call-ask_user",
-      question: "Approve the plan?",
-      artifact: "plan-token"
+      questions: [{ question: "Approve the plan?", artifact: "plan-token" }]
     });
   });
 
   it("does not park on a question its own schema would refuse", () => {
     for (const input of [
-      { question: "   " },
-      { question: "Which?", options: ["only one"] }
+      { questions: [] },
+      { questions: [{ question: "   " }] },
+      { questions: [{ question: "Which?", options: [{ label: "only one" }] }] },
+      // An approval offers its own two answers.
+      {
+        questions: [
+          {
+            question: "Approve?",
+            artifact: "plan-token",
+            options: [{ label: "Yes" }, { label: "No" }]
+          }
+        ]
+      },
+      // One artifact, asked about twice.
+      {
+        questions: [
+          { question: "Approve?", artifact: "plan-token" },
+          { question: "Really?", artifact: "plan-token" }
+        ]
+      },
+      // The shape before questions were a list.
+      { question: "Which?", options: ["A", "B"] }
     ]) {
       const outcome = readTurn(
         [
@@ -133,7 +159,9 @@ describe("reading a turn", () => {
       [
         user("u1", "t1"),
         assistant("a1", [
-          toolPart("ask_user", "output-available", { question: "Which?" })
+          toolPart("ask_user", "output-available", {
+            questions: [{ question: "Which?" }]
+          })
         ])
       ],
       "t1"

@@ -1,5 +1,9 @@
 import type { UIMessage } from "ai";
-import { ASK_USER_TOOL_NAME, askUserInputSchema } from "./tools.js";
+import {
+  ASK_USER_TOOL_NAME,
+  askUserInputSchema,
+  type AskUserInput
+} from "./tools.js";
 
 /**
  * What a finished turn amounts to, read back out of the session.
@@ -15,13 +19,9 @@ import { ASK_USER_TOOL_NAME, askUserInputSchema } from "./tools.js";
  * message after the user message that started it.
  */
 
-/** A question the turn ended on, still waiting for its answer. */
-export interface PendingAsk {
+/** The questions the turn ended on, still waiting for their answers. */
+export interface PendingAsk extends AskUserInput {
   toolCallId: string;
-  question: string;
-  options?: string[];
-  /** The artifact the question asks the person to approve. */
-  artifact?: string;
 }
 
 export interface TurnOutcome {
@@ -135,12 +135,7 @@ function pendingAsk(parts: Part[]): PendingAsk | undefined {
     // it would refuse is not parked on.
     const input = askUserInputSchema.safeParse(call.input);
     if (!input.success) return undefined;
-    return {
-      toolCallId: call.toolCallId ?? "",
-      question: input.data.question,
-      ...(input.data.options ? { options: input.data.options } : {}),
-      ...(input.data.artifact ? { artifact: input.data.artifact } : {})
-    };
+    return { toolCallId: call.toolCallId ?? "", ...input.data };
   }
   return undefined;
 }

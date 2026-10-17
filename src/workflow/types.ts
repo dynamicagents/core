@@ -1,8 +1,4 @@
-import type {
-  HitlOption,
-  HitlRequestData,
-  HitlRequestKind
-} from "@dynamicagents/g2a-protocol";
+import type { HitlAnswer, HitlRequestData } from "@dynamicagents/g2a-protocol";
 import type { GatekeeperIdentity } from "../a2a/verify.js";
 
 /**
@@ -57,19 +53,14 @@ export type StepJobReport =
   | { state: "completed"; reply: string }
   | { state: "failed"; error: string };
 
-/** A person's answer, as the host relays it to the workflow. */
+/** A person's answers, as the host relays them to the workflow. */
 export interface StepAnswer {
-  optionId?: string;
-  text?: string;
+  /** One per question, keyed by the question's id. */
+  answers: Record<string, HitlAnswer>;
 }
 
-/** What `step.ask` asks. */
-export interface AskRequest {
-  kind: HitlRequestKind;
-  prompt: string;
-  options?: HitlOption[];
-  allowFreeform?: boolean;
-}
+/** What `step.ask` asks: the questions, and why, in the protocol's own shape. */
+export type AskRequest = Omit<HitlRequestData, "type" | "requestId">;
 
 /** What a pipeline returns. */
 export interface PipelineResult {

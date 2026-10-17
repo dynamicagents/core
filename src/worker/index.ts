@@ -436,7 +436,17 @@ async function recordReply(
         )
       };
     }
-    return { taken: await stub.answerTask(answer) };
+    const verdict = await stub.answerTask(answer);
+    if (typeof verdict === "object") {
+      return {
+        error: toJsonRpcError(
+          new RequestMalformedError(
+            `the answer does not fit the question: ${verdict.refused}`
+          )
+        )
+      };
+    }
+    return { taken: verdict };
   } catch (err) {
     console.error("[worker] could not record a reply", {
       taskId: continuation.taskId,

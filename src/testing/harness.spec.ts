@@ -296,7 +296,7 @@ describe("replying to a question through the harness", () => {
     const task = await harness.answer(
       "t1",
       "q1",
-      { optionId: "option_2" },
+      { q1: { optionIds: ["q1.o2"] } },
       { answeredBy: "U1" }
     );
 
@@ -308,7 +308,7 @@ describe("replying to a question through the harness", () => {
       reply: {
         kind: "answer",
         requestId: "q1",
-        answer: { optionId: "option_2", answeredBy: "U1" }
+        answer: { answers: { q1: { optionIds: ["q1.o2"] } }, answeredBy: "U1" }
       }
     });
   });
