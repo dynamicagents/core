@@ -250,6 +250,20 @@ and every subpath core reaches past the root. That ceiling is not a number anyon
 `--latest` reports when a release lands outside it, so widening it becomes a
 deliberate act after a green suite rather than a guess made in advance.
 
+**`vitest` has a ceiling for a failure that is not core's**, and it is the one to
+re-read on a dependency round. On vitest 5 the Workers pool crashes workerd:
+every module's code and inline source map crosses a WebSocket to the runtime,
+and past a Worker's module-graph size workerd closes it with `1009: Message is
+too large`. The spec file is never reported, so it reads as a missing test
+rather than a broken runtime. It is a cliff, not a slope — a suite that passes
+today breaks on the commit that widens its graph — which is why every repo of
+the train that runs the pool sits below it together, rather than each on
+whichever side it happens to land. cloudflare/workers-sdk#16331 is the upstream
+bug. **Check it when bumping**, and when it closes, move core, plugins and
+starter to vitest 5 in one round and lift this ceiling with them; `--latest`
+reports the range excluding a published vitest, so the prompt arrives on its
+own.
+
 ---
 
 ## Working here
