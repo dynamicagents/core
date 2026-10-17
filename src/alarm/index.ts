@@ -17,8 +17,8 @@
  * installScheduler} — this is **not** a drop-in for a keyed map.
  *
  * **Its own subpath, deliberately.** This is for a plain `DurableObject` — the
- * workspace object in `@dynamicagents/plugins/workspace` keeps its install,
- * sync and container start on it — not for an agent, which schedules through
+ * sandbox object in `@dynamicagents/plugins/sandbox` keeps its idle stop and
+ * install watch on it — not for an agent, which schedules through
  * Think. It does import `agents` — far smaller than the whole `Agent` base
  * class, and not zero.
  *
