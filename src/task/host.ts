@@ -3,6 +3,8 @@ import { Task, TaskState } from "@a2a-js/sdk";
 import {
   HITL_APPROVE_OPTION_ID,
   HITL_REJECT_OPTION_ID,
+  type HitlAnswer,
+  type HitlQuestion,
   type HitlRequestData
 } from "@dynamicagents/g2a-protocol";
 import type { AcceptedTurn } from "../a2a/executor.js";
@@ -196,14 +198,17 @@ export abstract class TaskHost<
   }
 
   /**
-   * Record a person's reply to the question the task is parked on, and relay
+   * Record a person's reply to the questions the task is parked on, and relay
    * it to the workflow waiting for it.
    *
-   * A reply naming no question of this task, an option the question never
-   * offered, or a typed answer to a question that takes only its options,
-   * changes nothing. A timeout is settled from the queue, not here: the request
-   * handler loads the task before it takes the message, and a task failed
-   * inline would make it refuse the very message reporting the expiry.
+   * A reply naming no question of this task changes nothing: it is late, or
+   * for a question since replaced. One whose answers do not fit the questions
+   * asked — one missing, an option never offered, two picked of a question
+   * that takes one — is refused with the reason, so the gatekeeper can say so
+   * instead of showing the question answered while the task waits on. A
+   * timeout is settled from the queue, not here: the request handler loads the
+   * task before it takes the message, and a task failed inline would make it
+   * refuse the very message reporting the expiry.
    *
    * The resume owes the relay, so a failed send is retried and the start-up
    * sweep finishes one an eviction cut.
@@ -215,7 +220,7 @@ export abstract class TaskHost<
     taskId: string;
     messageId: string;
     reply: HumanReply;
-  }): Promise<boolean> {
+  }): Promise<boolean | { refused: string }> {
     const { taskId, messageId, reply } = input;
     const row = this.ledger.row(taskId);
     if (!row) return false;
@@ -233,31 +238,20 @@ export abstract class TaskHost<
       await this.queue("expireTask", { taskId, requestId: reply.requestId });
       return true;
     }
-    const { optionId, text } = reply.answer;
-    const offered = offeredOptions(request);
-    if (optionId !== undefined && !offered.includes(optionId)) {
-      console.warn(
-        "[host] a reply picks an option the question never offered",
-        { taskId, requestId: reply.requestId, optionId }
-      );
-      return false;
-    }
-    if (
-      optionId === undefined &&
-      offered.length > 0 &&
-      !request.allowFreeform
-    ) {
-      console.warn(
-        "[host] a typed reply to a question that takes only its options",
-        { taskId, requestId: reply.requestId }
-      );
-      return false;
+    const { answers } = reply.answer;
+    const refused = answersMismatch(request, answers);
+    if (refused) {
+      console.warn("[host] a reply does not answer the questions asked", {
+        taskId,
+        requestId: reply.requestId,
+        refused
+      });
+      return { refused };
     }
     const owed: OwedAnswer = {
       id: `answer:${messageId}`,
       requestId: request.requestId,
-      ...(optionId !== undefined ? { optionId } : {}),
-      ...(text !== undefined ? { text } : {})
+      answers
     };
     // The resume and the guard against asking again commit together.
     const resumed = this.ctx.storage.transactionSync(() => {
@@ -718,13 +712,46 @@ export abstract class TaskHost<
   }
 }
 
+/** The option ids a question takes: an `approval`'s are the protocol's pair. */
+function offeredOptions(question: HitlQuestion): string[] {
+  switch (question.kind) {
+    case "choice":
+      return question.options.map((o) => o.id);
+    case "approval":
+      return [HITL_APPROVE_OPTION_ID, HITL_REJECT_OPTION_ID];
+    case "text":
+      return [];
+  }
+}
+
 /**
- * The option ids a question takes. An `approval` that names none takes the
- * protocol's fixed pair.
+ * Why `answers` does not answer `request`, or `undefined` when it does: every
+ * question answered, nothing answered that was not asked, every option picked
+ * one the question offered, and more than one only where it allows that.
  */
-function offeredOptions(request: HitlRequestData): string[] {
-  if (request.options) return request.options.map((o) => o.id);
-  return request.requestKind === "approval"
-    ? [HITL_APPROVE_OPTION_ID, HITL_REJECT_OPTION_ID]
-    : [];
+function answersMismatch(
+  request: HitlRequestData,
+  answers: Record<string, HitlAnswer>
+): string | undefined {
+  for (const question of request.questions) {
+    // Own keys only: `step.ask` takes a caller's ids, and `constructor` would
+    // otherwise find `Object.prototype`'s and read as answered.
+    const answer = Object.hasOwn(answers, question.id)
+      ? answers[question.id]
+      : undefined;
+    if (!answer) return `question "${question.id}" has no answer`;
+    const picked = answer.optionIds ?? [];
+    const offered = offeredOptions(question);
+    const stray = picked.find((id) => !offered.includes(id));
+    if (stray !== undefined) {
+      return `question "${question.id}" offers no option "${stray}"`;
+    }
+    const many = question.kind === "choice" && question.multiple === true;
+    if (picked.length > 1 && !many) {
+      return `question "${question.id}" takes one option`;
+    }
+  }
+  const asked = new Set(request.questions.map((q) => q.id));
+  const extra = Object.keys(answers).find((id) => !asked.has(id));
+  return extra === undefined ? undefined : `no question "${extra}" was asked`;
 }

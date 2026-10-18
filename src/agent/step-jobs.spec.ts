@@ -53,9 +53,7 @@ function job(stepJobId = "t1:main", taskId = "t1"): StepJob {
 const request: HitlRequestData = {
   type: HITL_REQUEST_TYPE,
   requestId: "t1:main:call-1",
-  requestKind: "choice",
-  prompt: "Which one?",
-  allowFreeform: true
+  questions: [{ kind: "text", id: "q1", prompt: "Which one?" }]
 };
 
 function reports(ledger: StepJobs, stepJobId = "t1:main") {

@@ -32,6 +32,7 @@ import type { TaskState } from "@a2a-js/sdk";
 import {
   HITL_APPROVE_OPTION_ID,
   HITL_REQUEST_TYPE,
+  type HitlQuestion,
   type HitlRequestData
 } from "@dynamicagents/g2a-protocol";
 import { SelfOrigin } from "../a2a/self-origin.js";
@@ -58,7 +59,7 @@ import { isTerminalState, TASK_RETENTION_MS } from "../ledger.js";
 import { reportEventType } from "../workflow/keys.js";
 import type { StepAnswer, StepJob } from "../workflow/types.js";
 import { compaction, SEND_REASONING } from "./history.js";
-import { latestStepJobId, readTurn } from "./outcome.js";
+import { latestStepJobId, readTurn, type PendingAsk } from "./outcome.js";
 import { StepJobs, type JobRow } from "./step-jobs.js";
 import type {
   SubAgentSettleContext,
@@ -75,10 +76,11 @@ import {
   ASK_USER_TOOL_NAME,
   CHECK_BACK_DESCRIPTION,
   CHECK_BACK_TOOL_NAME,
-  approvalAnswerText,
   askedUser,
   askUserToolFor,
   checkBackInputSchema,
+  formAnswerText,
+  questionAnswerText,
   searchHistoryTool,
   unrecordedApprovalText,
   SEARCH_HISTORY_TOOL_NAME
@@ -530,24 +532,27 @@ export abstract class StepAgent<
   async answerStepJob(stepJobId: string, answer: StepAnswer): Promise<void> {
     const request = this.ledger.row(stepJobId)?.request;
     if (!request) return;
-    let text: string;
-    if (request.artifact) {
-      // Filed before the job resumes, so an answer the workflow delivers again
-      // finds its note by the key and reads as filed, and a throw here leaves
-      // the answer to be delivered again.
-      text = approvalAnswerText(answer);
-      const filed = await fileApproval(this.env, request.artifact.id, {
-        key: request.requestId,
-        text,
-        approved: answer.optionId === HITL_APPROVE_OPTION_ID
-      });
-      if (!filed) text = unrecordedApprovalText(text);
-    } else {
-      const option = request.options?.find((o) => o.id === answer.optionId);
-      text = [option?.label ?? answer.optionId, answer.text]
-        .filter((part): part is string => Boolean(part))
-        .join("\n\n");
+    const texts: Record<string, string> = {};
+    for (const question of request.questions) {
+      const given = Object.hasOwn(answer.answers, question.id)
+        ? answer.answers[question.id]
+        : undefined;
+      if (!given) continue;
+      let text = questionAnswerText(question, given);
+      if (question.kind === "approval") {
+        // Filed before the job resumes, so an answer the workflow delivers
+        // again finds its note by the key and reads as filed, and a throw here
+        // leaves the answer to be delivered again.
+        const filed = await fileApproval(this.env, question.artifact.id, {
+          key: `${request.requestId}:${question.id}`,
+          text,
+          approved: given.optionIds?.[0] === HITL_APPROVE_OPTION_ID
+        });
+        if (!filed) text = unrecordedApprovalText(text);
+      }
+      texts[question.id] = text;
     }
+    const text = formAnswerText(request, texts);
     if (
       this.ledger.resume(stepJobId, { id: `answer:${request.requestId}`, text })
     ) {
@@ -740,28 +745,10 @@ export abstract class StepAgent<
     const outcome = readTurn(await this.getMessages(), stepJobId);
 
     if (outcome.ask) {
-      const requestId = `${stepJobId}:${outcome.ask.toolCallId}`;
-      const request: HitlRequestData =
-        outcome.ask.artifact !== undefined
-          ? this.#approval(
-              requestId,
-              outcome.ask.question,
-              outcome.ask.artifact
-            )
-          : {
-              type: HITL_REQUEST_TYPE,
-              requestId,
-              requestKind: "choice",
-              prompt: outcome.ask.question,
-              ...(outcome.ask.options
-                ? {
-                    options: outcome.ask.options.map((label, i) => ({
-                      id: `option_${i + 1}`,
-                      label
-                    }))
-                  }
-                : { allowFreeform: true })
-            };
+      const request = this.#form(
+        `${stepJobId}:${outcome.ask.toolCallId}`,
+        outcome.ask
+      );
       const n = this.ledger.park(stepJobId, request);
       if (n !== null) await this.#queueReport(stepJobId, n);
       return false;
@@ -781,27 +768,41 @@ export abstract class StepAgent<
   }
 
   /**
-   * An approval of an artifact: Approve, Reject, or a comment typed out. The
-   * prompt carries the link too, for a gatekeeper that renders no link of its
-   * own.
+   * The questions a turn asked, as the gatekeeper receives them. Ids are
+   * core's — `q1`, and `q1.o1` for its options — so the model never invents
+   * one, and an option's id is unique across the whole request.
    *
-   * The artifact was checked when the model named it — see
-   * {@link mayAskApproval} — and the origin is known while a job is open:
-   * `onStart` notes each open job's.
+   * A question naming an artifact is its approval. The artifact was checked
+   * when the model named it — see {@link mayAskApproval} — and the origin is
+   * known while a job is open: `onStart` notes each open job's.
    */
-  #approval(
-    requestId: string,
-    question: string,
-    artifact: string
-  ): HitlRequestData {
-    const url = artifactViewerUrl(this.#origin.require(), artifact);
+  #form(requestId: string, ask: PendingAsk): HitlRequestData {
+    const questions = ask.questions.map((q, i): HitlQuestion => {
+      const id = `q${i + 1}`;
+      const base = {
+        id,
+        prompt: q.question,
+        ...(q.header ? { header: q.header } : {})
+      };
+      if (q.artifact !== undefined) {
+        const url = artifactViewerUrl(this.#origin.require(), q.artifact);
+        return { ...base, kind: "approval", artifact: { id: q.artifact, url } };
+      }
+      if (q.options) {
+        return {
+          ...base,
+          kind: "choice",
+          options: q.options.map((o, j) => ({ id: `${id}.o${j + 1}`, ...o })),
+          ...(q.multiple ? { multiple: true } : {})
+        };
+      }
+      return { ...base, kind: "text" };
+    });
     return {
       type: HITL_REQUEST_TYPE,
       requestId,
-      requestKind: "approval",
-      prompt: `${question}\n\n${url}`,
-      allowFreeform: true,
-      artifact: { id: artifact, url }
+      ...(ask.prompt ? { prompt: ask.prompt } : {}),
+      questions
     };
   }
 

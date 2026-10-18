@@ -3,6 +3,7 @@ import { MockLanguageModelV3 } from "ai/test";
 // the provider package directly would make this published subpath depend on a
 // package core does not declare.
 import { simulateReadableStream } from "ai";
+import type { AskUserInput } from "../agent/tools.js";
 
 /**
  * Test doubles for the LLM, so a Think turn runs its real loop — tool
@@ -67,14 +68,26 @@ export function call(
   };
 }
 
-/** A step that asks the person something, through core's `ask_user`. */
+/** A step that asks the person one question, through core's `ask_user`. */
 export function askUser(question: string, options?: string[]): MockStep {
-  return call("ask_user", { question, ...(options ? { options } : {}) });
+  return askForm({
+    questions: [
+      {
+        question,
+        ...(options ? { options: options.map((label) => ({ label })) } : {})
+      }
+    ]
+  });
 }
 
 /** A step that asks the person to approve an artifact, through `ask_user`. */
 export function askApproval(question: string, artifact: string): MockStep {
-  return call("ask_user", { question, artifact });
+  return askForm({ questions: [{ question, artifact }] });
+}
+
+/** A step that asks the person several things at once, through `ask_user`. */
+export function askForm(input: AskUserInput): MockStep {
+  return call("ask_user", input);
 }
 
 /** What a scripted rule is shown of the call it answers. */

@@ -1,5 +1,5 @@
 import { Task, TaskState } from "@a2a-js/sdk";
-import type { HitlRequestData } from "@dynamicagents/g2a-protocol";
+import type { HitlAnswer, HitlRequestData } from "@dynamicagents/g2a-protocol";
 import type { GatekeeperIdentity } from "../a2a/verify.js";
 import { buildSubmittedTask } from "../a2a/notify.js";
 import type { TurnPushContext } from "../a2a/push.js";
@@ -35,8 +35,8 @@ export interface OwedAnswer {
   /** `answer:<messageId>`: what clears it. */
   id: string;
   requestId: string;
-  optionId?: string;
-  text?: string;
+  /** One per question, keyed by the question's id. */
+  answers: Record<string, HitlAnswer>;
 }
 
 /** One task row, less the blob. */

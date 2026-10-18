@@ -39,14 +39,15 @@ export interface TaskAgent {
    * Record a person's reply to a question one of this caller's Tasks asked, and
    * return whether this reply was taken: false for one naming no question the
    * Task is waiting on, which a reply arriving after the Task ended — or after
-   * an earlier copy of it was taken — finds. Idempotent on `messageId`, which
-   * the gatekeeper derives from the question.
+   * an earlier copy of it was taken — finds; `refused`, with why, for answers
+   * that do not fit the questions asked. Idempotent on `messageId`, which the
+   * gatekeeper derives from the question.
    */
   answerTask(input: {
     taskId: string;
     messageId: string;
     reply: HumanReply;
-  }): Promise<boolean>;
+  }): Promise<boolean | { refused: string }>;
 }
 
 export interface TaskListQuery {

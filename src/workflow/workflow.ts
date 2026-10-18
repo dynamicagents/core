@@ -276,14 +276,9 @@ export abstract class TaskWorkflow<
     this.#claim(`ask:${name}`);
     this.#steps.push(name);
     return this.#ask(step, params, `ask:${name}`, {
+      ...request,
       type: HITL_REQUEST_TYPE,
-      requestId: `${this.workflowId}:${name}`,
-      requestKind: request.kind,
-      prompt: request.prompt,
-      ...(request.options ? { options: request.options } : {}),
-      ...(request.allowFreeform !== undefined
-        ? { allowFreeform: request.allowFreeform }
-        : {})
+      requestId: `${this.workflowId}:${name}`
     });
   }
 

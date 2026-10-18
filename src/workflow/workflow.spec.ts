@@ -414,8 +414,10 @@ describe("G4: a step agent's question", () => {
     const task = await harness.send("ask:which one?");
     const question = await lastQuestion(harness, task.id);
     expect(question.type).toBe(HITL_REQUEST_TYPE);
-    expect(question.prompt).toBe("which one?");
-    await harness.answer(task.id, question.requestId, { optionId: "option_1" });
+    expect(question.questions[0]?.prompt).toBe("which one?");
+    await harness.answer(task.id, question.requestId, {
+      q1: { optionIds: ["q1.o1"] }
+    });
     const done = await harness.waitForTerminal(task.id);
     expect(done.state).toBe("TASK_STATE_COMPLETED");
     expect(done.text).toBe("Yes");
@@ -611,6 +613,29 @@ describe("a failed step is retried once", () => {
   });
 });
 
+describe("a pipeline's question under its own ids", () => {
+  /**
+   * `step.ask` takes the caller's ids, and an answers map is a plain object:
+   * read naively, these find `Object.prototype`'s and pass as answered.
+   */
+  it.each(["constructor", "toString"])(
+    "refuses an answer that leaves %s unanswered, and stays parked",
+    async (id) => {
+      const { harness } = setup(`ask-id-${id}`);
+      using _ = harness.interceptGatekeeper();
+      const task = await harness.send(`ask-id:${id}`);
+      const question = await lastQuestion(harness, task.id);
+      expect(question.questions[0]?.id).toBe(id);
+
+      await expect(
+        harness.answer(task.id, question.requestId, {})
+      ).rejects.toThrow(`question "${id}" has no answer`);
+      await pause(300);
+      expect(terminals(harness, task.id)).toHaveLength(0);
+    }
+  );
+});
+
 describe("G9 in miniature: the approval loop", () => {
   it("replans on a rejection's feedback, then acts once approved", async () => {
     const { harness } = setup("g9");
@@ -618,17 +643,21 @@ describe("G9 in miniature: the approval loop", () => {
     const task = await harness.send("approve:the thing");
 
     const first = await lastQuestion(harness, task.id, 1);
-    expect(first.requestKind).toBe("approval");
-    expect(first.prompt).toBe("plan 0 for the thing");
+    expect(first.questions[0]).toMatchObject({
+      kind: "choice",
+      id: "plan",
+      prompt: "plan 0 for the thing"
+    });
     await harness.answer(task.id, first.requestId, {
-      optionId: "reject",
-      text: "smaller"
+      plan: { optionIds: ["reject"], text: "smaller" }
     });
 
     const second = await lastQuestion(harness, task.id, 2);
-    expect(second.prompt).toBe("plan 1 for the thing (smaller)");
+    expect(second.questions[0]?.prompt).toBe("plan 1 for the thing (smaller)");
     expect(working(harness, task.id)).toContain("Replanning.");
-    await harness.answer(task.id, second.requestId, { optionId: "approve" });
+    await harness.answer(task.id, second.requestId, {
+      plan: { optionIds: ["approve"] }
+    });
 
     const done = await harness.waitForTerminal(task.id);
     expect(done.text).toBe("did plan 1 for the thing (smaller)");
@@ -795,7 +824,7 @@ describe("the host's own bookkeeping", () => {
       instance.ledger.resume(task.id, {
         id: "answer:cut",
         requestId: question.requestId,
-        optionId: "option_1"
+        answers: { q1: { optionIds: ["q1.o1"] } }
       });
       expect(instance.runs.wasAnswered(question.requestId)).toBe(false);
       // The gatekeeper's retry: not taken again, and it relays the one that was.
@@ -805,7 +834,10 @@ describe("the host's own bookkeeping", () => {
         reply: {
           kind: "answer",
           requestId: question.requestId,
-          answer: { answeredBy: "spec", optionId: "option_1" }
+          answer: {
+            answeredBy: "spec",
+            answers: { q1: { optionIds: ["q1.o1"] } }
+          }
         }
       });
       expect(taken).toBe(false);

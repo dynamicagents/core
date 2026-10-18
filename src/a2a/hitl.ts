@@ -23,13 +23,8 @@ import { dataPart, textPart } from "./parts.js";
  * contract, not an option an agent checks for. So any turn may ask.
  */
 
-/** Distributive, so the "an option, a text, or both" union survives the `Omit`. */
-type WithoutEnvelope<T> = T extends unknown
-  ? Omit<T, "type" | "requestId">
-  : never;
-
 /** An answer as the gatekeeper sent it, less the envelope that routed it here. */
-export type HumanAnswer = WithoutEnvelope<HitlResponseData>;
+export type HumanAnswer = Omit<HitlResponseData, "type" | "requestId">;
 
 /** What a message onto a parked Task can say. */
 export type HumanReply =
@@ -38,8 +33,49 @@ export type HumanReply =
   | { kind: "timeout"; requestId: string };
 
 /**
- * The `input-required` Task that asks: the question as text, for a client that
- * knows none of this, and as data, for the gatekeeper that renders it.
+ * The questions in words: each in turn, with every option, its description and
+ * example, and any link to look at — everything a gatekeeper that renders none
+ * of the data still has to show.
+ */
+export function formRequestText(request: HitlRequestData): string {
+  const numbered = request.questions.length > 1;
+  const blocks = request.questions.map((q, i) => {
+    const lines = [numbered ? `${i + 1}. ${q.prompt}` : q.prompt];
+    if (q.kind === "choice") {
+      q.options.forEach((o, j) => {
+        // a) to z), then numbers: `step.ask` bounds no question's options.
+        const mark = j < 26 ? String.fromCharCode(97 + j) : String(j + 1);
+        lines.push(
+          o.description
+            ? `   ${mark}) ${o.label} — ${o.description}`
+            : `   ${mark}) ${o.label}`
+        );
+        if (o.example) lines.push(indent(o.example, "      "));
+      });
+      lines.push(
+        q.multiple
+          ? "   (pick any, or answer in your own words)"
+          : "   (or answer in your own words)"
+      );
+    }
+    if (q.kind === "approval") {
+      lines.push(`   ${q.artifact.url}`, "   (approve, reject, or comment)");
+    }
+    return lines.join("\n");
+  });
+  return [request.prompt, ...blocks].filter(Boolean).join("\n\n");
+}
+
+function indent(text: string, by: string): string {
+  return text
+    .split("\n")
+    .map((line) => by + line)
+    .join("\n");
+}
+
+/**
+ * The `input-required` Task that asks: the questions as text, for a client that
+ * knows none of this, and as data, for the gatekeeper that renders them.
  *
  * An SDK `Task` rather than a `PlainTask`, because a data part cannot cross
  * Durable Object RPC typed — see {@link file://./task.ts}. It is built, stored and
@@ -60,7 +96,7 @@ export function buildInputRequiredTask(
       message: {
         messageId: request.requestId,
         role: Role.ROLE_AGENT,
-        parts: [textPart(request.prompt), dataPart(request)],
+        parts: [textPart(formRequestText(request)), dataPart(request)],
         contextId,
         taskId,
         metadata: undefined,
@@ -77,26 +113,39 @@ export function buildInputRequiredTask(
 
 const encoder = new TextEncoder();
 
+/** One question's answer: picked options, typed words, or both — never neither. */
+const optionId = z.string().min(1);
+
+const questionAnswerSchema = z.union([
+  z.object({
+    // A tuple of at least one, as the protocol types it.
+    optionIds: z.tuple([optionId], optionId),
+    text: z.string().min(1).optional()
+  }),
+  // `optionIds` refused outright rather than stripped: stripped, an empty or
+  // malformed pick beside words would read as words alone, and a bad
+  // approval as a comment.
+  z.object({ optionIds: z.undefined().optional(), text: z.string().min(1) })
+]);
+
 const answerSchema = z
   .object({
     type: z.literal(HITL_RESPONSE_TYPE),
     requestId: z.string().min(1),
-    optionId: z.string().min(1).optional(),
-    text: z.string().min(1).optional(),
-    answeredBy: z.string().min(1)
-  })
-  .refine((d) => d.optionId !== undefined || d.text !== undefined, {
-    message: "an answer carries an optionId, a text, or both"
+    answeredBy: z.string().min(1),
+    answers: z.record(z.string().min(1), questionAnswerSchema)
   })
   // The same bound a turn's own text is held to, for the same reason: this text
   // is appended to the session and read by every turn after it. Measured on the
-  // field rather than on the message, because this is what is kept — the text
-  // part beside it is the gatekeeper's rendering of the same answer, and the
-  // Worker holds the message as a whole to the same bound.
+  // fields rather than on the message, because these are what is kept — the
+  // text part beside them is the gatekeeper's rendering of the same answers,
+  // and the Worker holds the message as a whole to the same bound.
   .refine(
     (d) =>
-      d.text === undefined ||
-      encoder.encode(d.text).byteLength <= MAX_MESSAGE_TEXT_BYTES,
+      Object.values(d.answers).reduce(
+        (bytes, a) => bytes + (a.text ? encoder.encode(a.text).byteLength : 0),
+        0
+      ) <= MAX_MESSAGE_TEXT_BYTES,
     { message: "answer text exceeds the size limit" }
   );
 
@@ -118,7 +167,7 @@ export function readHumanReply(message: Message): HumanReply | null {
     const answer = answerSchema.safeParse(value);
     if (answer.success) {
       const { type: _type, requestId, ...rest } = answer.data;
-      return { kind: "answer", requestId, answer: rest as HumanAnswer };
+      return { kind: "answer", requestId, answer: rest };
     }
 
     const timeout = timeoutSchema.safeParse(value);

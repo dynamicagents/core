@@ -222,9 +222,7 @@ describe("the task store's writes", () => {
       const request: HitlRequestData = {
         type: HITL_REQUEST_TYPE,
         requestId: "t1:call-2",
-        requestKind: "choice",
-        prompt: "And now?",
-        allowFreeform: true
+        questions: [{ kind: "text", id: "q1", prompt: "And now?" }]
       };
       ledger.park(buildInputRequiredTask("t1", "c1", request), request);
       const stale = buildInputRequiredTask("t1", "c1", request);
@@ -264,14 +262,12 @@ describe("a task parked on a question", () => {
   const request: HitlRequestData = {
     type: HITL_REQUEST_TYPE,
     requestId: "t1:call-1",
-    requestKind: "choice",
-    prompt: "Which one?",
-    allowFreeform: true
+    questions: [{ kind: "text", id: "q1", prompt: "Which one?" }]
   };
   const answer: OwedAnswer = {
     id: "answer:m2",
     requestId: request.requestId,
-    text: "the first"
+    answers: { q1: { text: "the first" } }
   };
 
   it("parks a working task, and resumes it once", async () => {
