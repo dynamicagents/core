@@ -122,7 +122,10 @@ const questionAnswerSchema = z.union([
     optionIds: z.tuple([optionId], optionId),
     text: z.string().min(1).optional()
   }),
-  z.object({ text: z.string().min(1) })
+  // `optionIds` refused outright rather than stripped: stripped, an empty or
+  // malformed pick beside words would read as words alone, and a bad
+  // approval as a comment.
+  z.object({ optionIds: z.undefined().optional(), text: z.string().min(1) })
 ]);
 
 const answerSchema = z

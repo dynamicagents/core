@@ -613,6 +613,29 @@ describe("a failed step is retried once", () => {
   });
 });
 
+describe("a pipeline's question under its own ids", () => {
+  /**
+   * `step.ask` takes the caller's ids, and an answers map is a plain object:
+   * read naively, these find `Object.prototype`'s and pass as answered.
+   */
+  it.each(["constructor", "toString"])(
+    "refuses an answer that leaves %s unanswered, and stays parked",
+    async (id) => {
+      const { harness } = setup(`ask-id-${id}`);
+      using _ = harness.interceptGatekeeper();
+      const task = await harness.send(`ask-id:${id}`);
+      const question = await lastQuestion(harness, task.id);
+      expect(question.questions[0]?.id).toBe(id);
+
+      await expect(
+        harness.answer(task.id, question.requestId, {})
+      ).rejects.toThrow(`question "${id}" has no answer`);
+      await pause(300);
+      expect(terminals(harness, task.id)).toHaveLength(0);
+    }
+  );
+});
+
 describe("G9 in miniature: the approval loop", () => {
   it("replans on a rejection's feedback, then acts once approved", async () => {
     const { harness } = setup("g9");

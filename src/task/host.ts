@@ -734,7 +734,11 @@ function answersMismatch(
   answers: Record<string, HitlAnswer>
 ): string | undefined {
   for (const question of request.questions) {
-    const answer = answers[question.id];
+    // Own keys only: `step.ask` takes a caller's ids, and `constructor` would
+    // otherwise find `Object.prototype`'s and read as answered.
+    const answer = Object.hasOwn(answers, question.id)
+      ? answers[question.id]
+      : undefined;
     if (!answer) return `question "${question.id}" has no answer`;
     const picked = answer.optionIds ?? [];
     const offered = offeredOptions(question);

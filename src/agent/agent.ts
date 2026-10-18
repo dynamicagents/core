@@ -534,7 +534,9 @@ export abstract class StepAgent<
     if (!request) return;
     const texts: Record<string, string> = {};
     for (const question of request.questions) {
-      const given = answer.answers[question.id];
+      const given = Object.hasOwn(answer.answers, question.id)
+        ? answer.answers[question.id]
+        : undefined;
       if (!given) continue;
       let text = questionAnswerText(question, given);
       if (question.kind === "approval") {

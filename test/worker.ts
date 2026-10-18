@@ -797,6 +797,15 @@ export class TestTask extends TaskWorkflow<TestEnv> {
       return { reply: second };
     }
 
+    // One words question under a caller-chosen id; the reply is the answer.
+    const askId = after(text, "ask-id:");
+    if (askId !== undefined) {
+      const { answers } = await step.ask("ask-id", {
+        questions: [{ kind: "text", id: askId, prompt: `Asked as ${askId}` }]
+      });
+      return { reply: answers[askId]?.text ?? "" };
+    }
+
     const approve = after(text, "approve:");
     if (approve !== undefined) {
       let feedback = "";

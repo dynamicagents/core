@@ -282,6 +282,25 @@ describe("reading a reply", () => {
     }
   });
 
+  it("refuses an empty or malformed pick, even beside words", () => {
+    // Read as words alone, a bad pick would resume the task — and an approval's
+    // bad verdict would land as a comment.
+    for (const optionIds of [[], [""], "approve", null]) {
+      expect(
+        readHumanReply(
+          message(
+            data({
+              type: HITL_RESPONSE_TYPE,
+              requestId: question.requestId,
+              answers: { q1: { optionIds, text: "ship it" } },
+              answeredBy: "U123"
+            })
+          )
+        )
+      ).toBeNull();
+    }
+  });
+
   it("refuses an answer longer than a turn may be", () => {
     // It goes into the session and every later turn reads it, so it is held
     // to the bound a turn's own text is.
