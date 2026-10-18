@@ -43,7 +43,8 @@ export function formRequestText(request: HitlRequestData): string {
     const lines = [numbered ? `${i + 1}. ${q.prompt}` : q.prompt];
     if (q.kind === "choice") {
       q.options.forEach((o, j) => {
-        const mark = String.fromCharCode(97 + j);
+        // a) to z), then numbers: `step.ask` bounds no question's options.
+        const mark = j < 26 ? String.fromCharCode(97 + j) : String(j + 1);
         lines.push(
           o.description
             ? `   ${mark}) ${o.label} — ${o.description}`

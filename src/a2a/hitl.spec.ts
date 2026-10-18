@@ -163,6 +163,29 @@ describe("the questions in words", () => {
   });
 });
 
+describe("the options in words, past the alphabet", () => {
+  it("letters the first 26, and numbers the rest", () => {
+    const text = formRequestText({
+      type: HITL_REQUEST_TYPE,
+      requestId: "r-many",
+      questions: [
+        {
+          kind: "choice",
+          id: "q1",
+          prompt: "Which region?",
+          options: Array.from({ length: 28 }, (_, i) => ({
+            id: `q1.o${i + 1}`,
+            label: `Region ${i + 1}`
+          }))
+        }
+      ]
+    });
+    expect(text).toContain("   z) Region 26");
+    expect(text).toContain("   27) Region 27");
+    expect(text).not.toMatch(/\{\)|\|\)/);
+  });
+});
+
 describe("reading a reply", () => {
   it("reads an answer picked from the options", () => {
     const reply = readHumanReply(
