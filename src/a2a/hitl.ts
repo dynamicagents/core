@@ -53,9 +53,7 @@ export function formRequestText(request: HitlRequestData): string {
         if (o.example) lines.push(indent(o.example, "      "));
       });
       lines.push(
-        q.multiple
-          ? "   (pick any, or answer in your own words)"
-          : "   (or answer in your own words)"
+        q.multiple ? "   (pick any, or write another)" : "   (or write another)"
       );
     }
     if (q.kind === "approval") {

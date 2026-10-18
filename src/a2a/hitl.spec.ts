@@ -142,7 +142,7 @@ describe("the questions in words", () => {
         "Which repository did you mean?",
         "   a) org/api",
         "   b) org/web",
-        "   (or answer in your own words)"
+        "   (or write another)"
       ].join("\n")
     );
   });
@@ -155,7 +155,7 @@ describe("the questions in words", () => {
     expect(text).toContain("   a) Squash — One commit on main.");
     expect(text).toContain("      feat: forms (#1)");
     expect(text).toContain("2. Which checks must pass?");
-    expect(text).toContain("(pick any, or answer in your own words)");
+    expect(text).toContain("(pick any, or write another)");
     expect(text).toContain("3. What should the branch be called?");
     expect(text).toContain(
       "4. Approve the plan?\n   https://agents.example/a/tok"
