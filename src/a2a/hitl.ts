@@ -113,9 +113,12 @@ export function buildInputRequiredTask(
 const encoder = new TextEncoder();
 
 /** One question's answer: picked options, typed words, or both — never neither. */
+const optionId = z.string().min(1);
+
 const questionAnswerSchema = z.union([
   z.object({
-    optionIds: z.array(z.string().min(1)).min(1),
+    // A tuple of at least one, as the protocol types it.
+    optionIds: z.tuple([optionId], optionId),
     text: z.string().min(1).optional()
   }),
   z.object({ text: z.string().min(1) })

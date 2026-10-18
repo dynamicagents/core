@@ -446,7 +446,7 @@ describe("asking the caller", () => {
    * Refused out loud: a gatekeeper told nothing would show the question
    * answered while the task waits on, until something cancels it.
    */
-  it.each([
+  it.each<[string, Record<string, HitlAnswer>, RegExp]>([
     [
       "an option the question never offered",
       { q1: { optionIds: ["q1.o9"] } },
