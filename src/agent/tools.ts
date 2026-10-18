@@ -54,7 +54,7 @@ const askQuestionSchema = z.object({
     .max(MAX_ASK_OPTIONS)
     .optional()
     .describe(
-      "Answers they can pick from, when the question has a short list of them. Leave out to have them type an answer."
+      "Answers they can pick from, when the question has a short list of them. They can always write an answer of their own beside them, so list no 'Other' option. Leave out to have them type an answer."
     ),
   multiple: z
     .boolean()
@@ -117,7 +117,7 @@ export type AskUserInput = z.infer<typeof askUserInputSchema>;
  */
 export const askUserTool: Tool<AskUserInput> = tool({
   description:
-    "Ask the person you are working for, and stop. Put every question you need answered now in this one call: they answer them together, and the answers arrive as their next message. Give each option a short label, say what it means in its description, and show it in an example when seeing it helps; they can always answer in their own words instead. Use it when you cannot go on well without a decision or a fact only they have — not to announce what you are about to do, and not to confirm what you already know.",
+    "Ask the person you are working for, and stop. Put every question you need answered now in this one call: they answer them together, and the answers arrive as their next message. Give each option a short label, say what it means in its description, and show it in an example when seeing it helps. Use it when you cannot go on well without a decision or a fact only they have — not to announce what you are about to do, and not to confirm what you already know.",
   inputSchema: askUserInputSchema
 });
 
