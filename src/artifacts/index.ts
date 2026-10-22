@@ -12,7 +12,9 @@
  *
  * - **The object** — {@link Artifacts}, one per deployment, bound as `ARTIFACTS`.
  * - **The routes** — {@link handleArtifactRoute}, one delegation from a Worker's
- *   `fetch`, serving the viewer page and the event stream behind it.
+ *   `fetch`, serving the event stream and, on the link itself, the viewer page
+ *   to a client that asked for HTML or {@link artifactMarkdown} to one that did
+ *   not.
  * - **The emission** — {@link transcribeNote}, {@link settleTranscript} and
  *   {@link reopenTranscript}, which core's `StepAgent` already calls.
  *
@@ -80,6 +82,8 @@ export {
 } from "./events.js";
 
 export { ARTIFACT_VIEWER_HTML, artifactViewerResponse } from "./viewer.js";
+
+export { artifactMarkdown, artifactMarkdownResponse } from "./text.js";
 
 export {
   SESSION_TRANSCRIPT_KIND,

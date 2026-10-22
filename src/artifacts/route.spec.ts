@@ -48,12 +48,43 @@ describe("handleArtifactRoute", () => {
     // Any token: the page is the same bytes for every artifact and discovers
     // whether this one exists from the stream it opens. A round trip here would
     // buy nothing and cost every link one.
-    const response = await serve(`https://agent.example/a/${"a".repeat(40)}`);
+    //
+    // Asked for by `Accept`, which a browser always sends: HTML is the opt-in,
+    // so a request without it is the markdown case below.
+    const response = await serve(`https://agent.example/a/${"a".repeat(40)}`, {
+      headers: { accept: "text/html,application/xhtml+xml,*/*;q=0.8" }
+    });
     expect(response?.status).toBe(200);
     expect(response?.headers.get("content-type")).toContain("text/html");
     const page = await response!.text();
     expect(page).toContain("EventSource");
     expect(page).toContain('id="log"');
+  });
+
+  it("serves the artifact as markdown to a client that did not ask for HTML", async () => {
+    const token = await artifacts().createArtifact("session-transcript");
+    await artifacts().addEntry(token, {
+      label: "coder 1",
+      text: "opened the pull request"
+    });
+
+    // No `Accept` at all, which is what a shell inside a container sends.
+    const response = await serve(`https://agent.example/a/${token}`);
+
+    expect(response?.status).toBe(200);
+    expect(response?.headers.get("content-type")).toContain("text/markdown");
+    const document = await response!.text();
+    expect(document).toContain("# session-transcript");
+    expect(document).toContain("opened the pull request");
+    // The whole point: what the page would only ever have fetched is here.
+    expect(document).not.toContain("EventSource");
+  });
+
+  it("is a 404 for a markdown read whose token names nothing", async () => {
+    // The branch that costs a round trip is also the only one that can answer
+    // this: the page renders for any token and leaves it to the stream.
+    const response = await serve(`https://agent.example/a/${"f".repeat(40)}`);
+    expect(response?.status).toBe(404);
   });
 
   it("serves the stream for an artifact that exists", async () => {

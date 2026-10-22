@@ -332,6 +332,12 @@ ended in. A run that carries on an earlier one's work — a spec's `transcriptKe
 so — continues that page, and its link is not posted again. The agent's own progress
 is untouched: its step text is the conversation, not an account of one.
 
+**One link, two readers.** A browser gets that live page. A client that did not ask
+for HTML gets the same artifact as markdown from the same URL, so `curl`, a shell
+inside a container or an agent reading a link it was handed sees the notes rather than
+the page's markup. Nothing new is published by it: the token was already the whole of
+what a read needs.
+
 **Every agent binds `ARTIFACTS`**, and the wiring is a binding, a migration, an
 export and the route delegation below. A Durable Object that starts without the
 binding throws `ArtifactsNotBoundError` naming all of them — the delegation included,
