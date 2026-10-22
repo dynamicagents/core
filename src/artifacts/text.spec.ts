@@ -54,25 +54,41 @@ describe("wantsHtml", () => {
 });
 
 describe("artifactMarkdown", () => {
-  it("heads the document with the kind, and says nothing of a status it has not got", () => {
-    expect(artifactMarkdown(contents())).toMatch(/^# discovery-report\n/);
-    expect(artifactMarkdown(contents())).not.toContain("Status:");
+  it("opens with the kind in front matter, and no status key for a status it has not got", () => {
+    expect(artifactMarkdown(contents())).toMatch(
+      /^---\nartifact: "discovery-report"\n---\n/
+    );
+    expect(artifactMarkdown(contents())).not.toContain("status:");
   });
 
   it("names the status an artifact finished in", () => {
     expect(artifactMarkdown(contents({ status: "filed" }))).toContain(
-      "Status: filed"
+      'status: "filed"'
     );
   });
 
+  it("quotes and escapes both fields, since each is a writer's string", () => {
+    // `artifact: a: b` is not YAML, and nothing validates a kind or a status,
+    // so the quoting is what keeps the block parseable rather than a style.
+    const markdown = artifactMarkdown(
+      contents({ kind: 'a "kind": \\x', status: "filed: 3\nof 4\u0007" })
+    );
+
+    expect(markdown).toContain('artifact: "a \\"kind\\": \\\\x"');
+    // A break cannot stay a break inside a scalar, and a control character is
+    // outside YAML's printable set, so each goes in as an escape.
+    expect(markdown).toContain('status: "filed: 3\\nof 4\\x07"');
+  });
+
   it("says when nothing has been recorded", () => {
-    // A real state, and a bare heading reads as the reader's own mistake.
+    // A real state, and front matter with nothing under it reads as the
+    // reader's own mistake.
     expect(artifactMarkdown(contents())).toContain(
       "Nothing has been recorded on this artifact."
     );
   });
 
-  it("writes each note under who wrote it and when, with its text as recorded", () => {
+  it("writes each note under a frame line naming who wrote it and when, with its text as recorded", () => {
     const markdown = artifactMarkdown(
       contents({
         entries: [
@@ -87,12 +103,42 @@ describe("artifactMarkdown", () => {
       })
     );
 
-    expect(markdown).toContain("## report · 2026-10-22T09:30:00.000Z");
+    expect(markdown).toContain("**report** · 2026-10-22T09:30:00.000Z");
     expect(markdown).toContain("# The run\n\nIt ran.");
-    expect(markdown).toContain("## coder 1 · 2026-10-22T09:30:00.000Z");
+    expect(markdown).toContain("**coder 1** · 2026-10-22T09:30:00.000Z");
     expect(markdown).not.toContain(
       "Nothing has been recorded on this artifact."
     );
+  });
+
+  it("writes no heading of its own, so every heading in the document is a note's", () => {
+    // The property the whole shape exists for: a reader needs no rule about
+    // levels, because the document's own words are front matter, a rule and a
+    // bold line. A note that writes `#` is therefore safe to write it.
+    const markdown = artifactMarkdown(
+      contents({
+        status: "filed",
+        entries: [
+          {
+            sequence: 1,
+            label: "report",
+            text: "# Run of 2026-10-22\n\n## What was attempted\n\nThree candidates, one filed.",
+            at: AT
+          },
+          {
+            sequence: 2,
+            label: "coder 1",
+            text: "ran the suite",
+            at: AT,
+            detail: { title: "Bash", status: "running" }
+          }
+        ]
+      })
+    );
+
+    expect(
+      markdown.split("\n").filter((line) => /^#{1,6} /.test(line))
+    ).toEqual(["# Run of 2026-10-22", "## What was attempted"]);
   });
 
   it("takes a card's title and status, and leaves its sections out", () => {
@@ -115,7 +161,7 @@ describe("artifactMarkdown", () => {
     );
 
     expect(markdown).toContain(
-      "## coder 1 · Bash · ok · 2026-10-22T09:30:00.000Z"
+      "**coder 1** · Bash · ok · 2026-10-22T09:30:00.000Z"
     );
     // A card is an affordance of the page, and a section body is behind it.
     // What the omission costs a transcript is in `./text.ts`.
@@ -140,15 +186,17 @@ describe("artifactMarkdown", () => {
       })
     );
 
-    expect(markdown).toContain("## coder 1 · ok · 2026-10-22T09:30:00.000Z");
+    expect(markdown).toContain("**coder 1** · ok · 2026-10-22T09:30:00.000Z");
     expect(markdown).not.toContain("· ·");
   });
 
   it("writes the whole document in one order, and ends with a newline", () => {
-    // One assertion for what `toContain` cannot see: that the status precedes
-    // the notes, that a heading reads label, title, status and then the time,
-    // that the notes are in the order recorded, and that a document somebody
-    // pipes into a file ends the way a file does.
+    // One assertion for what `toContain` cannot see: that the front matter
+    // precedes the notes and carries its fields in one order, that a frame line
+    // reads label, title, status and then the time, that the rule separating
+    // two notes is there and the one before the first note is the front
+    // matter's own closing delimiter, that the notes are in the order recorded,
+    // and that a document somebody pipes into a file ends the way a file does.
     expect(
       artifactMarkdown(
         contents({
@@ -167,11 +215,11 @@ describe("artifactMarkdown", () => {
       )
     ).toBe(
       [
-        "# discovery-report",
-        "Status: filed",
-        "## report · 2026-10-22T09:30:00.000Z",
+        '---\nartifact: "discovery-report"\nstatus: "filed"\n---',
+        "**report** · 2026-10-22T09:30:00.000Z",
         "It ran.",
-        "## coder 1 · Bash · ok · 2026-10-22T09:30:00.000Z",
+        "---",
+        "**coder 1** · Bash · ok · 2026-10-22T09:30:00.000Z",
         "It passed."
       ].join("\n\n") + "\n"
     );
@@ -188,7 +236,7 @@ describe("artifactMarkdownResponse", () => {
     );
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(response.headers.get("x-robots-tag")).toBe("noindex, nofollow");
-    expect(await response.text()).toContain("Status: filed");
+    expect(await response.text()).toContain('status: "filed"');
   });
 
   it("names both reasons a token holds nothing", async () => {

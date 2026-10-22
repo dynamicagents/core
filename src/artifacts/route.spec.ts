@@ -74,7 +74,7 @@ describe("handleArtifactRoute", () => {
     expect(response?.status).toBe(200);
     expect(response?.headers.get("content-type")).toContain("text/markdown");
     const document = await response!.text();
-    expect(document).toContain("# session-transcript");
+    expect(document).toContain('artifact: "session-transcript"');
     expect(document).toContain("opened the pull request");
     // The whole point: what the page would only ever have fetched is here.
     expect(document).not.toContain("EventSource");
