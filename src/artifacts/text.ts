@@ -4,7 +4,7 @@
  * ## Why a second representation exists
  *
  * The page at `/a/<token>` is a script that fills itself from the stream behind
- * it — see {@link file://./viewer.ts ARTIFACT_VIEWER_HTML} — and it is served
+ * it ({@link file://./viewer.ts ARTIFACT_VIEWER_HTML}), and it is served
  * without the store being read at all. So a client that does not run scripts
  * gets markup carrying none of the artifact: `curl`, a shell inside a container,
  * anything piping a link into a file. That is not a gap in the page, it is the
@@ -20,10 +20,20 @@
  * ## Kind-generic, like the page
  *
  * Nothing here learns what a kind means, so a plan, a report and a session
- * transcript are the same document with different notes in it. An entry's card
- * ({@link file://./detail.ts ArtifactEntryDetail}) contributes its title and
- * nothing else: a card is an affordance of the page, where it opens and closes,
- * and its sections are already in the note a writer recorded.
+ * transcript are the same document with different notes in it.
+ *
+ * **An entry's card contributes its title and nothing else.** A card
+ * ({@link file://./detail.ts ArtifactEntryDetail}) is an affordance of the
+ * page, where a reader opens the one they want and leaves the rest shut. A
+ * document has no such thing, so every section body would be in front of every
+ * reader, each as large as
+ * {@link file://./detail.ts ENTRY_SECTION_MAX_CHARS} allows.
+ *
+ * **What that costs falls on the transcript kind**, and is worth stating rather
+ * than discovering. A sub-agent's card keeps a tool's input, output or error in
+ * a section and records only a summary of the call as the note, so a transcript
+ * read here says which tool ran and not what it answered. A kind whose notes
+ * are prose, a plan or a report, loses nothing.
  */
 
 import type { ArtifactContents } from "./do.js";
@@ -52,11 +62,18 @@ export function wantsHtml(accept: string | null): boolean {
     .some((range) => range.split(";")[0]!.trim().toLowerCase() === HTML);
 }
 
-/** What a read serves when the client did not ask for the page. */
-const MARKDOWN_HEADERS = {
-  "content-type": "text/markdown; charset=utf-8",
-  // Both for the reason the page sets them: the token is in the address, and
-  // what is behind it changes while a run is going and ages out afterwards.
+/**
+ * What every answer here carries beside its content type, for the reason
+ * {@link file://./viewer.ts artifactViewerResponse} sets the same two on the
+ * page: the token is in the address, and what is behind it changes while a run
+ * is going and ages out afterwards.
+ *
+ * **No `Vary: Accept` beside them.** A representation chosen by a request
+ * header needs one so that a cache keys on it, and `no-store` already says the
+ * stronger thing: neither answer may be stored, so none can be served back to
+ * the reader that asked for the other.
+ */
+const UNCACHED_AND_UNINDEXED = {
   "cache-control": "no-store",
   "x-robots-tag": "noindex, nofollow"
 };
@@ -70,9 +87,9 @@ const MARKDOWN_HEADERS = {
  * tell one note's text from the next one's, and a note in a labelled column on
  * the page is an undifferentiated paragraph here without it.
  *
- * An artifact with no notes says so. It is a real state — opened, nothing
- * recorded yet, or everything swept — and a bare heading reads as a reader's
- * own mistake.
+ * An artifact with no notes says so. It is a real state: opened with nothing
+ * recorded yet, or everything swept. A bare heading reads as a reader's own
+ * mistake.
  */
 export function artifactMarkdown(contents: ArtifactContents): string {
   const parts = [`# ${contents.kind}`];
@@ -100,7 +117,8 @@ export function artifactMarkdown(contents: ArtifactContents): string {
  * they lead opposite places: a wrong link is worth re-reading, and an artifact
  * past its retention is gone and worth nobody's time. The page says the same
  * thing once its stream answers, so this is the one branch where the text
- * reader has to be told what a browser would have been shown.
+ * reader has to be told what a browser would have been shown. Plain text, since
+ * a sentence is not a document.
  */
 export function artifactMarkdownResponse(
   contents: ArtifactContents | null
@@ -112,13 +130,16 @@ export function artifactMarkdownResponse(
       {
         status: 404,
         headers: {
-          ...MARKDOWN_HEADERS,
+          ...UNCACHED_AND_UNINDEXED,
           "content-type": "text/plain; charset=utf-8"
         }
       }
     );
   }
   return new Response(artifactMarkdown(contents), {
-    headers: MARKDOWN_HEADERS
+    headers: {
+      ...UNCACHED_AND_UNINDEXED,
+      "content-type": "text/markdown; charset=utf-8"
+    }
   });
 }

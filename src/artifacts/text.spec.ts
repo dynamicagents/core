@@ -95,7 +95,7 @@ describe("artifactMarkdown", () => {
     );
   });
 
-  it("takes a card's title and leaves its sections to the note", () => {
+  it("takes a card's title and leaves its sections out", () => {
     const markdown = artifactMarkdown(
       contents({
         entries: [
@@ -115,7 +115,8 @@ describe("artifactMarkdown", () => {
     );
 
     expect(markdown).toContain("## coder 1 · Bash · 2026-10-22T09:30:00.000Z");
-    // A card is an affordance of the page: its sections are not the note.
+    // A card is an affordance of the page, and a section body is behind it.
+    // What the omission costs a transcript is in `./text.ts`.
     expect(markdown).not.toContain("317 passed");
   });
 
@@ -143,9 +144,13 @@ describe("artifactMarkdownResponse", () => {
     const response = artifactMarkdownResponse(null);
 
     expect(response.status).toBe(404);
+    // Plain, since a sentence is not a document, and otherwise what the
+    // artifact itself answers with.
     expect(response.headers.get("content-type")).toBe(
       "text/plain; charset=utf-8"
     );
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("x-robots-tag")).toBe("noindex, nofollow");
     const said = await response.text();
     expect(said).toContain("the link is wrong");
     expect(said).toContain("retention");
