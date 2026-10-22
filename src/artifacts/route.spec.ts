@@ -85,6 +85,10 @@ describe("handleArtifactRoute", () => {
     // this: the page renders for any token and leaves it to the stream.
     const response = await serve(`https://agent.example/a/${"f".repeat(40)}`);
     expect(response?.status).toBe(404);
+    // Which 404 it is, because the object answers one of its own for any path
+    // it does not recognise: a status alone would pass for a page branch that
+    // had fallen through to the stream.
+    expect(await response!.text()).toContain("the link is wrong");
   });
 
   it("serves the stream for an artifact that exists", async () => {

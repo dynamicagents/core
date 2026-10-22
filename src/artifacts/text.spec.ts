@@ -120,8 +120,51 @@ describe("artifactMarkdown", () => {
     expect(markdown).not.toContain("317 passed");
   });
 
-  it("ends with a newline, for a document somebody pipes into a file", () => {
-    expect(artifactMarkdown(contents())).toMatch(/\n$/);
+  it("takes a card with no title under the label alone", () => {
+    // Every tool *result* card is `{ ref, status, sections }`: the half that
+    // completes a card carries no title of its own.
+    const markdown = artifactMarkdown(
+      contents({
+        entries: [
+          {
+            sequence: 1,
+            label: "coder 1",
+            text: "317 passed",
+            at: AT,
+            detail: { ref: "t1", status: "ok" }
+          }
+        ]
+      })
+    );
+
+    expect(markdown).toContain("## coder 1 · 2026-10-22T09:30:00.000Z");
+    expect(markdown).not.toContain("· ·");
+  });
+
+  it("writes the whole document in one order, and ends with a newline", () => {
+    // One assertion for what `toContain` cannot see: that the status precedes
+    // the notes, that the notes are in the order recorded, and that a document
+    // somebody pipes into a file ends the way a file does.
+    expect(
+      artifactMarkdown(
+        contents({
+          status: "filed",
+          entries: [
+            { sequence: 1, label: "report", text: "It ran.", at: AT },
+            { sequence: 2, label: "coder 1", text: "It passed.", at: AT }
+          ]
+        })
+      )
+    ).toBe(
+      [
+        "# discovery-report",
+        "Status: filed",
+        "## report · 2026-10-22T09:30:00.000Z",
+        "It ran.",
+        "## coder 1 · 2026-10-22T09:30:00.000Z",
+        "It passed."
+      ].join("\n\n") + "\n"
+    );
   });
 });
 

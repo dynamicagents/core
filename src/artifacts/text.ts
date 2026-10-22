@@ -14,8 +14,10 @@
  *
  * **One link, two readers.** A person opens it and reads the page; an agent
  * opens it and reads this. Nothing new is published and no authorization
- * changes: the token was already the whole of what a read needs, and a browser
- * already showed the same notes to whoever held it.
+ * changes, and that is checkable rather than a claim about intent: the stream
+ * at `/a/<token>/events` already replays every note to any client holding the
+ * token, script or no script, so this adds a shape for what was reachable and
+ * not a reader who could not reach it.
  *
  * ## Kind-generic, like the page
  *
@@ -86,6 +88,18 @@ const UNCACHED_AND_UNINDEXED = {
  * carries the label and the ISO time because a reader of a transcript has to
  * tell one note's text from the next one's, and a note in a labelled column on
  * the page is an undifferentiated paragraph here without it.
+ *
+ * A note's text goes in as recorded, headings and all, and that is one place
+ * this document and the page part company: the page demotes a note's own
+ * headings by two so none of them reaches its structure (`markdown`, inside
+ * {@link file://./viewer.ts ARTIFACT_VIEWER_HTML}), while here a note that
+ * writes `## ` reads as a sibling of the heading naming its writer. Rewriting
+ * a writer's markdown is the alternative, and it would make what a reader
+ * greps differ from what was recorded.
+ *
+ * `locked` is not written out, for the reason the page's ready frame does not
+ * carry it either: {@link file://./store.ts ArtifactStore.lock} always sets a
+ * status, so `Status:` is already there whenever it would have said anything.
  *
  * An artifact with no notes says so. It is a real state: opened with nothing
  * recorded yet, or everything swept. A bare heading reads as a reader's own

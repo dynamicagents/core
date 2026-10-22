@@ -54,16 +54,20 @@ export async function handleArtifactRoute(
   const stub = requireArtifactsStub(env);
 
   if (matched.route === "page") {
-    // The page is the same bytes for every artifact and knows its own token
-    // from the URL, so it is served without consulting the object at all — a
-    // link opened for a swept or mistyped token renders and then says so,
-    // rather than costing a round trip to decide between two responses.
     if (wantsHtml(request.headers.get("accept"))) {
+      // The page is the same bytes for every artifact and knows its own token
+      // from the URL, so it is served without consulting the object at all — a
+      // link opened for a swept or mistyped token renders and then says so,
+      // rather than costing a round trip to decide between two responses.
       return artifactViewerResponse();
     }
     // The text reader pays that round trip, because it has nothing that could
     // discover the artifact afterwards: the page learns what it holds from the
     // stream it opens, and this answer is the whole of what its reader gets.
+    // It is also the wider read of the two, by more than the hop:
+    // {@link file://./do.ts Artifacts.readArtifact} carries every entry's card
+    // across the boundary and the document keeps only its title, so a long
+    // transcript moves far more than it prints.
     return artifactMarkdownResponse(await stub.readArtifact(matched.token));
   }
 
