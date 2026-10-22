@@ -24,18 +24,20 @@
  * Nothing here learns what a kind means, so a plan, a report and a session
  * transcript are the same document with different notes in it.
  *
- * **An entry's card contributes its title and nothing else.** A card
- * ({@link file://./detail.ts ArtifactEntryDetail}) is an affordance of the
- * page, where a reader opens the one they want and leaves the rest shut. A
- * document has no such thing, so every section body would be in front of every
- * reader, each as large as
+ * **An entry's card contributes its title and its status, and no section.**
+ * Those two are what a card
+ * ({@link file://./detail.ts ArtifactEntryDetail}) shows a reader who has not
+ * opened it, and they are a line. A section body is behind the disclosure: a
+ * card is an affordance of the page, where a reader opens the one they want and
+ * leaves the rest shut, and a document has no such thing, so every body would
+ * be in front of every reader, each as large as
  * {@link file://./detail.ts ENTRY_SECTION_MAX_CHARS} allows.
  *
  * **What that costs falls on the transcript kind**, and is worth stating rather
  * than discovering. A sub-agent's card keeps a tool's input, output or error in
  * a section and records only a summary of the call as the note, so a transcript
- * read here says which tool ran and not what it answered. A kind whose notes
- * are prose, a plan or a report, loses nothing.
+ * read here says which tool ran and how it ended, and not what it answered. A
+ * kind whose notes are prose, a plan or a report, loses nothing.
  */
 
 import type { ArtifactContents } from "./do.js";
@@ -89,6 +91,22 @@ const UNCACHED_AND_UNINDEXED = {
  * tell one note's text from the next one's, and a note in a labelled column on
  * the page is an undifferentiated paragraph here without it.
  *
+ * A card's status goes in as recorded, the value
+ * {@link file://./detail.ts EntryStatus} names, rather than in the page's words
+ * for a reader who cannot see its glyph (`SPOKEN`, inside
+ * {@link file://./viewer.ts ARTIFACT_VIEWER_HTML}). The artifact's own status is
+ * a writer's string written out unchanged, so a translation table for the card's
+ * would be a second vocabulary for the same field, in two files, with nothing
+ * checking that they agree.
+ *
+ * **A call and its result are two headings here, where the page folds them into
+ * one card.** Both halves carry the `ref` the page folds on
+ * ({@link file://./detail.ts ArtifactEntryDetail}), and this document is the log
+ * in the order it was recorded, so a tool that ran reads as a `running` heading
+ * and then the heading its outcome arrived under. Folding would mean holding
+ * entries back to see whether a later one completes them, and the status of a
+ * call nothing completed is then the news.
+ *
  * A note's text goes in as recorded, headings and all, and that is one place
  * this document and the page part company: the page demotes a note's own
  * headings by two so none of them reaches its structure (`markdown`, inside
@@ -112,7 +130,7 @@ export function artifactMarkdown(contents: ArtifactContents): string {
     parts.push("Nothing has been recorded on this artifact.");
   }
   for (const entry of contents.entries) {
-    const heading = [entry.label, entry.detail?.title]
+    const heading = [entry.label, entry.detail?.title, entry.detail?.status]
       .filter(Boolean)
       .concat(new Date(entry.at).toISOString())
       .join(" · ");
