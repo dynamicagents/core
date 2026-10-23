@@ -36,18 +36,30 @@ export interface TaskAgent {
   listTasks?(query: TaskListQuery): Promise<TaskListPage>;
 
   /**
-   * Record a person's reply to a question one of this caller's Tasks asked, and
-   * return whether this reply was taken: false for one naming no question the
-   * Task is waiting on, which a reply arriving after the Task ended — or after
-   * an earlier copy of it was taken — finds; `refused`, with why, for answers
+   * Record a person's reply to a request one of this caller's Tasks asked, and
+   * return whether this reply was taken: false for one naming no request the
+   * Task still has open, which a reply arriving after the Task ended, or after
+   * an earlier copy of it was taken, finds; `refused`, with why, for answers
    * that do not fit the questions asked. Idempotent on `messageId`, which the
-   * gatekeeper derives from the question.
+   * gatekeeper derives from the request.
    */
   answerTask(input: {
     taskId: string;
     messageId: string;
     reply: HumanReply;
   }): Promise<boolean | { refused: string }>;
+
+  /**
+   * Record a message that joins one of this caller's open Tasks: the next
+   * message of the same conversation, for the work already running. `closed`
+   * when the Task has ended, or takes no such message now: the caller starts a
+   * new Task with it instead. Idempotent on `messageId`.
+   */
+  joinTask(input: {
+    taskId: string;
+    messageId: string;
+    text: string;
+  }): Promise<"joined" | "closed">;
 }
 
 export interface TaskListQuery {

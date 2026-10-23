@@ -1,6 +1,11 @@
 import type { HitlRequestData } from "@dynamicagents/g2a-protocol";
 import { isTerminalState, type Sql, type Transaction } from "../ledger.js";
-import type { StepJob, StepJobReport } from "../workflow/types.js";
+import type {
+  CompleteOutcome,
+  JobEvent,
+  StepJob,
+  StepJobReport
+} from "../workflow/types.js";
 
 /**
  * A step agent's job ledger, on the object's own SQLite: the jobs task
@@ -15,15 +20,24 @@ import type { StepJob, StepJobReport } from "../workflow/types.js";
  *    workflow still hears `completed`.
  *  - **A transition and the report it owes are one write.** Both commit in one
  *    transaction, so a failure leaves either neither or both, and the start-up
- *    sweep sends what is unsent. Reports are numbered, because the workflow
- *    waits for report `n` under an event type of its own.
+ *    sweep sends what is unsent. Reports are numbered from 0: the workflow
+ *    reads them in that order beside the host's inputs, under one event type,
+ *    and pulls a number it has not seen.
+ *  - **A job asks as often as it needs.** Each request is a row of its own,
+ *    open until answered or expired, and none holds anything else back: a
+ *    result, an answer and a joined message each get their turn in Think's
+ *    order, whatever else is open.
+ *  - **A job finishes when its workflow says so.** It reports `idle` once
+ *    nothing runs for it; only the workflow knows whether an input is already
+ *    on its way, so it asks for {@link StepJobs.complete}, which holds only
+ *    while the job is still idle with nothing open.
  *  - **A closed job's reports wait for its work to stop,** and so does its
  *    task's settle hook. The workflow retries a failed step as soon as its
  *    report lands, and the retry would otherwise run beside a run or a wake
  *    the stop missed; the hook releases what that work runs in.
  *  - **Open work keeps a job alive across turns.** A detached sub-agent run or
- *    a scheduled wake is a work row, and settlement asks this table — not the
- *    model — whether the job is finished.
+ *    a scheduled wake is a work row, and settlement asks this table, not the
+ *    model, whether the job is idle.
  *
  * `CREATE TABLE IF NOT EXISTS`, and storage outlives a deploy: a caller's
  * object keeps these rows across every version of this code. So the schema may
@@ -53,7 +67,7 @@ export interface WorkRow {
   settled: boolean;
 }
 
-/** A turn a job owes — a follow-up, or an answer — until it is submitted. */
+/** A follow-up turn a job owes until it is submitted. */
 export interface FollowUp {
   /** The user message's id, and the submission's idempotency key. */
   id: string;
@@ -70,11 +84,10 @@ export interface JobRow {
   /** What the workflow started it with, or `null` for a job stopped unstarted. */
   job: StepJob | null;
   submissionId: string | null;
-  /** The question the job is parked on, or `null` when it is not parked. */
-  request: HitlRequestData | null;
-  /** An answer the job resumed on, whose turn is not yet submitted. */
-  answer: FollowUp | null;
 }
+
+/** Where a request stands: waiting, or closed by its answer or its expiry. */
+export type RequestState = "pending" | "answered" | "expired";
 
 interface StoredJob {
   step_job_id: string;
@@ -149,6 +162,15 @@ export class StepJobs {
     )`;
     this.sql`CREATE INDEX IF NOT EXISTS da_step_work_job
       ON da_step_work (step_job_id, open)`;
+    this.sql`CREATE TABLE IF NOT EXISTS da_step_job_requests (
+      request_id TEXT PRIMARY KEY,
+      step_job_id TEXT NOT NULL,
+      request_json TEXT NOT NULL,
+      state TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )`;
+    this.sql`CREATE INDEX IF NOT EXISTS da_step_job_requests_job
+      ON da_step_job_requests (step_job_id, state)`;
     this.sql`CREATE TABLE IF NOT EXISTS da_step_task_hooks (
       task_id TEXT PRIMARY KEY,
       state INTEGER NOT NULL,
@@ -214,17 +236,31 @@ export class StepJobs {
   }
 
   /**
-   * Move a job to `working`. `"closed"` is the caller's signal to stop the
-   * turn: the job has ended, so nothing its turn does can count. Anything else
-   * is `"ok"`, because a recovered submission reports `running` again.
+   * A turn of the job is running. `closed` is the caller's signal to stop it:
+   * the job has ended, so nothing its turn does can count. A job that was idle
+   * goes back to work and owes a `working` report in the same write, whose
+   * number is `report`; a recovered submission reports `running` again, and
+   * finds the job working already.
    */
-  markWorking(stepJobId: string): "ok" | "closed" {
+  markWorking(stepJobId: string): { closed: boolean; report: number | null } {
     this.#ensure();
-    this.sql`UPDATE da_step_jobs
-      SET state = 'working', updated_at = ${Date.now()}
-      WHERE step_job_id = ${stepJobId} AND state = 'submitted'`;
-    const row = this.#stored(stepJobId);
-    return row && isTerminalState(row.state) ? "closed" : "ok";
+    return this.transaction(() => {
+      const woke = this.sql<{ step_job_id: string }>`
+        UPDATE da_step_jobs SET state = 'working', updated_at = ${Date.now()}
+        WHERE step_job_id = ${stepJobId} AND state = 'idle'
+        RETURNING step_job_id`;
+      if (woke.length > 0) {
+        return {
+          closed: false,
+          report: this.#addReport(stepJobId, { kind: "working" })
+        };
+      }
+      this.sql`UPDATE da_step_jobs
+        SET state = 'working', updated_at = ${Date.now()}
+        WHERE step_job_id = ${stepJobId} AND state = 'submitted'`;
+      const row = this.#stored(stepJobId);
+      return { closed: !row || isTerminalState(row.state), report: null };
+    });
   }
 
   /**
@@ -237,10 +273,9 @@ export class StepJobs {
     return this.transaction(() => {
       const rows = this.sql<{ step_job_id: string }>`
         UPDATE da_step_jobs
-        SET state = 'canceled', request_json = NULL, answer_json = NULL,
-            updated_at = ${Date.now()}
+        SET state = 'canceled', updated_at = ${Date.now()}
         WHERE step_job_id = ${stepJobId}
-          AND state IN ('submitted', 'working', 'input-required')
+          AND state IN ('submitted', 'working', 'idle')
         RETURNING step_job_id`;
       this.sql`UPDATE da_step_job_reports SET sent = 1
         WHERE step_job_id = ${stepJobId}`;
@@ -249,69 +284,132 @@ export class StepJobs {
   }
 
   /**
-   * Park a working job on its question, and owe the question's report in the
-   * same write. Only from `working`: a job asks again only after an answer has
-   * resumed it, so a park run twice finds it parked and owes nothing twice.
+   * Record a request a turn asked, and owe its `asked` report in the same
+   * write, answering the report's number. A request already recorded owes
+   * nothing twice: a turn's settlement runs again after an eviction.
    */
-  park(stepJobId: string, request: HitlRequestData): number | null {
+  ask(stepJobId: string, request: HitlRequestData): number | null {
     this.#ensure();
     return this.transaction(() => {
-      const rows = this.sql<{ step_job_id: string }>`
-        UPDATE da_step_jobs
-        SET state = 'input-required', request_json = ${JSON.stringify(request)},
-            updated_at = ${Date.now()}
-        WHERE step_job_id = ${stepJobId} AND state = 'working'
-        RETURNING step_job_id`;
+      if (this.closed(stepJobId)) return null;
+      const rows = this.sql<{ request_id: string }>`
+        INSERT OR IGNORE INTO da_step_job_requests
+          (request_id, step_job_id, request_json, state, created_at)
+        VALUES (${request.requestId}, ${stepJobId}, ${JSON.stringify(request)},
+                'pending', ${Date.now()})
+        RETURNING request_id`;
       if (rows.length === 0) return null;
-      return this.#addReport(stepJobId, { state: "input-required", request });
+      return this.#addReport(stepJobId, { kind: "asked", request });
     });
   }
 
   /**
-   * Take a parked job back to `working` on `answer`, answering whether this
-   * call did. Owes the answer's turn in the same statement, so a submit that
-   * fails or an eviction before it leaves the turn to be sent rather than a job
-   * `working` with no question left to answer.
+   * Nothing runs for a working job any more: move it to `idle`, owing the
+   * report that says so, with the requests still open and what it would end
+   * on. Answers the report's number, or `null` for a job not working.
    */
-  resume(stepJobId: string, answer: FollowUp): boolean {
-    this.#ensure();
-    return (
-      this.sql<{ step_job_id: string }>`
-        UPDATE da_step_jobs
-        SET state = 'working', request_json = NULL,
-            answer_json = ${JSON.stringify(answer)}, updated_at = ${Date.now()}
-        WHERE step_job_id = ${stepJobId} AND state = 'input-required'
-        RETURNING step_job_id`.length > 0
-    );
-  }
-
-  /** The answer's turn was submitted. */
-  answered(stepJobId: string, id: string): void {
-    this.#ensure();
-    this.sql`UPDATE da_step_jobs SET answer_json = NULL
-      WHERE step_job_id = ${stepJobId}
-        AND json_extract(answer_json, '$.id') = ${id}`;
-  }
-
-  /**
-   * The one terminal transition, and the report it owes, in one write. Answers
-   * the report's number, or `null` when the job had already ended.
-   */
-  settle(
-    stepJobId: string,
-    report: Extract<StepJobReport, { state: "completed" | "failed" }>
-  ): number | null {
+  idle(stepJobId: string, reply: string): number | null {
     this.#ensure();
     return this.transaction(() => {
       const rows = this.sql<{ step_job_id: string }>`
-        UPDATE da_step_jobs
-        SET state = ${report.state}, request_json = NULL, answer_json = NULL,
-            updated_at = ${Date.now()}
-        WHERE step_job_id = ${stepJobId}
-          AND state IN ('submitted', 'working', 'input-required')
+        UPDATE da_step_jobs SET state = 'idle', updated_at = ${Date.now()}
+        WHERE step_job_id = ${stepJobId} AND state = 'working'
         RETURNING step_job_id`;
       if (rows.length === 0) return null;
-      return this.#addReport(stepJobId, report);
+      return this.#addReport(stepJobId, {
+        kind: "idle",
+        open: this.openRequests(stepJobId),
+        reply
+      });
+    });
+  }
+
+  /**
+   * Finish an idle job, on its workflow's word that no input is on its way.
+   * Holds only while the job is still idle with no request and no work open:
+   * anything that woke it since keeps it going, and the workflow reads the
+   * report that says so. The reply is the one its last `idle` report carried.
+   */
+  complete(stepJobId: string): CompleteOutcome {
+    this.#ensure();
+    return this.transaction(() => {
+      if (this.openRequests(stepJobId).length > 0) return { done: false };
+      if (this.openWork(stepJobId) > 0) return { done: false };
+      const rows = this.sql<{ step_job_id: string }>`
+        UPDATE da_step_jobs SET state = 'completed', updated_at = ${Date.now()}
+        WHERE step_job_id = ${stepJobId} AND state = 'idle'
+        RETURNING step_job_id`;
+      if (rows.length === 0) return { done: false };
+      return { done: true, reply: this.lastReply(stepJobId) };
+    });
+  }
+
+  /** What the job's last `idle` report said it would end on. */
+  lastReply(stepJobId: string): string {
+    for (const { report } of this.reports(stepJobId, 0).reverse()) {
+      if (report.kind === "idle") return report.reply;
+    }
+    return "";
+  }
+
+  /**
+   * Close a pending request on its answer or its expiry, and return it, or
+   * `null` when it is not pending: a relay run again finds it closed.
+   */
+  closeRequest(
+    stepJobId: string,
+    requestId: string,
+    state: Exclude<RequestState, "pending">
+  ): HitlRequestData | null {
+    this.#ensure();
+    const row = this.sql<{ request_json: string }>`
+      UPDATE da_step_job_requests SET state = ${state}
+      WHERE request_id = ${requestId} AND step_job_id = ${stepJobId}
+        AND state = 'pending'
+      RETURNING request_json`[0];
+    return row ? (JSON.parse(row.request_json) as HitlRequestData) : null;
+  }
+
+  /** A request this job asked, whatever its state, or `null`. */
+  request(
+    stepJobId: string,
+    requestId: string
+  ): { request: HitlRequestData; state: RequestState } | null {
+    this.#ensure();
+    const row = this.sql<{ request_json: string; state: string }>`
+      SELECT request_json, state FROM da_step_job_requests
+      WHERE request_id = ${requestId} AND step_job_id = ${stepJobId}`[0];
+    return row
+      ? {
+          request: JSON.parse(row.request_json) as HitlRequestData,
+          state: row.state as RequestState
+        }
+      : null;
+  }
+
+  /** The ids of the requests a job still waits on, oldest first. */
+  openRequests(stepJobId: string): string[] {
+    this.#ensure();
+    return this.sql<{ request_id: string }>`
+      SELECT request_id FROM da_step_job_requests
+      WHERE step_job_id = ${stepJobId} AND state = 'pending'
+      ORDER BY created_at ASC, request_id ASC`.map((r) => r.request_id);
+  }
+
+  /**
+   * Fail a job, owing its `failed` report in the same write. Answers the
+   * report's number, or `null` when the job had already ended.
+   */
+  fail(stepJobId: string, error: string): number | null {
+    this.#ensure();
+    return this.transaction(() => {
+      const rows = this.sql<{ step_job_id: string }>`
+        UPDATE da_step_jobs SET state = 'failed', updated_at = ${Date.now()}
+        WHERE step_job_id = ${stepJobId}
+          AND state IN ('submitted', 'working', 'idle')
+        RETURNING step_job_id`;
+      if (rows.length === 0) return null;
+      return this.#addReport(stepJobId, { kind: "failed", error });
     });
   }
 
@@ -335,7 +433,7 @@ export class StepJobs {
     this.#ensure();
     return this.sql<StoredJob>`
       SELECT * FROM da_step_jobs
-      WHERE state IN ('submitted', 'working', 'input-required')
+      WHERE state IN ('submitted', 'working', 'idle')
         AND job_json IS NOT NULL`
       .map(projectJob)
       .flatMap((row) => (row.job ? [row.job] : []));
@@ -347,16 +445,7 @@ export class StepJobs {
     return this.sql<{ step_job_id: string }>`
       SELECT step_job_id FROM da_step_jobs
       WHERE task_id = ${taskId}
-        AND state IN ('submitted', 'working', 'input-required')`.map(
-      (r) => r.step_job_id
-    );
-  }
-
-  /** Jobs owing an answer's turn. */
-  pendingAnswers(): string[] {
-    this.#ensure();
-    return this.sql<{ step_job_id: string }>`
-      SELECT step_job_id FROM da_step_jobs WHERE answer_json IS NOT NULL`.map(
+        AND state IN ('submitted', 'working', 'idle')`.map(
       (r) => r.step_job_id
     );
   }
@@ -394,6 +483,25 @@ export class StepJobs {
       WHERE step_job_id = ${stepJobId} AND n = ${n}`;
   }
 
+  /**
+   * A job's reports from number `from` on, as the events they are sent as:
+   * what the workflow pulls when one it waits for has not arrived.
+   */
+  reports(
+    stepJobId: string,
+    from: number
+  ): Extract<JobEvent, { from: "agent" }>[] {
+    this.#ensure();
+    return this.sql<{ n: number; report_json: string }>`
+      SELECT n, report_json FROM da_step_job_reports
+      WHERE step_job_id = ${stepJobId} AND n >= ${from}
+      ORDER BY n`.map((r) => ({
+      from: "agent" as const,
+      seq: r.n,
+      report: JSON.parse(r.report_json) as StepJobReport
+    }));
+  }
+
   /** Every report of a job, sent or not. */
   numbers(stepJobId: string): number[] {
     this.#ensure();
@@ -412,7 +520,7 @@ export class StepJobs {
         SELECT 1 FROM da_step_work w
         JOIN da_step_jobs j ON j.step_job_id = w.step_job_id
         WHERE w.step_job_id = r.step_job_id AND w.open = 1
-          AND j.state NOT IN ('submitted', 'working', 'input-required')))
+          AND j.state NOT IN ('submitted', 'working', 'idle')))
       ORDER BY n`.map((r) => r.n);
   }
 
@@ -425,7 +533,7 @@ export class StepJobs {
         SELECT w.step_job_id FROM da_step_work w
         JOIN da_step_jobs j ON j.step_job_id = w.step_job_id
         WHERE w.open = 1
-          AND j.state NOT IN ('submitted', 'working', 'input-required'))
+          AND j.state NOT IN ('submitted', 'working', 'idle'))
       ORDER BY step_job_id, n`.map((r) => ({
       stepJobId: r.step_job_id,
       n: r.n
@@ -446,7 +554,7 @@ export class StepJobs {
       SELECT DISTINCT w.step_job_id FROM da_step_work w
       JOIN da_step_jobs j ON j.step_job_id = w.step_job_id
       WHERE w.open = 1
-        AND j.state NOT IN ('submitted', 'working', 'input-required')`.map(
+        AND j.state NOT IN ('submitted', 'working', 'idle')`.map(
       (r) => r.step_job_id
     );
   }
@@ -644,8 +752,10 @@ export class StepJobs {
     this.#ensure();
     this.sql`DELETE FROM da_step_jobs
       WHERE created_at < ${before}
-        AND state NOT IN ('submitted', 'working', 'input-required')`;
+        AND state NOT IN ('submitted', 'working', 'idle')`;
     this.sql`DELETE FROM da_step_job_reports
+      WHERE step_job_id NOT IN (SELECT step_job_id FROM da_step_jobs)`;
+    this.sql`DELETE FROM da_step_job_requests
       WHERE step_job_id NOT IN (SELECT step_job_id FROM da_step_jobs)`;
     this.sql`DELETE FROM da_step_work
       WHERE created_at < ${before}
@@ -661,11 +771,7 @@ function projectJob(row: StoredJob): JobRow {
     contextId: row.context_id,
     state: row.state,
     job: row.job_json ? (JSON.parse(row.job_json) as StepJob) : null,
-    submissionId: row.submission_id,
-    request: row.request_json
-      ? (JSON.parse(row.request_json) as HitlRequestData)
-      : null,
-    answer: row.answer_json ? (JSON.parse(row.answer_json) as FollowUp) : null
+    submissionId: row.submission_id
   };
 }
 

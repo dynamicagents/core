@@ -6,12 +6,16 @@ import {
   HITL_REQUEST_TYPE,
   type HitlRequestData
 } from "@dynamicagents/g2a-protocol";
-import { buildInputRequiredTask } from "../a2a/hitl.js";
-import { buildCompletedTask, buildFailedTask } from "../a2a/notify.js";
+import { buildAskingTask, buildWaitingTask } from "../a2a/hitl.js";
+import {
+  buildCompletedTask,
+  buildFailedTask,
+  buildWorkingTask
+} from "../a2a/notify.js";
 import { testTask } from "../testing/fixtures.js";
 import type { TestEnv } from "../../test/worker.js";
 import { TASK_RETENTION_MS } from "../ledger.js";
-import { A2ATasks, type OwedAnswer } from "./tasks.js";
+import { A2ATasks, STATE_KEY, questionKey } from "./tasks.js";
 
 /**
  * The host's ledger's guarded writes, one invariant each. Every one is a race
@@ -25,11 +29,16 @@ async function withLedger<R>(fn: (ledger: A2ATasks) => R): Promise<R> {
   const stub = testEnv.TEST_HOST.get(
     testEnv.TEST_HOST.idFromName(`ledger:${crypto.randomUUID()}`)
   );
-  return runInDurableObject(stub, (instance) => {
+  return runInDurableObject(stub, (instance, state) => {
     const agent = instance as unknown as {
       sql: ConstructorParameters<typeof A2ATasks>[0];
     };
-    return fn(new A2ATasks((s, ...v) => agent.sql(s, ...v)));
+    return fn(
+      new A2ATasks(
+        (s, ...v) => agent.sql(s, ...v),
+        (run) => state.storage.transactionSync(run)
+      )
+    );
   });
 }
 
@@ -215,20 +224,27 @@ describe("the task store's writes", () => {
     });
   });
 
-  it("refuses a working snapshot over a task parked on its next question", async () => {
+  it("refuses working and input-required over each other", async () => {
+    // The request handler re-saves the task it loaded for a reply, and its
+    // workflow can move it either way before the handler saves.
     await withLedger((ledger) => {
       accept(ledger);
       ledger.markWorking("t1");
-      const request: HitlRequestData = {
-        type: HITL_REQUEST_TYPE,
-        requestId: "t1:call-2",
-        questions: [{ kind: "text", id: "q1", prompt: "And now?" }]
-      };
-      ledger.park(buildInputRequiredTask("t1", "c1", request), request);
-      const stale = buildInputRequiredTask("t1", "c1", request);
-      stale.status = { ...stale.status!, state: TaskState.TASK_STATE_WORKING };
-      expect(ledger.save(stale)).toBe(false);
+      ledger.setState(
+        "t1",
+        "input-required",
+        buildWaitingTask("t1", "c1", "w1")
+      );
+      expect(
+        ledger.save(testTask("t1", "c1", TaskState.TASK_STATE_WORKING))
+      ).toBe(false);
       expect(ledger.row("t1")?.state).toBe("input-required");
+
+      ledger.setState("t1", "working", buildWorkingTask("t1", "c1", "", "w2"));
+      expect(
+        ledger.save(testTask("t1", "c1", TaskState.TASK_STATE_INPUT_REQUIRED))
+      ).toBe(false);
+      expect(ledger.row("t1")?.state).toBe("working");
     });
   });
 
@@ -258,113 +274,141 @@ describe("the task store's writes", () => {
   });
 });
 
-describe("a task parked on a question", () => {
+describe("the requests a task asks", () => {
   const request: HitlRequestData = {
     type: HITL_REQUEST_TYPE,
     requestId: "t1:call-1",
     questions: [{ kind: "text", id: "q1", prompt: "Which one?" }]
   };
-  const answer: OwedAnswer = {
-    id: "answer:m2",
-    requestId: request.requestId,
-    answers: { q1: { text: "the first" } }
-  };
+  const second: HitlRequestData = { ...request, requestId: "t1:call-2" };
+  const asking = (r: HitlRequestData) => buildAskingTask("t1", "c1", r);
 
-  it("parks a working task, and resumes it once", async () => {
+  it("holds any number open, each owing its own callback, once", async () => {
     await withLedger((ledger) => {
       accept(ledger);
       ledger.markWorking("t1");
-      const parked = buildInputRequiredTask("t1", "c1", request);
-      expect(ledger.park(parked, request)).toBe(true);
-      expect(ledger.row("t1")?.request?.requestId).toBe(request.requestId);
-      expect(ledger.row("t1")?.deliveryKey).toBe(
-        `input-required:${request.requestId}`
+      expect(ledger.ask("t1", "job", request, asking(request))).toBe("parked");
+      expect(ledger.ask("t1", "job", second, asking(second))).toBe("parked");
+      // A park step run again owes nothing twice.
+      expect(ledger.ask("t1", "job", request, asking(request))).toBe("parked");
+      expect(ledger.openRequests("t1").map((r) => r.requestId)).toEqual([
+        request.requestId,
+        second.requestId
+      ]);
+      expect(ledger.pendingDeliveries()).toEqual([
+        { taskId: "t1", key: questionKey(request.requestId) },
+        { taskId: "t1", key: questionKey(second.requestId) }
+      ]);
+      // Asking stops nothing: the task is still working.
+      expect(ledger.row("t1")?.state).toBe("working");
+      expect(ledger.request("t1", second.requestId)?.stepJobId).toBe("job");
+    });
+  });
+
+  it("closes a request on its answer once, and drops its callback if it has not gone", async () => {
+    await withLedger((ledger) => {
+      accept(ledger);
+      ledger.markWorking("t1");
+      ledger.ask("t1", "job", request, asking(request));
+      ledger.ask("t1", "job", second, asking(second));
+      ledger.delivered("t1", questionKey(second.requestId));
+
+      expect(ledger.closeRequest("t1", request.requestId, "answered")).toBe(
+        true
       );
-      expect(ledger.resume("t1", answer)).not.toBeNull();
-      expect(ledger.resume("t1", answer)).toBeNull();
-      expect(ledger.row("t1")?.request).toBeNull();
+      expect(ledger.closeRequest("t1", request.requestId, "answered")).toBe(
+        false
+      );
+      expect(ledger.owed("t1", questionKey(request.requestId))).toBeNull();
+      expect(ledger.closeRequest("t1", second.requestId, "expired")).toBe(true);
+      expect(ledger.request("t1", second.requestId)?.state).toBe("expired");
+      expect(ledger.openRequests("t1")).toEqual([]);
     });
   });
 
-  it("owes the answer's relay and drops the question's callback, in the resume's write", async () => {
+  it("asks nothing of a task that has ended", async () => {
     await withLedger((ledger) => {
       accept(ledger);
-      ledger.markWorking("t1");
-      ledger.park(buildInputRequiredTask("t1", "c1", request), request);
-      ledger.resume("t1", answer);
-      expect(ledger.row("t1")?.deliveryKey).toBeNull();
-      expect(ledger.pendingAnswers()).toEqual(["t1"]);
-
-      ledger.answered("t1", "answer:another");
-      expect(ledger.row("t1")?.answer).toEqual(answer);
-      ledger.answered("t1", answer.id);
-      expect(ledger.pendingAnswers()).toEqual([]);
-    });
-  });
-
-  it("owes no answer once the task is canceled", async () => {
-    await withLedger((ledger) => {
-      accept(ledger);
-      ledger.markWorking("t1");
-      ledger.park(buildInputRequiredTask("t1", "c1", request), request);
-      ledger.resume("t1", answer);
       ledger.cancel("t1");
-      expect(ledger.pendingAnswers()).toEqual([]);
+      expect(ledger.ask("t1", "job", request, asking(request))).toBe("closed");
+      expect(ledger.openRequests("t1")).toEqual([]);
     });
   });
 
-  it("never lets an earlier question's delivery stand in for a later one", async () => {
+  it("drops every callback an open task owes when it settles, or is canceled", async () => {
     await withLedger((ledger) => {
-      accept(ledger);
+      accept(ledger, "t1", "m1");
       ledger.markWorking("t1");
-      ledger.park(buildInputRequiredTask("t1", "c1", request), request);
-      const first = ledger.row("t1")!.deliveryKey!;
-      ledger.resume("t1", answer);
-      const second = { ...request, requestId: "t1:call-2" };
-      ledger.park(buildInputRequiredTask("t1", "c1", second), second);
+      ledger.ask("t1", "job", request, asking(request));
+      ledger.settle(buildCompletedTask("t1", "c1", "done"));
+      expect(ledger.pendingDeliveries()).toEqual([
+        { taskId: "t1", key: "completed" }
+      ]);
 
-      // The first question's late acknowledgement clears nothing.
-      ledger.delivered("t1", first);
-      expect(ledger.row("t1")?.deliveryKey).toBe("input-required:t1:call-2");
+      accept(ledger, "t2", "m2");
+      ledger.markWorking("t2");
+      ledger.setState(
+        "t2",
+        "input-required",
+        buildWaitingTask("t2", "c1", "w")
+      );
+      ledger.cancel("t2");
+      expect(ledger.owed("t2", STATE_KEY)).toBeNull();
     });
   });
+});
 
-  it("holds one question: the same park re-run, never another in its place", async () => {
+describe("a task's state while it runs", () => {
+  it("moves between working and input-required, owing one state callback", async () => {
     await withLedger((ledger) => {
       accept(ledger);
       ledger.markWorking("t1");
-      const parked = buildInputRequiredTask("t1", "c1", request);
-      expect(ledger.park(parked, request)).toBe(true);
-      expect(ledger.park(parked, request)).toBe(true);
-
-      const other = { ...request, requestId: "t1:call-2" };
       expect(
-        ledger.park(buildInputRequiredTask("t1", "c1", other), other)
+        ledger.setState(
+          "t1",
+          "input-required",
+          buildWaitingTask("t1", "c1", "w1")
+        )
+      ).toBe(true);
+      // A step run again finds it there already.
+      expect(
+        ledger.setState(
+          "t1",
+          "input-required",
+          buildWaitingTask("t1", "c1", "w2")
+        )
       ).toBe(false);
-      expect(ledger.row("t1")?.request?.requestId).toBe(request.requestId);
-      expect(ledger.row("t1")?.deliveryKey).toBe(
-        `input-required:${request.requestId}`
+      expect(
+        ledger.setState("t1", "working", buildWorkingTask("t1", "c1", "", "w3"))
+      ).toBe(true);
+      // One slot, and the latest state is what it posts.
+      expect(ledger.pendingDeliveries()).toEqual([
+        { taskId: "t1", key: STATE_KEY }
+      ]);
+      expect(ledger.owed("t1", STATE_KEY)?.status?.state).toBe(
+        TaskState.TASK_STATE_WORKING
       );
+      ledger.delivered("t1", STATE_KEY);
+      expect(ledger.owed("t1", STATE_KEY)).toBeNull();
     });
   });
 
-  it("parks only a task that is working", async () => {
+  it("moves only a task that runs", async () => {
     await withLedger((ledger) => {
       accept(ledger);
-      const parked = buildInputRequiredTask("t1", "c1", request);
-      expect(ledger.park(parked, request)).toBe(false);
-      ledger.cancel("t1");
-      expect(ledger.park(parked, request)).toBe(false);
-    });
-  });
-
-  it("lets a cancel reach a task waiting on its question", async () => {
-    await withLedger((ledger) => {
-      accept(ledger);
+      expect(
+        ledger.setState(
+          "t1",
+          "input-required",
+          buildWaitingTask("t1", "c1", "w")
+        )
+      ).toBe(false);
       ledger.markWorking("t1");
-      ledger.park(buildInputRequiredTask("t1", "c1", request), request);
-      expect(ledger.cancel("t1")).not.toBeNull();
-      expect(ledger.row("t1")?.request).toBeNull();
+      ledger.settle(buildCompletedTask("t1", "c1", "done"));
+      expect(
+        ledger.setState("t1", "working", buildWorkingTask("t1", "c1", "", "w"))
+      ).toBe(false);
+      expect(ledger.row("t1")?.state).toBe("completed");
     });
   });
 });

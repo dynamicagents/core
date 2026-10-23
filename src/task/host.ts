@@ -10,18 +10,32 @@ import {
 import type { AcceptedTurn } from "../a2a/executor.js";
 import type { TaskListPage, TaskListQuery } from "../a2a/agent-stub.js";
 import { callerContext } from "../a2a/caller.js";
-import { buildInputRequiredTask, type HumanReply } from "../a2a/hitl.js";
-import { buildCompletedTask, buildFailedTask } from "../a2a/notify.js";
+import {
+  buildAskingTask,
+  buildWaitingTask,
+  type HumanReply
+} from "../a2a/hitl.js";
+import {
+  buildCompletedTask,
+  buildFailedTask,
+  buildWorkingTask
+} from "../a2a/notify.js";
 import { createPushChannel, type PushChannel } from "../a2a/push.js";
 import { taskStateLabel, type PlainTask } from "../a2a/task.js";
 import type { GatekeeperIdentity } from "../a2a/verify.js";
 import type { CoreEnv } from "../env.js";
 import { isTerminalState, TASK_RETENTION_MS } from "../ledger.js";
-import { answerEventType } from "../workflow/keys.js";
-import type { ParkOutcome, StepAnswer, TaskResult } from "../workflow/types.js";
+import { jobEventType } from "../workflow/keys.js";
+import type {
+  JobEvent,
+  NotedStepJob,
+  ParkOutcome,
+  StepInput,
+  TaskResult
+} from "../workflow/types.js";
 import type { StepAgentStub } from "../workflow/workflow.js";
 import { TaskRuns, type NoticeJob } from "./runs.js";
-import { A2ATasks, questionKey, type OwedAnswer } from "./tasks.js";
+import { A2ATasks, questionKey, STATE_KEY } from "./tasks.js";
 
 /** The user-facing strings core needs and never writes. */
 export interface A2ACopy {
@@ -29,8 +43,6 @@ export interface A2ACopy {
   failed: string;
   /** A task that finished with nothing to say. */
   emptyReply: string;
-  /** A question nobody answered before the gatekeeper gave up on it. */
-  questionExpired: string;
 }
 
 /** How a queued job that must land is retried: the callback outbox's policy. */
@@ -40,12 +52,21 @@ const DELIVERY_RETRY = {
   maxDelayMs: 300_000
 };
 
-/** What the delivery outbox carries. Strings and JSON: it crosses a queue. */
+/**
+ * What the delivery outbox carries: which callback, by the key the ledger owes
+ * it under. What it posts is read from the ledger when it goes, so a state
+ * owed again in the meantime posts the latest.
+ */
 interface DeliveryJob {
   taskId: string;
-  /** The ledger's `deliveryKey` for the event this callback reports. */
   key: string;
-  task: unknown;
+}
+
+/** One input the relay owes a job's workflow. */
+interface InputJob {
+  taskId: string;
+  stepJobId: string;
+  seq: number;
 }
 
 /**
@@ -77,8 +98,9 @@ export abstract class TaskHost<
    * The task ledger. Not `tasks`: every `Agent` already has `this.tasks`, the
    * agents SDK's durable task capability.
    */
-  readonly ledger = new A2ATasks((strings, ...values) =>
-    this.sql(strings, ...values)
+  readonly ledger = new A2ATasks(
+    (strings, ...values) => this.sql(strings, ...values),
+    (fn) => this.ctx.storage.transactionSync(fn)
   );
   readonly runs = new TaskRuns((strings, ...values) =>
     this.sql(strings, ...values)
@@ -99,21 +121,16 @@ export abstract class TaskHost<
     // evicted between the two finds the debt here. Queued rather than run: each
     // is retried, and none of them belongs in a start.
     for (const { taskId, key } of this.ledger.pendingDeliveries()) {
-      const task = this.ledger.get(taskId);
-      if (task) await this.#enqueueDelivery(taskId, key, task);
+      await this.#enqueueDelivery(taskId, key);
+    }
+    for (const input of this.runs.unsentInputs()) {
+      await this.#queueInput(input);
     }
     for (const taskId of this.ledger.pendingHooks()) {
       await this.queue("runSettleHooks", { taskId }, { id: `hooks:${taskId}` });
     }
     for (const notice of this.runs.owedNotices()) {
       await this.#queueNotice(notice);
-    }
-    for (const taskId of this.ledger.pendingAnswers()) {
-      await this.queue(
-        "deliverAnswer",
-        { taskId },
-        { id: `answer:${taskId}`, retry: DELIVERY_RETRY }
-      );
     }
     for (const taskId of this.ledger.unbound()) {
       await this.queue(
@@ -198,23 +215,22 @@ export abstract class TaskHost<
   }
 
   /**
-   * Record a person's reply to the questions the task is parked on, and relay
-   * it to the workflow waiting for it.
+   * Record a person's reply to one of the requests the task has open, and
+   * relay it to the workflow, which hands it to the job that asked.
    *
-   * A reply naming no question of this task changes nothing: it is late, or
-   * for a question since replaced. One whose answers do not fit the questions
-   * asked — one missing, an option never offered, two picked of a question
-   * that takes one — is refused with the reason, so the gatekeeper can say so
-   * instead of showing the question answered while the task waits on. A
-   * timeout is settled from the queue, not here: the request handler loads the
-   * task before it takes the message, and a task failed inline would make it
-   * refuse the very message reporting the expiry.
+   * A reply naming no open request of this task changes nothing: it is late,
+   * for a request already answered or expired. One whose answers do not fit the
+   * questions asked (one missing, an option never offered, two picked of a
+   * question that takes one) is refused with the reason, so the gatekeeper can
+   * say so instead of showing the question answered while the task waits on. A
+   * timeout closes the request as expired, and the job is told so: it decides
+   * whether to go on without the answer, and the task does not fail for it.
    *
-   * The resume owes the relay, so a failed send is retried and the start-up
-   * sweep finishes one an eviction cut.
+   * Closing the request and owing its input are one write, so a relay that
+   * fails is retried and the start-up sweep finishes one an eviction cut.
    *
-   * Returns whether this reply was taken — resumed on, or an expiry queued —
-   * decided by the guarded write, so a cancel landing first makes it false.
+   * Returns whether this reply was taken, decided by the guarded write, so a
+   * cancel landing first makes it false.
    */
   async answerTask(input: {
     taskId: string;
@@ -223,44 +239,78 @@ export abstract class TaskHost<
   }): Promise<boolean | { refused: string }> {
     const { taskId, messageId, reply } = input;
     const row = this.ledger.row(taskId);
-    if (!row) return false;
-    // An answer an earlier call resumed on and never relayed goes first.
-    if (row.answer) await this.deliverAnswer({ taskId });
-    const request = row.request;
-    if (!request || request.requestId !== reply.requestId) {
-      console.warn("[host] a reply names no question of this task", {
+    const asked = this.ledger.request(taskId, reply.requestId);
+    if (!row || isTerminalState(row.state) || asked?.state !== "pending") {
+      console.warn("[host] a reply names no open request of this task", {
         taskId,
         requestId: reply.requestId
       });
       return false;
     }
+    let relayed: StepInput;
     if (reply.kind === "timeout") {
-      await this.queue("expireTask", { taskId, requestId: reply.requestId });
-      return true;
+      relayed = { kind: "expiry", requestId: reply.requestId };
+    } else {
+      const { answers } = reply.answer;
+      const refused = answersMismatch(asked.request, answers);
+      if (refused) {
+        console.warn("[host] a reply does not answer the questions asked", {
+          taskId,
+          requestId: reply.requestId,
+          refused
+        });
+        return { refused };
+      }
+      relayed = { kind: "answer", requestId: reply.requestId, answers };
     }
-    const { answers } = reply.answer;
-    const refused = answersMismatch(request, answers);
-    if (refused) {
-      console.warn("[host] a reply does not answer the questions asked", {
+    const owed = this.ctx.storage.transactionSync(() => {
+      const closed = this.ledger.closeRequest(
         taskId,
-        requestId: reply.requestId,
-        refused
-      });
-      return { refused };
-    }
-    const owed: OwedAnswer = {
-      id: `answer:${messageId}`,
-      requestId: request.requestId,
-      answers
-    };
-    // The resume and the guard against asking again commit together.
-    const resumed = this.ctx.storage.transactionSync(() => {
-      if (!this.ledger.resume(taskId, owed)) return false;
-      this.runs.answered(taskId, request.requestId);
-      return true;
+        reply.requestId,
+        relayed.kind === "expiry" ? "expired" : "answered"
+      );
+      if (!closed) return null;
+      return this.runs.addInput(taskId, asked.stepJobId, messageId, relayed);
     });
-    if (resumed) await this.deliverAnswer({ taskId });
-    return resumed;
+    if (owed === null) return false;
+    await this.#queueInput({ taskId, stepJobId: asked.stepJobId, seq: owed });
+    return true;
+  }
+
+  /**
+   * A message that joins the task: more input to the work already running, in
+   * the conversation it belongs to. Relayed to the job its pipeline named to
+   * take joined messages. `closed` when the task has ended, or takes none right
+   * now: the gatekeeper starts a new task with the message instead. Idempotent
+   * on `messageId`.
+   */
+  async joinTask(input: {
+    taskId: string;
+    messageId: string;
+    text: string;
+  }): Promise<"joined" | "closed"> {
+    const { taskId, messageId, text } = input;
+    const owed = this.ctx.storage.transactionSync(() => {
+      const row = this.ledger.row(taskId);
+      if (!row || isTerminalState(row.state)) return "closed" as const;
+      const stepJobId = this.runs.joinTarget(taskId);
+      if (!stepJobId) return "closed" as const;
+      const seq = this.runs.addInput(taskId, stepJobId, messageId, {
+        kind: "join",
+        messageId,
+        text
+      });
+      return { stepJobId, seq };
+    });
+    if (owed === "closed") return "closed";
+    if (owed.seq !== null) {
+      await this.#queueInput({
+        taskId,
+        stepJobId: owed.stepJobId,
+        seq: owed.seq
+      });
+    }
+    return "joined";
   }
 
   // --- what the workflow calls from its steps ----------------------------------
@@ -270,10 +320,7 @@ export abstract class TaskHost<
    * open. Checked and written with no await between, so a cancel either sees
    * the job or refuses it.
    */
-  async noteStepJob(
-    taskId: string,
-    job: { stepJobId: string; binding: string }
-  ): Promise<boolean> {
+  async noteStepJob(taskId: string, job: NotedStepJob): Promise<boolean> {
     const row = this.ledger.row(taskId);
     if (!row || isTerminalState(row.state)) return false;
     this.runs.note(taskId, job);
@@ -281,25 +328,95 @@ export abstract class TaskHost<
   }
 
   /**
-   * Park the task on a question and owe its callback. A question already
-   * answered is not asked again: a replayed park step would otherwise put an
-   * answered question back.
+   * A request a job asked: recorded, and its callback owed in the same write.
+   * Any number may be open, and asking stops nothing else, so it goes out on a
+   * `working` update. A request already recorded is not asked again: a
+   * replayed park step would otherwise post it twice.
    */
-  async park(taskId: string, request: HitlRequestData): Promise<ParkOutcome> {
+  async park(
+    taskId: string,
+    stepJobId: string,
+    request: HitlRequestData
+  ): Promise<ParkOutcome> {
     const row = this.ledger.row(taskId);
     if (!row || isTerminalState(row.state)) return "closed";
-    if (this.runs.wasAnswered(request.requestId)) return "parked";
-    const parked = buildInputRequiredTask(taskId, row.contextId, request);
-    if (this.ledger.park(parked, request)) {
-      await this.#enqueueDelivery(
-        taskId,
-        questionKey(request.requestId),
-        parked
-      );
+    const asking = buildAskingTask(taskId, row.contextId, request);
+    const parked = this.ledger.ask(taskId, stepJobId, request, asking);
+    if (parked === "parked") {
+      await this.#enqueueDelivery(taskId, questionKey(request.requestId));
     }
-    return this.ledger.row(taskId)?.request?.requestId === request.requestId
-      ? "parked"
-      : "asking";
+    return parked;
+  }
+
+  /**
+   * The task's job is idle. With requests open, all the task does is wait on
+   * the person: `input-required`, which is what stops the gatekeeper's clock.
+   * With none, nothing changes here: the workflow is finishing the job.
+   */
+  async idle(taskId: string): Promise<void> {
+    const row = this.ledger.row(taskId);
+    if (!row || isTerminalState(row.state)) return;
+    if (this.ledger.openRequests(taskId).length === 0) return;
+    const waiting = buildWaitingTask(
+      taskId,
+      row.contextId,
+      `${taskId}:${crypto.randomUUID()}`
+    );
+    if (this.ledger.setState(taskId, "input-required", waiting)) {
+      await this.#enqueueDelivery(taskId, STATE_KEY);
+    }
+  }
+
+  /**
+   * The task's job went back to work: an answer, a message or a result woke
+   * it. `working` again, posted with nothing to say, so the gatekeeper's clock
+   * runs again.
+   */
+  async working(taskId: string): Promise<void> {
+    const row = this.ledger.row(taskId);
+    if (!row || isTerminalState(row.state)) return;
+    const working = buildWorkingTask(
+      taskId,
+      row.contextId,
+      "",
+      crypto.randomUUID()
+    );
+    if (this.ledger.setState(taskId, "working", working)) {
+      await this.#enqueueDelivery(taskId, STATE_KEY);
+    }
+  }
+
+  /**
+   * Stop taking joined messages for a job its workflow is about to finish, and
+   * return any input it has not read yet, from number `from` on. With one
+   * owed, nothing is closed: the workflow hands it to the job, which carries
+   * on. Checked and written with no await between, so a message joining now
+   * either is returned here or finds the task closed.
+   */
+  async closeJoins(
+    taskId: string,
+    stepJobId: string,
+    from: number
+  ): Promise<Extract<JobEvent, { from: "host" }>[]> {
+    return this.ctx.storage.transactionSync(() => {
+      const unread = this.runs.inputs(taskId, stepJobId, from);
+      if (unread.length === 0) this.runs.setJoins(taskId, stepJobId, false);
+      return unread;
+    });
+  }
+
+  /** Take joined messages for a job again: finishing it was refused. */
+  async openJoins(taskId: string, stepJobId: string): Promise<void> {
+    this.runs.setJoins(taskId, stepJobId, true);
+  }
+
+  /** A job's inputs from number `from` on: what its workflow pulls when one is late. */
+  async stepJobInputs(
+    taskId: string,
+    stepJobId: string,
+    from: number
+  ): Promise<Extract<JobEvent, { from: "host" }>[]> {
+    return this.runs.inputs(taskId, stepJobId, from);
   }
 
   /**
@@ -360,54 +477,36 @@ export abstract class TaskHost<
     await this.#start(payload.taskId);
   }
 
-  /** Relay the answer a resumed task owes its workflow, then clear it. */
-  async deliverAnswer(payload: { taskId: string }): Promise<void> {
-    const row = this.ledger.row(payload.taskId);
-    if (!row?.answer) return;
-    const { id, requestId, ...answer } = row.answer;
-    // Idempotent, and what a replayed park step reads: never ask it again.
-    this.runs.answered(payload.taskId, requestId);
-    if (!isTerminalState(row.state)) {
-      const relayed: StepAnswer = answer;
-      await this.sendWorkflowEvent(this.workflowBinding, payload.taskId, {
-        type: await answerEventType(requestId),
-        payload: relayed
+  /**
+   * Send one input to its job's workflow, under the job's one event type and
+   * its own number. An input for a task that has ended goes nowhere: its
+   * workflow is stopped. Throws on a failed send, so the queue retries.
+   */
+  async relayInput(job: InputJob): Promise<void> {
+    const row = this.ledger.row(job.taskId);
+    const event = this.runs.input(job.stepJobId, job.seq);
+    if (!event) return;
+    if (row && !isTerminalState(row.state)) {
+      await this.sendWorkflowEvent(this.workflowBinding, job.taskId, {
+        type: await jobEventType(job.stepJobId),
+        payload: event
       });
     }
-    this.ledger.answered(payload.taskId, id);
+    this.runs.inputSent(job.stepJobId, job.seq);
   }
 
   /**
-   * A question nobody answered: the task fails in this deployment's words,
-   * and its run is stopped. The write comes first, so an answer that won stays
-   * won.
-   */
-  async expireTask(payload: {
-    taskId: string;
-    requestId: string;
-  }): Promise<void> {
-    const row = this.ledger.row(payload.taskId);
-    if (!row || row.request?.requestId !== payload.requestId) return;
-    const failed = buildFailedTask(
-      payload.taskId,
-      row.contextId,
-      this.copy.questionExpired
-    );
-    if (!this.ledger.settle(failed, { stop: true })) return;
-    await this.#stopRun(payload.taskId);
-    await this.#afterSettle(payload.taskId, failed);
-  }
-
-  /**
-   * POST one callback, if it is still the one the task owes. Throws on a
-   * non-2xx so the queue retries. A question the task has moved past — to an
-   * answer, or to another question — is neither sent nor acknowledged.
+   * POST one callback, if it is still owed, with what the ledger owes now.
+   * Throws on a non-2xx so the queue retries. A question since answered, a
+   * state since replaced, or anything an open task owed before it settled, is
+   * neither sent nor acknowledged.
    */
   async deliverTask(job: DeliveryJob): Promise<void> {
     const row = this.ledger.row(job.taskId);
-    if (!row?.push || row.deliveryKey !== job.key) return;
+    const task = this.ledger.owed(job.taskId, job.key);
+    if (!row?.push || !task) return;
     await createPushChannel(this.env.A2A_SIGNING_KEY, row.push).deliver(
-      Task.fromJSON(job.task)
+      Task.fromJSON(Task.toJSON(task as Task))
     );
     this.ledger.delivered(job.taskId, job.key);
   }
@@ -529,7 +628,7 @@ export abstract class TaskHost<
     const state = taskStateLabel(
       task.status?.state ?? TaskState.TASK_STATE_UNSPECIFIED
     );
-    await this.#enqueueDelivery(taskId, state, task);
+    await this.#enqueueDelivery(taskId, state);
     await this.#settled(taskId);
   }
 
@@ -662,16 +761,20 @@ export abstract class TaskHost<
    * The stable id makes a repeat replace the pending item rather than queue a
    * second.
    */
-  async #enqueueDelivery(
-    taskId: string,
-    key: string,
-    task: Task
-  ): Promise<void> {
+  async #enqueueDelivery(taskId: string, key: string): Promise<void> {
     await this.queue<DeliveryJob>(
       "deliverTask",
-      { taskId, key, task: Task.toJSON(task) },
+      { taskId, key },
       { id: `deliver:${taskId}:${key}`, retry: DELIVERY_RETRY }
     );
+  }
+
+  /** Hand one input to the durable queue, which relays it once. */
+  async #queueInput(job: InputJob): Promise<void> {
+    await this.queue<InputJob>("relayInput", job, {
+      id: `input:${job.stepJobId}:${job.seq}`,
+      retry: DELIVERY_RETRY
+    });
   }
 
   // --- helpers ---------------------------------------------------------------------

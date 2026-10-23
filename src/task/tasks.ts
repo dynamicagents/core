@@ -1,10 +1,10 @@
 import { Task, TaskState } from "@a2a-js/sdk";
-import type { HitlAnswer, HitlRequestData } from "@dynamicagents/g2a-protocol";
+import type { HitlRequestData } from "@dynamicagents/g2a-protocol";
 import type { GatekeeperIdentity } from "../a2a/verify.js";
 import { buildSubmittedTask } from "../a2a/notify.js";
 import type { TurnPushContext } from "../a2a/push.js";
 import { taskStateLabel, type PlainTask } from "../a2a/task.js";
-import { isTerminalState, type Sql } from "../ledger.js";
+import { isTerminalState, type Sql, type Transaction } from "../ledger.js";
 
 /**
  * The A2A task ledger, on the task host's own SQLite.
@@ -30,14 +30,25 @@ import { isTerminalState, type Sql } from "../ledger.js";
 /** The states a task can still move out of. */
 const OPEN = ["submitted", "working", "input-required"];
 
-/** An answer the task resumed on, owed to the workflow waiting for it. */
-export interface OwedAnswer {
-  /** `answer:<messageId>`: what clears it. */
-  id: string;
+/** The two states an open task moves between once it runs. */
+const RUNNING = ["working", "input-required"];
+
+/** A request one of the task's jobs asked, and where it stands. */
+export interface RequestRow {
   requestId: string;
-  /** One per question, keyed by the question's id. */
-  answers: Record<string, HitlAnswer>;
+  taskId: string;
+  /** The job that asked: what its answer is relayed to. */
+  stepJobId: string;
+  request: HitlRequestData;
+  state: "pending" | "answered" | "expired";
 }
+
+/**
+ * The callback slot for a task's state: one, and the latest wins, because a
+ * `working` and an `input-required` delivered out of order would leave the
+ * gatekeeper's clock reading the wrong one.
+ */
+export const STATE_KEY = "state";
 
 /** One task row, less the blob. */
 export interface TaskRow {
@@ -49,21 +60,16 @@ export interface TaskRow {
   identity: GatekeeperIdentity | null;
   /** Whether the task's workflow has been started and adopted. */
   bound: boolean;
-  /** The question the task is parked on, or `null` when it is not parked. */
-  request: HitlRequestData | null;
   /**
-   * The callback still owed, or `null`: the settled state, or
-   * `input-required:<requestId>` for a question. Keyed on the event rather than
-   * the state, so a delivery of an earlier question can never stand in for, or
-   * clear, a later one.
+   * The settled state's callback, still owed, or `null`. The callbacks an open
+   * task owes (its questions, its state) are rows of their own: see
+   * {@link A2ATasks.owe}.
    */
   deliveryKey: string | null;
   /** Whether the settle hooks are still owed. */
   hooksPending: boolean;
   /** Whether stopping the run — the instance and its jobs — is still owed. */
   stopPending: boolean;
-  /** An answer the task resumed on, not yet relayed to its workflow. */
-  answer: OwedAnswer | null;
 }
 
 /** What {@link A2ATasks.list} is asked for — the `ListTasks` filters. */
@@ -86,17 +92,18 @@ interface StoredTask {
   push_json: string | null;
   identity_json: string | null;
   bound: number;
-  request_json: string | null;
   delivery_key: string | null;
   hooks_pending: number;
   stop_pending: number;
-  answer_json: string | null;
 }
 
 export class A2ATasks {
   #ensured = false;
 
-  constructor(private readonly sql: Sql) {}
+  constructor(
+    private readonly sql: Sql,
+    private readonly transaction: Transaction
+  ) {}
 
   /**
    * Run before the first statement rather than at construction: a host builds
@@ -120,6 +127,25 @@ export class A2ATasks {
       answer_json TEXT,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
+    )`;
+    // `request_json` and `answer_json` above are no longer written: a column
+    // goes only with a migration, and these hold nothing but `NULL`.
+    this.sql`CREATE TABLE IF NOT EXISTS da_a2a_requests (
+      request_id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      step_job_id TEXT NOT NULL,
+      request_json TEXT NOT NULL,
+      state TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )`;
+    this.sql`CREATE INDEX IF NOT EXISTS da_a2a_requests_task
+      ON da_a2a_requests (task_id, state)`;
+    this.sql`CREATE TABLE IF NOT EXISTS da_a2a_deliveries (
+      task_id TEXT NOT NULL,
+      key TEXT NOT NULL,
+      task_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (task_id, key)
     )`;
     this.#ensured = true;
   }
@@ -169,24 +195,36 @@ export class A2ATasks {
     };
   }
 
-  /** Callbacks owed and not yet acknowledged. */
+  /** Callbacks owed and not yet acknowledged: settled ones, and open ones. */
   pendingDeliveries(): { taskId: string; key: string }[] {
     this.#ensure();
-    return this.sql<{ task_id: string; delivery_key: string }>`
+    const settled = this.sql<{ task_id: string; delivery_key: string }>`
       SELECT task_id, delivery_key FROM da_a2a_tasks
       WHERE delivery_key IS NOT NULL`.map((r) => ({
       taskId: r.task_id,
       key: r.delivery_key
     }));
+    const open = this.sql<{ task_id: string; key: string }>`
+      SELECT task_id, key FROM da_a2a_deliveries ORDER BY created_at`.map(
+      (r) => ({ taskId: r.task_id, key: r.key })
+    );
+    return [...settled, ...open];
   }
 
-  /** Tasks owing their workflow an answer. */
-  pendingAnswers(): string[] {
+  /**
+   * What an owed callback posts, or `null` once it is not owed: delivered,
+   * superseded by a later state, or dropped when the task settled. A settled
+   * task's own callback is the row's state.
+   */
+  owed(taskId: string, key: string): PlainTask | null {
     this.#ensure();
-    return this.sql<{ task_id: string }>`
-      SELECT task_id FROM da_a2a_tasks WHERE answer_json IS NOT NULL`.map(
-      (r) => r.task_id
-    );
+    const row = this.#stored(taskId);
+    if (!row) return null;
+    if (row.delivery_key === key) return parse(row.task_json);
+    const json = this.sql<{ task_json: string }>`
+      SELECT task_json FROM da_a2a_deliveries
+      WHERE task_id = ${taskId} AND key = ${key}`[0]?.task_json;
+    return json ? parse(json) : null;
   }
 
   /** Tasks whose settle hooks are owed. */
@@ -275,9 +313,9 @@ export class A2ATasks {
    *  - `canceled` over a task that already finished;
    *  - `submitted` over a task that moved past it. The request handler re-saves
    *    the accepted task it published, and by then the run may be going;
-   *  - `working` over a task parked on a question. The handler loads a task an
-   *    answer just resumed, and the workflow can park on the next question
-   *    before the handler saves; only `resume` leaves a question.
+   *  - `working` and `input-required` over each other. The handler re-saves a
+   *    task it loaded for a reply, and its workflow can move it either way
+   *    before the handler saves; only {@link A2ATasks.setState} moves it.
    */
   save(task: Task): boolean {
     this.#ensure();
@@ -294,7 +332,13 @@ export class A2ATasks {
     const current = existing.state;
     if (isTerminalState(current) && incoming !== current) return false;
     if (incoming === "submitted" && current !== "submitted") return false;
-    if (incoming === "working" && current === "input-required") return false;
+    if (
+      RUNNING.includes(incoming) &&
+      RUNNING.includes(current) &&
+      incoming !== current
+    ) {
+      return false;
+    }
     this.#write(task.id, incoming, task);
     return true;
   }
@@ -342,78 +386,129 @@ export class A2ATasks {
         timestamp: new Date().toISOString()
       };
     }
-    const rows = this.sql<{ task_id: string }>`
-      UPDATE da_a2a_tasks
-      SET state = 'canceled', task_json = ${serialize(canceled)},
-          request_json = NULL, delivery_key = NULL, answer_json = NULL,
-          hooks_pending = 1, stop_pending = 1, updated_at = ${Date.now()}
-      WHERE task_id = ${taskId}
-        AND state IN ('submitted', 'working', 'input-required')
-      RETURNING task_id`;
-    return rows.length > 0 ? canceled : null;
+    const canceledHere = this.transaction(() => {
+      const rows = this.sql<{ task_id: string }>`
+        UPDATE da_a2a_tasks
+        SET state = 'canceled', task_json = ${serialize(canceled)},
+            delivery_key = NULL, hooks_pending = 1, stop_pending = 1,
+            updated_at = ${Date.now()}
+        WHERE task_id = ${taskId}
+          AND state IN ('submitted', 'working', 'input-required')
+        RETURNING task_id`;
+      if (rows.length > 0) this.#dropOwed(taskId);
+      return rows.length > 0;
+    });
+    return canceledHere ? canceled : null;
   }
 
   /**
-   * Park a running task on a question, and owe its callback in the same
-   * statement. Only from `working`, or from `input-required` on the same
-   * question — the park re-run. A task holds one question at a time, so
-   * another question asked meanwhile is refused rather than put in its place.
+   * Record a request a job asked, and owe its callback in the same write: the
+   * task as it is, carrying the request. Any number may be open. One already
+   * recorded owes nothing twice, so a park step run again posts nothing more.
    */
-  park(task: Task, request: HitlRequestData): boolean {
+  ask(
+    taskId: string,
+    stepJobId: string,
+    request: HitlRequestData,
+    asking: Task
+  ): "parked" | "closed" {
     this.#ensure();
-    const rows = this.sql<{ task_id: string }>`
-      UPDATE da_a2a_tasks
-      SET state = 'input-required', task_json = ${serialize(task)},
-          request_json = ${JSON.stringify(request)},
-          delivery_key = ${questionKey(request.requestId)},
-          updated_at = ${Date.now()}
-      WHERE task_id = ${task.id} AND (state = 'working' OR (
-        state = 'input-required'
-        AND json_extract(request_json, '$.requestId') = ${request.requestId}))
-      RETURNING task_id`;
-    return rows.length > 0;
+    return this.transaction(() => {
+      const row = this.#stored(taskId);
+      if (!row || !OPEN.includes(row.state)) return "closed";
+      const rows = this.sql<{ request_id: string }>`
+        INSERT OR IGNORE INTO da_a2a_requests
+          (request_id, task_id, step_job_id, request_json, state, created_at)
+        VALUES (${request.requestId}, ${taskId}, ${stepJobId},
+                ${JSON.stringify(request)}, 'pending', ${Date.now()})
+        RETURNING request_id`;
+      if (rows.length > 0)
+        this.owe(taskId, questionKey(request.requestId), asking);
+      return "parked";
+    });
+  }
+
+  /** A request of this task, whatever its state, or `null`. */
+  request(taskId: string, requestId: string): RequestRow | null {
+    this.#ensure();
+    const row = this.sql<StoredRequest>`
+      SELECT * FROM da_a2a_requests
+      WHERE request_id = ${requestId} AND task_id = ${taskId}`[0];
+    return row ? projectRequest(row) : null;
+  }
+
+  /** The requests the task still waits on, oldest first. */
+  openRequests(taskId: string): RequestRow[] {
+    this.#ensure();
+    return this.sql<StoredRequest>`
+      SELECT * FROM da_a2a_requests
+      WHERE task_id = ${taskId} AND state = 'pending'
+      ORDER BY created_at ASC, request_id ASC`.map(projectRequest);
   }
 
   /**
-   * Take a parked task back to `working` on `answer`, and return it — or
-   * `null` when it is not parked, which is what a retried answer finds after
-   * the first resumed it.
-   *
-   * Owes the answer's relay in the same statement, so a send that fails or an
-   * eviction before it leaves the answer to be relayed rather than a task
-   * `working` with a workflow still waiting. Drops the question's callback too:
-   * once answered, a retry still queued would post it again.
+   * Close a pending request on its answer or its expiry, answering whether
+   * this call closed it, and drop its callback if it has not gone yet: a retry
+   * still queued would post an answered question again.
    */
-  resume(taskId: string, answer: OwedAnswer): PlainTask | null {
-    const row = this.#stored(taskId);
-    if (!row || row.state !== "input-required") return null;
-    const task = parse(row.task_json);
-    task.status = {
-      state: TaskState.TASK_STATE_WORKING,
-      message: undefined,
-      timestamp: new Date().toISOString()
-    };
-    const request = row.request_json
-      ? (JSON.parse(row.request_json) as HitlRequestData)
-      : null;
-    const asked = request ? questionKey(request.requestId) : "";
-    const rows = this.sql<{ task_id: string }>`
-      UPDATE da_a2a_tasks
-      SET state = 'working', task_json = ${serialize(task)},
-          request_json = NULL, answer_json = ${JSON.stringify(answer)},
-          delivery_key = CASE WHEN delivery_key = ${asked}
-                         THEN NULL ELSE delivery_key END,
-          updated_at = ${Date.now()}
-      WHERE task_id = ${taskId} AND state = 'input-required'
-      RETURNING task_id`;
-    return rows.length > 0 ? task : null;
+  closeRequest(
+    taskId: string,
+    requestId: string,
+    state: "answered" | "expired"
+  ): boolean {
+    this.#ensure();
+    return this.transaction(() => {
+      const rows = this.sql<{ request_id: string }>`
+        UPDATE da_a2a_requests SET state = ${state}
+        WHERE request_id = ${requestId} AND task_id = ${taskId}
+          AND state = 'pending'
+        RETURNING request_id`;
+      if (rows.length === 0) return false;
+      this.sql`DELETE FROM da_a2a_deliveries
+        WHERE task_id = ${taskId} AND key = ${questionKey(requestId)}`;
+      return true;
+    });
   }
 
-  /** The answer was relayed. */
-  answered(taskId: string, id: string): void {
+  /**
+   * Move a running task to `working` or `input-required`, owing the state's
+   * callback in the same write. Answers whether the state changed: a step run
+   * again finds it there already, and owes nothing twice.
+   */
+  setState(
+    taskId: string,
+    state: "working" | "input-required",
+    task: Task
+  ): boolean {
     this.#ensure();
-    this.sql`UPDATE da_a2a_tasks SET answer_json = NULL
-      WHERE task_id = ${taskId} AND json_extract(answer_json, '$.id') = ${id}`;
+    return this.transaction(() => {
+      const rows = this.sql<{ task_id: string }>`
+        UPDATE da_a2a_tasks
+        SET state = ${state}, task_json = ${serialize(task)},
+            updated_at = ${Date.now()}
+        WHERE task_id = ${taskId}
+          AND state IN ('working', 'input-required') AND state <> ${state}
+        RETURNING task_id`;
+      if (rows.length === 0) return false;
+      this.owe(taskId, STATE_KEY, task);
+      return true;
+    });
+  }
+
+  /**
+   * Owe one callback of an open task, keyed on what it reports. A repeat under
+   * the same key replaces what it would post: the latest state is the one owed.
+   */
+  owe(taskId: string, key: string, task: Task): void {
+    this.#ensure();
+    this.sql`INSERT INTO da_a2a_deliveries (task_id, key, task_json, created_at)
+      VALUES (${taskId}, ${key}, ${serialize(task)}, ${Date.now()})
+      ON CONFLICT (task_id, key) DO UPDATE SET task_json = excluded.task_json`;
+  }
+
+  /** Every callback an open task still owes: a settled task owes none of them. */
+  #dropOwed(taskId: string): void {
+    this.sql`DELETE FROM da_a2a_deliveries WHERE task_id = ${taskId}`;
   }
 
   /**
@@ -427,15 +522,18 @@ export class A2ATasks {
     this.#ensure();
     const state = stateLabelOf(task);
     const stop = options.stop ? 1 : 0;
-    const rows = this.sql<{ task_id: string }>`
-      UPDATE da_a2a_tasks
-      SET state = ${state}, task_json = ${serialize(task)},
-          delivery_key = ${state}, hooks_pending = 1, stop_pending = ${stop},
-          request_json = NULL, answer_json = NULL, updated_at = ${Date.now()}
-      WHERE task_id = ${task.id}
-        AND state IN ('submitted', 'working', 'input-required')
-      RETURNING task_id`;
-    return rows.length > 0;
+    return this.transaction(() => {
+      const rows = this.sql<{ task_id: string }>`
+        UPDATE da_a2a_tasks
+        SET state = ${state}, task_json = ${serialize(task)},
+            delivery_key = ${state}, hooks_pending = 1, stop_pending = ${stop},
+            updated_at = ${Date.now()}
+        WHERE task_id = ${task.id}
+          AND state IN ('submitted', 'working', 'input-required')
+        RETURNING task_id`;
+      if (rows.length > 0) this.#dropOwed(task.id);
+      return rows.length > 0;
+    });
   }
 
   /** Acknowledge one callback — only if it is still the one owed. */
@@ -443,6 +541,8 @@ export class A2ATasks {
     this.#ensure();
     this.sql`UPDATE da_a2a_tasks SET delivery_key = NULL
       WHERE task_id = ${taskId} AND delivery_key = ${key}`;
+    this.sql`DELETE FROM da_a2a_deliveries
+      WHERE task_id = ${taskId} AND key = ${key}`;
   }
 
   /** The settle hooks ran. */
@@ -474,6 +574,10 @@ export class A2ATasks {
     this.sql`DELETE FROM da_a2a_tasks
       WHERE created_at < ${before}
         AND state NOT IN ('submitted', 'working', 'input-required')`;
+    this.sql`DELETE FROM da_a2a_requests
+      WHERE task_id NOT IN (SELECT task_id FROM da_a2a_tasks)`;
+    this.sql`DELETE FROM da_a2a_deliveries
+      WHERE task_id NOT IN (SELECT task_id FROM da_a2a_tasks)`;
   }
 }
 
@@ -514,13 +618,27 @@ function project(row: StoredTask): TaskRow {
       ? (JSON.parse(row.identity_json) as GatekeeperIdentity)
       : null,
     bound: row.bound === 1,
-    request: row.request_json
-      ? (JSON.parse(row.request_json) as HitlRequestData)
-      : null,
     deliveryKey: row.delivery_key,
     hooksPending: row.hooks_pending === 1,
-    stopPending: row.stop_pending === 1,
-    answer: row.answer_json ? (JSON.parse(row.answer_json) as OwedAnswer) : null
+    stopPending: row.stop_pending === 1
+  };
+}
+
+interface StoredRequest {
+  request_id: string;
+  task_id: string;
+  step_job_id: string;
+  request_json: string;
+  state: string;
+}
+
+function projectRequest(row: StoredRequest): RequestRow {
+  return {
+    requestId: row.request_id,
+    taskId: row.task_id,
+    stepJobId: row.step_job_id,
+    request: JSON.parse(row.request_json) as HitlRequestData,
+    state: row.state as RequestRow["state"]
   };
 }
 

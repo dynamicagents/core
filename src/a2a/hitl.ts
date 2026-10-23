@@ -12,11 +12,13 @@ import { dataPart, textPart } from "./parts.js";
 /**
  * Asking a person something through the gatekeeper, on the wire.
  *
- * A2A carries the exchange: the Task parks in `input-required` with the question
- * on its status, and the answer arrives as a new message on the same Task. The
- * part names both sides read by are `@dynamicagents/g2a-protocol`'s. What is here
- * is core's half of it — building the question, and reading an answer back out of
- * a message that has to be treated as untrusted until it parses.
+ * A2A carries the exchange: a question rides a status update of the Task, and
+ * the answer arrives as a new message on the same Task. Any number may be open,
+ * each matched by its request id, and the Task goes `input-required` only once
+ * the agent is idle with nothing but them to wait on. The part names both sides
+ * read by are `@dynamicagents/g2a-protocol`'s. What is here is core's half of
+ * it: building the question, and reading an answer back out of a message that
+ * has to be treated as untrusted until it parses.
  *
  * **Every gatekeeper takes part.** Putting a question in front of a person, and
  * sending back their answer or a timeout, is the gatekeeper's side of the
@@ -72,8 +74,10 @@ function indent(text: string, by: string): string {
 }
 
 /**
- * The `input-required` Task that asks: the questions as text, for a client that
- * knows none of this, and as data, for the gatekeeper that renders them.
+ * The `working` Task that asks: the questions as text, for a client that knows
+ * none of this, and as data, for the gatekeeper that renders them. `working`,
+ * because asking stops nothing else the task is doing; {@link buildWaitingTask}
+ * says when all it does is wait.
  *
  * An SDK `Task` rather than a `PlainTask`, because a data part cannot cross
  * Durable Object RPC typed — see {@link file://./task.ts}. It is built, stored and
@@ -81,20 +85,48 @@ function indent(text: string, by: string): string {
  *
  * The status message id is the request id, so a retried post is the same message.
  */
-export function buildInputRequiredTask(
+export function buildAskingTask(
   taskId: string,
   contextId: string,
   request: HitlRequestData
+): Task {
+  return statusTask(taskId, contextId, TaskState.TASK_STATE_WORKING, {
+    messageId: request.requestId,
+    parts: [textPart(formRequestText(request)), dataPart(request)]
+  });
+}
+
+/**
+ * The `input-required` Task of an agent idle with only open questions left to
+ * wait on. It asks nothing new: each question went out as it was asked.
+ * `messageId` is unique to this change of state, so the gatekeeper takes it
+ * once, and once only.
+ */
+export function buildWaitingTask(
+  taskId: string,
+  contextId: string,
+  messageId: string
+): Task {
+  return statusTask(taskId, contextId, TaskState.TASK_STATE_INPUT_REQUIRED, {
+    messageId,
+    parts: []
+  });
+}
+
+function statusTask(
+  taskId: string,
+  contextId: string,
+  state: TaskState,
+  message: Pick<Message, "messageId" | "parts">
 ): Task {
   return {
     id: taskId,
     contextId,
     status: {
-      state: TaskState.TASK_STATE_INPUT_REQUIRED,
+      state,
       message: {
-        messageId: request.requestId,
+        ...message,
         role: Role.ROLE_AGENT,
-        parts: [textPart(formRequestText(request)), dataPart(request)],
         contextId,
         taskId,
         metadata: undefined,
@@ -154,8 +186,8 @@ const timeoutSchema = z.object({
 
 /**
  * The answer or the timeout a message carries, or `null` when it carries neither
- * in a shape that parses — which is how an ordinary follow-up message on a Task
- * reads, and why the Worker refuses one before it reaches a parked Task.
+ * in a shape that parses: how an ordinary message on a Task reads, which the
+ * Worker joins to the Task rather than takes as an answer.
  */
 export function readHumanReply(message: Message): HumanReply | null {
   for (const part of message.parts) {

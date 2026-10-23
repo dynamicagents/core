@@ -37,18 +37,12 @@ export async function stepJobIdFor(
 }
 
 /**
- * The event of a job's `n`th report. One type per report, because Workflows
- * buffers an event sent before its wait begins, and two reports under one type
- * would be taken by whichever wait came first.
+ * The one event type a job's events travel under: its agent's reports and the
+ * host's inputs alike. Workflows keeps every event sent under a type and hands
+ * them to successive waits in the order they arrived, and only that: two sends
+ * in flight at once arrive in either order. So each writer numbers its own
+ * events, and the reader puts them back in order (see `JobEvent`).
  */
-export async function reportEventType(
-  stepJobId: string,
-  n: number
-): Promise<string> {
-  return `sj-${await digest(stepJobId)}-${n}`;
-}
-
-/** The event carrying a person's answer to one question. */
-export async function answerEventType(requestId: string): Promise<string> {
-  return `ans-${await digest(requestId)}`;
+export async function jobEventType(stepJobId: string): Promise<string> {
+  return `job-${await digest(stepJobId)}`;
 }

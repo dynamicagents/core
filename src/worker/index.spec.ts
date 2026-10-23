@@ -91,6 +91,11 @@ declare class SpecAgent implements TaskAgent {
     messageId: string;
     reply: HumanReply;
   }): Promise<boolean>;
+  joinTask(input: {
+    taskId: string;
+    messageId: string;
+    text: string;
+  }): Promise<"joined" | "closed">;
 }
 
 interface TestEnv extends A2ASecretsEnv {
@@ -904,9 +909,12 @@ describe("a message on an existing task", () => {
       recording?: "throws";
       answer?: "ends" | "beaten" | "refused";
       closed?: true;
+      /** The tenant takes no joined message: its task closed, or never took one. */
+      joins?: "closed";
     } = {}
   ) {
     const answered: unknown[] = [];
+    const joined: unknown[] = [];
     // What the handler last wrote, so a read after its own write sees it — a
     // cancel reads the Task back to confirm it took.
     let stored: Task = testTask(
@@ -957,6 +965,14 @@ describe("a message on an existing task", () => {
           )
         };
         return true;
+      },
+      async joinTask(input: unknown) {
+        if (options.recording === "throws") {
+          throw new Error("Durable Object reset");
+        }
+        if (options.joins === "closed") return "closed" as const;
+        joined.push(input);
+        return "joined" as const;
       }
     };
     const handler = createA2AWorker({
@@ -976,7 +992,7 @@ describe("a message on an existing task", () => {
         }),
         env
       );
-    return { call, answered, state: () => stored.status?.state };
+    return { call, answered, joined, state: () => stored.status?.state };
   }
 
   /** A `SendMessage` onto the parked Task, carrying `parts`. */
@@ -1064,16 +1080,51 @@ describe("a message on an existing task", () => {
     expect(body.error?.message).toMatch(/terminal state/);
   });
 
-  it("refuses an ordinary message on a task, and leaves the task waiting", async () => {
-    const { call, answered } = parkedTenant();
+  it("joins an ordinary message onto the open task, as more input to it", async () => {
+    const { call, answered, joined } = parkedTenant();
 
     const res = await call(onto([{ text: "and one more thing" }]));
+    const body = await res.json<{
+      error?: { message: string };
+      result?: { task?: { id: string } };
+    }>();
+
+    expect(body.error).toBeUndefined();
+    expect(body.result?.task?.id).toBe(parkedId);
+    expect(joined).toEqual([
+      {
+        taskId: parkedId,
+        messageId: "gk-token:r:q1",
+        text: "and one more thing"
+      }
+    ]);
+    expect(answered).toEqual([]);
+  });
+
+  it("refuses a message onto a task that takes no more, so the caller starts one", async () => {
+    const { call, joined } = parkedTenant({ joins: "closed" });
+
+    const res = await call(onto([{ text: "and one more thing" }]));
+    const body = await res.json<{
+      error?: { code: number; message: string };
+    }>();
+
+    // The code the handler gives a message onto a terminal task: the
+    // gatekeeper reads it as "start a new task with this one".
+    expect(body.error?.code).toBe(A2A_ERROR_CODE.UNSUPPORTED_OPERATION);
+    expect(body.error?.message).toMatch(/start a new task/);
+    expect(joined).toEqual([]);
+  });
+
+  it("refuses a message onto a task that carries neither an answer nor text", async () => {
+    const { call, answered, joined } = parkedTenant();
+
+    const res = await call(onto([{ text: "   " }]));
     const body = await res.json<{ error?: { message: string } }>();
 
-    expect(body.error?.message).toMatch(
-      /must answer the question the task asked/
-    );
+    expect(body.error?.message).toMatch(/carries an answer/);
     expect(answered).toEqual([]);
+    expect(joined).toEqual([]);
   });
 
   it("refuses an answer that does not fit the question, saying why, and leaves the task waiting", async () => {

@@ -117,7 +117,7 @@ export type AskUserInput = z.infer<typeof askUserInputSchema>;
  */
 export const askUserTool: Tool<AskUserInput> = tool({
   description:
-    "Ask the person you are working for, and stop. Put every question you need answered now in this one call: they answer them together, and the answers arrive as their next message. Give each option a short label, say what it means in its description, and show it in an example when seeing it helps. Use it when you cannot go on well without a decision or a fact only they have — not to announce what you are about to do, and not to confirm what you already know.",
+    "Ask the person you are working for, and stop. Put every question you need answered now in this one call: they answer them together, and the answers arrive as a message of their own. Give each option a short label, say what it means in its description, and show it in an example when seeing it helps. Use it when you cannot go on well without a decision or a fact only they have, not to announce what you are about to do, and not to confirm what you already know.",
   inputSchema: askUserInputSchema
 });
 
@@ -196,6 +196,29 @@ export function formAnswerText(
   return request.questions
     .map((q, i) => `${i + 1}. ${q.prompt}\n${texts[q.id] ?? ""}`)
     .join("\n\n");
+}
+
+/**
+ * An answer's turn. With other requests still open it says which one it
+ * answers: beside two open questions, a bare "Yes" is the model's guess.
+ */
+export function answerTurnText(
+  request: HitlRequestData,
+  texts: Record<string, string>,
+  othersOpen: boolean
+): string {
+  const text = formAnswerText(request, texts);
+  return othersOpen ? `Answer to "${requestTitle(request)}":\n\n${text}` : text;
+}
+
+/** What the model reads when nobody answered a request before it expired. */
+export function expiredRequestText(request: HitlRequestData): string {
+  return `Nobody answered "${requestTitle(request)}" before it expired. Go on without the answer, or ask again.`;
+}
+
+/** What a request asks, in a line: its prompt, or its first question. */
+function requestTitle(request: HitlRequestData): string {
+  return request.prompt ?? request.questions[0]?.prompt ?? "";
 }
 
 /**
