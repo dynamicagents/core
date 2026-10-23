@@ -45,9 +45,14 @@ function setup(label: string) {
     env: testEnv,
     identity: { key, name: "Spec Caller", kind: "custom", workspaceId: 1 }
   });
-  const host = testEnv.TEST_HOST.get(testEnv.TEST_HOST.idFromName(key));
-  const agent = testEnv.TEST_AGENT.get(testEnv.TEST_AGENT.idFromName(key));
-  const agentB = testEnv.TEST_STEP_B.get(testEnv.TEST_STEP_B.idFromName(key));
+  // Every object this caller's work lives in is named by its **scope**, not by
+  // the identity key the token claims: the key is one half of that name. The
+  // harness composes it the way the edge does, so a spec reads the object the
+  // turns it sends actually ran in.
+  const scope = harness.callerScope;
+  const host = testEnv.TEST_HOST.get(testEnv.TEST_HOST.idFromName(scope));
+  const agent = testEnv.TEST_AGENT.get(testEnv.TEST_AGENT.idFromName(scope));
+  const agentB = testEnv.TEST_STEP_B.get(testEnv.TEST_STEP_B.idFromName(scope));
   const reports = async (stub = agent): Promise<StepReportDebug[]> =>
     JSON.parse(await stub.debugStepJobs()) as StepReportDebug[];
   const debug = async (stepJobId: string, stub = agent): Promise<JobDebug> =>
@@ -58,6 +63,7 @@ function setup(label: string) {
     JSON.parse(await host.debugTask(taskId)) as TaskDebug;
   return {
     key,
+    scope,
     harness,
     host,
     agent,
@@ -165,8 +171,8 @@ async function sendAs(
   return body.result.task.id;
 }
 
-async function trackedCount(key: string, taskId: string): Promise<number> {
-  const host = testEnv.TEST_HOST.get(testEnv.TEST_HOST.idFromName(key));
+async function trackedCount(scope: string, taskId: string): Promise<number> {
+  const host = testEnv.TEST_HOST.get(testEnv.TEST_HOST.idFromName(scope));
   return runInDurableObject(host, (instance) => {
     return (
       instance.sql<{ n: number }>`SELECT COUNT(*) AS n FROM cf_agents_workflows
@@ -218,14 +224,14 @@ describe("G1: the edge → the host → the workflow", () => {
   });
 
   it("starts nothing for a redelivered messageId", async () => {
-    const { key, harness } = setup("g1-redeliver");
+    const { scope, harness } = setup("g1-redeliver");
     using _ = harness.interceptGatekeeper();
     const messageId = crypto.randomUUID();
     const first = await sendAs(harness, messageId, "echo:once");
     const second = await sendAs(harness, messageId, "echo:once");
     expect(second).toBe(first);
     await harness.waitForTerminal(first);
-    expect(await trackedCount(key, first)).toBe(1);
+    expect(await trackedCount(scope, first)).toBe(1);
     await pause(300);
     expect(terminals(harness, first)).toHaveLength(1);
   });
@@ -236,7 +242,7 @@ describe("G1: the edge → the host → the workflow", () => {
    */
   for (const boundary of ["row", "create", "tracking"] as const) {
     it(`recovers from a start cut after the ${boundary}, to one instance`, async () => {
-      const { key, harness, host } = setup(`g1-${boundary}`);
+      const { key, scope, harness, host } = setup(`g1-${boundary}`);
       using _ = harness.interceptGatekeeper();
       const messageId = crypto.randomUUID();
       const taskId = crypto.randomUUID();
@@ -275,7 +281,7 @@ describe("G1: the edge → the host → the workflow", () => {
           messageId,
           text: turn.text,
           identity: turn.identity,
-          callerKey: key,
+          callerKey: scope,
           caller: "",
           jku: turn.jku,
           hostBinding: "TEST_HOST"
@@ -286,14 +292,14 @@ describe("G1: the edge → the host → the workflow", () => {
             id: taskId,
             params: {
               ...params,
-              __agentName: key,
+              __agentName: scope,
               __agentBinding: "TEST_HOST",
               __workflowName: "TEST_TASK",
               __agentOrigin: {
                 kind: "agent",
                 version: 1,
                 binding: "TEST_HOST",
-                name: key
+                name: scope
               }
             } as unknown as TaskParams
           });
@@ -317,7 +323,7 @@ describe("G1: the edge → the host → the workflow", () => {
       // retry adopts the row that attempt already wrote. Adoption is why `1`
       // here is not core's row in the last case.
       const tracked = { row: 1, create: 0, tracking: 1 } as const;
-      expect(await trackedCount(key, taskId)).toBe(tracked[boundary]);
+      expect(await trackedCount(scope, taskId)).toBe(tracked[boundary]);
       await pause(300);
       expect(terminals(harness, taskId)).toHaveLength(1);
     });
@@ -512,7 +518,7 @@ describe("G5: stopping", () => {
   });
 
   it("starts nothing for a job stopped before its start arrived", async () => {
-    const { key, agent, debug } = setup("g5-race");
+    const { key, scope, agent, debug } = setup("g5-race");
     const stepJobId = `race-${crypto.randomUUID()}:main`;
     await agent.cancelStepJob(stepJobId);
     const job: StepJob = {
@@ -525,7 +531,7 @@ describe("G5: stopping", () => {
       identity: { key, name: "Spec Caller", kind: "custom", workspaceId: 1 },
       jku: "https://agent.test/.well-known/jwks.json",
       workflow: { name: "TEST_TASK", id: "none" },
-      host: { binding: "TEST_HOST", name: key }
+      host: { binding: "TEST_HOST", name: scope }
     };
     await agent.startStepJob(job);
     await pause(500);
@@ -541,7 +547,7 @@ describe("G5: stopping", () => {
   });
 
   it("drops a report whose instance has ended", async () => {
-    const { key, agent, reports } = setup("g5-drop");
+    const { key, scope, agent, reports } = setup("g5-drop");
     // An instance for a task no host holds: its first step is refused, and it errors.
     const instanceId = crypto.randomUUID();
     await testEnv.TEST_TASK.create({
@@ -552,11 +558,11 @@ describe("G5: stopping", () => {
         messageId: "m",
         text: "echo:x",
         identity: { key },
-        callerKey: key,
+        callerKey: scope,
         caller: "",
         jku: "https://agent.test/.well-known/jwks.json",
         hostBinding: "TEST_HOST",
-        __agentName: key,
+        __agentName: scope,
         __agentBinding: "TEST_HOST",
         __workflowName: "TEST_TASK"
       } as unknown as TaskParams
@@ -576,7 +582,7 @@ describe("G5: stopping", () => {
       identity: { key, name: "Spec Caller", kind: "custom", workspaceId: 1 },
       jku: "https://agent.test/.well-known/jwks.json",
       workflow: { name: "TEST_TASK", id: instanceId },
-      host: { binding: "TEST_HOST", name: key }
+      host: { binding: "TEST_HOST", name: scope }
     });
     const sent = await until(
       "the report dropped",

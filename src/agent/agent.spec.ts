@@ -62,9 +62,13 @@ function harnessFor(label: string, binding: AgentBinding = "TEST_AGENT") {
   });
   const ns = testEnv[binding] as DurableObjectNamespace<TestAgent>;
   /** A stub an abort broke stays broken, so the reads take a fresh one. */
-  const stub = () => ns.get(ns.idFromName(key));
+  // Named by the caller's **scope**, which is the identity key bound to the
+  // gatekeeper origin that signed for it: the edge routes a turn there, so a
+  // spec reading a job's ledger has to look there too.
+  const scope = harness.callerScope;
+  const stub = () => ns.get(ns.idFromName(scope));
   const agent = stub();
-  const host = testEnv.TEST_HOST.get(testEnv.TEST_HOST.idFromName(key));
+  const host = testEnv.TEST_HOST.get(testEnv.TEST_HOST.idFromName(scope));
   /** The job a one-step pipeline runs for the task. */
   const debug = async (taskId: string): Promise<JobDebug> =>
     JSON.parse(await stub().debugJob(`${taskId}:main`)) as JobDebug;

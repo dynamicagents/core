@@ -1,5 +1,5 @@
 import type { Task, TaskState } from "@a2a-js/sdk";
-import type { GatekeeperIdentity } from "./verify.js";
+import type { VerifiedCaller } from "./caller-scope.js";
 import type { PlainTask } from "./task.js";
 import type { HumanReply } from "./hitl.js";
 import type { AcceptedTurn } from "./executor.js";
@@ -69,7 +69,10 @@ export interface TaskListPage {
 
 /**
  * Resolve the agent DO stub for a verified caller. The conventional
- * implementation keys one instance per `identity.key`, which is what makes a
- * task unreachable from any other caller by construction.
+ * implementation keys one instance per `caller.scope`, which is what makes a
+ * task unreachable from any other caller by construction: see
+ * {@link file://./caller-scope.ts VerifiedCaller} for what that name binds, and
+ * {@link file://../worker/define-agent.ts defineAgent} for the implementation
+ * every agent here uses.
  */
-export type AgentResolver = (identity: GatekeeperIdentity) => TaskAgent;
+export type AgentResolver = (caller: VerifiedCaller) => TaskAgent;

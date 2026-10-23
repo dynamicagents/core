@@ -24,7 +24,10 @@ import { makeGatekeeperToken, TEST_TENANT } from "../testing/auth.js";
 import {
   AGENT_ORIGIN,
   GATEKEEPER_ORIGIN,
+  SECOND_GATEKEEPER_ORIGIN,
   TEST_AGENT_PRIVATE_JWK,
+  TEST_GATEKEEPERS,
+  TEST_SECOND_GATEKEEPER,
   gatekeeperPublicJwks,
   testStatus,
   testTask
@@ -126,8 +129,13 @@ const sendMessage = (params: object, tenant: string = TEST_TENANT) => ({
 beforeAll(() => {
   vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === `${GATEKEEPER_ORIGIN}/.well-known/jwks.json`) {
-      return new Response(gatekeeperPublicJwks(), {
+    // Every fixture gatekeeper's JWKS: a deployment may list more than one, and
+    // `caller routing` below drives calls from two of them.
+    const gatekeeper = TEST_GATEKEEPERS.find(
+      (gk) => url === `${gk.origin}/.well-known/jwks.json`
+    );
+    if (gatekeeper) {
+      return new Response(gatekeeperPublicJwks(gatekeeper), {
         headers: { "content-type": "application/json" }
       });
     }
@@ -571,6 +579,139 @@ describe("tenant routing", () => {
     // tenant check rejected a legitimate call.
     expect(res.status).toBe(400);
     expect(await res.text()).toMatch(/identity missing key/);
+  });
+});
+
+/**
+ * Which **instance** a verified call is served, as the edge decides it.
+ *
+ * The tenant above chooses the agent; this chooses the object, and it is the
+ * only authorization a caller's durable state has. A deployment may list several
+ * gatekeepers, each of which signs honestly for callers of its own, and each of
+ * which writes the instance key in its token itself. So the name an object is
+ * reached under cannot be that key alone: two gatekeepers may claim one, and a
+ * shared name is a shared task list, a shared parked question and a shared push
+ * channel.
+ *
+ * These specs read the names the namespace is asked for, which is the one place
+ * the decision is observable before a Durable Object exists.
+ */
+describe("caller routing", () => {
+  /** The key both gatekeepers claim below. A routing name, never a secret. */
+  const SHARED_KEY = "remote:7:analytics";
+
+  /**
+   * A namespace that records every name asked of it and answers with a stub
+   * carrying just enough of the lifecycle for `ListTasks` to succeed. A method
+   * that cannot fail keeps each case about the name rather than about what the
+   * object did with the call.
+   */
+  const recordingNamespace = () => {
+    const names: string[] = [];
+    const namespace = {
+      idFromName(name: string) {
+        names.push(name);
+        return { name } as unknown as DurableObjectId;
+      },
+      get() {
+        return { listTasks: async () => ({ tasks: [], totalSize: 0 }) };
+      }
+    };
+    return {
+      names,
+      namespace: namespace as unknown as DurableObjectNamespace<SpecAgent>
+    };
+  };
+
+  /** A Worker over a recording namespace, and the names it was asked for. */
+  const mount = () => {
+    const { names, namespace } = recordingNamespace();
+    const worker = createA2AWorker<TestEnv>({
+      manifest: hostManifest,
+      agents: [
+        defineAgent({
+          tenant: TEST_TENANT,
+          manifest: manifest("routed"),
+          agent: (bound: TestEnv) => bound.AGENT_DO
+        })
+      ]
+    });
+    // Both gatekeepers listed: the exposure this routing answers needs a second
+    // listed origin to exist at all, so every case here is read against one.
+    const bound: TestEnv = {
+      A2A_SIGNING_KEY: JSON.stringify(TEST_AGENT_PRIVATE_JWK),
+      GATEKEEPER_ORIGINS: JSON.stringify([
+        GATEKEEPER_ORIGIN,
+        SECOND_GATEKEEPER_ORIGIN
+      ]),
+      AGENT_DO: namespace
+    };
+    const list = async (token: string): Promise<Response> =>
+      worker(
+        post(
+          {
+            jsonrpc: "2.0",
+            id: 11,
+            method: "ListTasks",
+            params: { tenant: TEST_TENANT }
+          },
+          {
+            authorization: `Bearer ${token}`,
+            "A2A-Version": A2A_PROTOCOL_VERSION
+          }
+        ),
+        bound
+      );
+    return { names, list };
+  };
+
+  it("serves two listed gatekeepers claiming one caller key two instances", async () => {
+    // Both tokens are honest: each is signed by the origin it names, and each
+    // carries a tenant this deployment mounts. They differ only in who signed,
+    // which is exactly what the claimed key cannot express.
+    const { names, list } = mount();
+    const mine = await makeGatekeeperToken({ identity: { key: SHARED_KEY } });
+    const theirs = await makeGatekeeperToken({
+      gatekeeper: TEST_SECOND_GATEKEEPER,
+      identity: { key: SHARED_KEY }
+    });
+
+    expect((await list(mine)).status).toBe(200);
+    expect((await list(theirs)).status).toBe(200);
+
+    expect(names).toHaveLength(2);
+    expect(names[0]).not.toBe(names[1]);
+    // The claimed key alone is not the name, which is the whole of it: were it
+    // the name, the two calls above would have been served one object.
+    expect(names).not.toContain(SHARED_KEY);
+    expect(names[0].startsWith(GATEKEEPER_ORIGIN)).toBe(true);
+    expect(names[1].startsWith(SECOND_GATEKEEPER_ORIGIN)).toBe(true);
+  });
+
+  it("serves one caller the same instance on every request", async () => {
+    // The property the binding must not cost: a caller's tasks outlive the
+    // request that made them, so the name has to be a function of the pair and
+    // of nothing else about the call.
+    const { names, list } = mount();
+    const token = await makeGatekeeperToken({ identity: { key: SHARED_KEY } });
+
+    await list(token);
+    await list(await makeGatekeeperToken({ identity: { key: SHARED_KEY } }));
+
+    expect(names).toHaveLength(2);
+    expect(names[1]).toBe(names[0]);
+  });
+
+  it("serves one gatekeeper's two callers two instances", async () => {
+    // The isolation that was already there, re-asserted: binding to the issuer
+    // must not collapse a gatekeeper's own callers into one object.
+    const { names, list } = mount();
+
+    await list(await makeGatekeeperToken({ identity: { key: "remote:7:a" } }));
+    await list(await makeGatekeeperToken({ identity: { key: "remote:7:b" } }));
+
+    expect(names).toHaveLength(2);
+    expect(names[0]).not.toBe(names[1]);
   });
 });
 

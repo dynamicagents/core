@@ -46,9 +46,83 @@ export const TEST_GATEKEEPER_PRIVATE_JWK: JWK & { kid: string } = {
   kid: "test-gk-key-1"
 };
 
-/** Public JWKS the gatekeeper would serve at its `jku` (the private key minus `d`). */
-export function gatekeeperPublicJwks(): string {
-  const { d: _d, ...pub } = TEST_GATEKEEPER_PRIVATE_JWK;
+/**
+ * A **second** gatekeeper origin, with a key of its own.
+ *
+ * Its reason for existing is the case a single gatekeeper cannot express: a
+ * deployment that lists more than one origin, where a token can be entirely
+ * honest about who signed it and still claim another gatekeeper's caller. A
+ * spec mints as this one by naming it when it makes a token
+ * ({@link file://./auth.ts makeGatekeeperToken}), and allowlists both origins in
+ * `GATEKEEPER_ORIGINS`.
+ */
+export const SECOND_GATEKEEPER_ORIGIN = "https://gatekeeper-two.test";
+
+/** Fixed Ed25519 private JWK for {@link SECOND_GATEKEEPER_ORIGIN}. */
+export const TEST_SECOND_GATEKEEPER_PRIVATE_JWK: JWK & { kid: string } = {
+  crv: "Ed25519",
+  d: "hIJfTncdTzEbTWKB7tC4uUYF1Enpqoc5yZSEjK-jjvA",
+  x: "LiY0Ld6VtMrQfkbfwYCCtNZ8l43IOA36LLrsJj45gz4",
+  kty: "OKP",
+  kid: "test-gk-key-2"
+};
+
+/**
+ * The caller every token names unless a spec says otherwise.
+ *
+ * `key` is a routing name and half of the Durable Object name the edge serves
+ * this caller under, so a spec that reaches that object directly composes the
+ * other half rather than using this value alone. The harness publishes the whole
+ * name as `AgentHarness.callerScope`.
+ */
+export const TEST_CALLER_IDENTITY = {
+  key: "custom:1:test-agent",
+  name: "Test Agent",
+  kind: "custom",
+  workspaceId: 1
+};
+
+/**
+ * One gatekeeper as a spec addresses it: the origin it issues from and the key
+ * it signs with.
+ *
+ * The two travel together because a token is only verifiable when they agree:
+ * `jku` is derived from the origin, `iss` is the origin, and the signature is
+ * the key's. Splitting them across two options is how a spec ends up minting a
+ * token no deployment would accept, or asserting a rejection that would have
+ * happened anyway.
+ */
+export interface TestGatekeeper {
+  origin: string;
+  privateJwk: JWK & { kid: string };
+}
+
+/** The gatekeeper every token is minted as unless a spec says otherwise. */
+export const TEST_GATEKEEPER: TestGatekeeper = {
+  origin: GATEKEEPER_ORIGIN,
+  privateJwk: TEST_GATEKEEPER_PRIVATE_JWK
+};
+
+/** The other listed gatekeeper. See {@link SECOND_GATEKEEPER_ORIGIN}. */
+export const TEST_SECOND_GATEKEEPER: TestGatekeeper = {
+  origin: SECOND_GATEKEEPER_ORIGIN,
+  privateJwk: TEST_SECOND_GATEKEEPER_PRIVATE_JWK
+};
+
+/** Every gatekeeper a spec can mint as, for a stub serving all their JWKS. */
+export const TEST_GATEKEEPERS: readonly TestGatekeeper[] = [
+  TEST_GATEKEEPER,
+  TEST_SECOND_GATEKEEPER
+];
+
+/**
+ * Public JWKS a gatekeeper would serve at its `jku` (its private key minus `d`),
+ * defaulting to {@link TEST_GATEKEEPER}'s.
+ */
+export function gatekeeperPublicJwks(
+  gatekeeper: TestGatekeeper = TEST_GATEKEEPER
+): string {
+  const { d: _d, ...pub } = gatekeeper.privateJwk;
   return JSON.stringify({ keys: [{ ...pub, use: "sig", alg: "EdDSA" }] });
 }
 

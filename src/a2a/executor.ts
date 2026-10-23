@@ -6,6 +6,7 @@ import {
 } from "@a2a-js/sdk/server";
 import type { Task } from "@a2a-js/sdk";
 import type { GatekeeperIdentity } from "./verify.js";
+import type { VerifiedCaller } from "./caller-scope.js";
 import type { AgentResolver } from "./agent-stub.js";
 import { textOf } from "./parts.js";
 
@@ -27,7 +28,11 @@ export interface AcceptedTurn {
 }
 
 export interface ExecutorConfig {
-  identity: GatekeeperIdentity;
+  /**
+   * The verified caller this executor runs for: the identity it records on the
+   * turn, and the scope it resolves the agent by.
+   */
+  caller: VerifiedCaller;
   /** This agent's card-signing JWKS URL — the callback JWT `jku`. */
   jku: string;
   resolveAgent: AgentResolver;
@@ -71,16 +76,18 @@ export class A2AExecutor implements AgentExecutor {
       return;
     }
 
-    // `identity.key` is guaranteed non-null: the Worker rejects a keyless
-    // identity (400) before constructing this executor.
+    // The caller's scope exists by construction, and with it the object this
+    // resolves: the Worker rejects a keyless identity (400) before an executor
+    // is built. The identity rides along as what the model is told about its
+    // caller, and selects nothing.
     const accepted = await this.config
-      .resolveAgent(this.config.identity)
+      .resolveAgent(this.config.caller)
       .acceptTask({
         messageId: requestContext.userMessage.messageId,
         taskId: requestContext.taskId,
         contextId: requestContext.contextId,
         text: textOf(requestContext.userMessage),
-        identity: this.config.identity,
+        identity: this.config.caller.identity,
         pushUrl: pushConfig.url,
         pushToken: pushConfig.token,
         jku: this.config.jku
@@ -105,7 +112,7 @@ export class A2AExecutor implements AgentExecutor {
     eventBus: ExecutionEventBus
   ): Promise<void> => {
     const task = await this.config
-      .resolveAgent(this.config.identity)
+      .resolveAgent(this.config.caller)
       .cancelTask(taskId);
     if (task) eventBus.publish(AgentEvent.task(task));
     eventBus.finished();
