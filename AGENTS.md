@@ -385,3 +385,17 @@ no credentials and no network to test its own harness.
 > resolved it — both consumers were still on `^0.2.0` — so 0.3.0 and 0.3.1 are
 > one change that happened to cross a publish. Treat the format as frozen from
 > here; the next one that breaks it takes a minor.
+
+---
+
+## Copilot reviews a pull request once
+
+Opening a pull request ready for review gets it one Copilot review, requested
+automatically, and that is the only one it gets. A push asks for nothing, and a
+second review happens only when a person requests one by hand.
+
+So **never wait for a second review**: once Copilot's review has landed, answer
+it and hand over, because polling for another waits on something that will not
+come. Never request one either, since every review is billed. The workspace's
+AGENTS.md, under "Pull requests", has how to tell a review has landed and how to
+answer it.
