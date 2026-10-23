@@ -49,8 +49,9 @@ interface DeliveryJob {
 }
 
 /**
- * The task host: the owner of a caller's A2A tasks. One per verified
- * `identity.key`, as agents are, behind core's unchanged edge.
+ * The task host: the owner of a caller's A2A tasks. One per verified caller
+ * ({@link file://../a2a/caller-scope.ts VerifiedCaller}), as step agents are,
+ * behind core's unchanged edge.
  *
  * It holds everything the gatekeeper hears — the ledger, the push channel, the
  * delivery outbox, the cancel ordering — and nothing about how a task is done.

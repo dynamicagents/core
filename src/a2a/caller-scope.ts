@@ -88,18 +88,17 @@ const SCOPE_SEPARATOR = "#";
  * handed its contents. What this costs a deployment is one re-key, and
  * `README.md` says what to expect of it.
  *
- * **Injectivity is a property of the scopes composed here, not of the names
- * already in the namespace.** The old name was `identity.key` verbatim, and the
- * protocol leaves that an arbitrary string, so an object written before the
- * change can carry a name this composes today, and no encoding closes that: a
- * digest of the pair is public, and a gatekeeper choosing its own keys can
- * compute one. What bounds it is who minted the key rather than how the name is
- * spelled. On a deployment that has listed one origin throughout, that
- * gatekeeper is both the writer of such a name and the one now reaching it: it
- * mints every key it claims, and which of its own callers are distinct was its
- * decision before this change and still is. An object written while a second
- * origin was listed is the case the composition cannot speak for, and
- * `README.md` says what a deployment does about it.
+ * **Injectivity is a property of the scopes composed here, and not of the names
+ * already in the namespace.** The old name was `identity.key` verbatim, which
+ * the protocol leaves an arbitrary string, so an object written before the
+ * change can carry a name this composes today, and no encoding avoids that: a
+ * digest of the pair is public, so a gatekeeper picking its own keys can compute
+ * one. The bound is on who could have written such a name. Under a single listed
+ * origin both that writer and the caller composing it now are the one
+ * gatekeeper's, and telling two of its callers apart has always rested on the
+ * keys it mints rather than on anything checkable here; a second listed origin
+ * is what lets such an object cross between gatekeepers, which is the boundary
+ * this draws. `README.md` says what a deployment does about it.
  */
 export function verifiedCaller(
   issuer: string,

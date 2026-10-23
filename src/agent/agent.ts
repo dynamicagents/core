@@ -120,7 +120,8 @@ interface A2AConfig {
 
 /**
  * The per-caller step agent: a Think agent that runs the jobs a task workflow
- * starts, one Durable Object per verified `identity.key`. It speaks no A2A: the
+ * starts, one Durable Object per verified caller
+ * ({@link file://../a2a/caller-scope.ts VerifiedCaller}). It speaks no A2A: the
  * task is its host's (`/task`), and a job reports to the workflow that started
  * it (`/workflow`).
  *

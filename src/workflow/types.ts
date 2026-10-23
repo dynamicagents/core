@@ -14,7 +14,11 @@ export interface TaskParams {
   messageId: string;
   text: string;
   identity: GatekeeperIdentity;
-  /** The verified caller's key: the host's name, and each step agent's. */
+  /**
+   * The verified caller's scope: the host's name, and each step agent's. The
+   * composed name and not the claimed key alone, which is
+   * {@link file://../a2a/caller-scope.ts VerifiedCaller}'s to spell.
+   */
   callerKey: string;
   /** The caller block's text, rendered by the host. */
   caller: string;

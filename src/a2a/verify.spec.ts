@@ -12,10 +12,9 @@ import {
   AGENT_ORIGIN,
   GATEKEEPER_ORIGIN,
   SECOND_GATEKEEPER_ORIGIN,
-  TEST_GATEKEEPERS,
   TEST_GATEKEEPER_PRIVATE_JWK,
   TEST_SECOND_GATEKEEPER,
-  gatekeeperPublicJwks
+  gatekeeperJwksResponse
 } from "../testing/fixtures.js";
 
 /**
@@ -54,14 +53,8 @@ beforeAll(() => {
     jwksFetches.push(url);
     // Both fixture gatekeepers, so a token honest about being the *other*
     // listed origin's verifies here as it would in a deployment listing both.
-    const gatekeeper = TEST_GATEKEEPERS.find(
-      (gk) => url === `${gk.origin}/.well-known/jwks.json`
-    );
-    if (gatekeeper) {
-      return new Response(gatekeeperPublicJwks(gatekeeper), {
-        headers: { "content-type": "application/json" }
-      });
-    }
+    const jwks = gatekeeperJwksResponse(url);
+    if (jwks) return jwks;
     return new Response("not found", { status: 404 });
   });
 });
@@ -89,7 +82,9 @@ describe("verifyGatekeeperToken", () => {
   it("returns the origin it verified against, which no claim can move", async () => {
     // The issuer is the one half of a caller's identity the issuer does not
     // write, and routing binds a scope to it, so it has to come from the checks
-    // above rather than from the payload. The claim here says otherwise, twice.
+    // above rather than from the payload. The identity claim is whatever the
+    // gatekeeper minted, so it can carry a field of that name; nothing reads it,
+    // and this is what holds that open.
     const token = await makeGatekeeperToken({
       identity: {
         key: "custom:1:test-agent",

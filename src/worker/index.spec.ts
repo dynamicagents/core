@@ -26,9 +26,8 @@ import {
   GATEKEEPER_ORIGIN,
   SECOND_GATEKEEPER_ORIGIN,
   TEST_AGENT_PRIVATE_JWK,
-  TEST_GATEKEEPERS,
   TEST_SECOND_GATEKEEPER,
-  gatekeeperPublicJwks,
+  gatekeeperJwksResponse,
   testStatus,
   testTask
 } from "../testing/fixtures.js";
@@ -131,14 +130,8 @@ beforeAll(() => {
     const url = typeof input === "string" ? input : input.toString();
     // Every fixture gatekeeper's JWKS: a deployment may list more than one, and
     // `caller routing` below drives calls from two of them.
-    const gatekeeper = TEST_GATEKEEPERS.find(
-      (gk) => url === `${gk.origin}/.well-known/jwks.json`
-    );
-    if (gatekeeper) {
-      return new Response(gatekeeperPublicJwks(gatekeeper), {
-        headers: { "content-type": "application/json" }
-      });
-    }
+    const jwks = gatekeeperJwksResponse(url);
+    if (jwks) return jwks;
     return new Response("not found", { status: 404 });
   });
 });

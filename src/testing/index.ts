@@ -62,6 +62,7 @@ export {
   TEST_GATEKEEPER_PRIVATE_JWK,
   TEST_SECOND_GATEKEEPER,
   TEST_SECOND_GATEKEEPER_PRIVATE_JWK,
+  gatekeeperJwksResponse,
   gatekeeperPublicJwks,
   testAgentMessage,
   testStatus,

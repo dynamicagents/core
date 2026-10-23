@@ -5,7 +5,6 @@ import {
   HITL_TIMEOUT_TYPE,
   NOTIFICATION_TOKEN_HEADER,
   endpointUrl,
-  jwksUrl,
   type HitlAnswer
 } from "@dynamicagents/g2a-protocol";
 import { verifiedCaller } from "../a2a/caller-scope.js";
@@ -16,8 +15,7 @@ import {
   GATEKEEPER_ORIGIN,
   TEST_CALLER_IDENTITY,
   TEST_GATEKEEPER,
-  TEST_GATEKEEPERS,
-  gatekeeperPublicJwks
+  gatekeeperJwksResponse
 } from "./fixtures.js";
 
 /**
@@ -423,14 +421,8 @@ export function createAgentHarness<TEnv>(
         // Every fixture gatekeeper is served, not only the one this harness mints
         // as: a spec about a deployment with two listed origins drives the second
         // one's calls through `rpc` with a token of its own.
-        const gatekeeper = TEST_GATEKEEPERS.find(
-          (gk) => url === jwksUrl(gk.origin)
-        );
-        if (gatekeeper) {
-          return new Response(gatekeeperPublicJwks(gatekeeper), {
-            headers: { "content-type": "application/json" }
-          });
-        }
+        const jwks = gatekeeperJwksResponse(url);
+        if (jwks) return jwks;
 
         if (url === pushUrl) {
           const request = new Request(input as RequestInfo, init);

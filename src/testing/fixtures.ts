@@ -21,6 +21,7 @@
  */
 import { type JWK } from "jose";
 import { Role, type Message, type Task, type TaskState } from "@a2a-js/sdk";
+import { jwksUrl } from "@dynamicagents/g2a-protocol";
 
 /** The gatekeeper origin used in all tests. Must match vitest.config.ts and the MockAgent setup. */
 export const GATEKEEPER_ORIGIN = "https://gatekeeper.test";
@@ -124,6 +125,27 @@ export function gatekeeperPublicJwks(
 ): string {
   const { d: _d, ...pub } = gatekeeper.privateJwk;
   return JSON.stringify({ keys: [{ ...pub, use: "sig", alg: "EdDSA" }] });
+}
+
+/**
+ * The JWKS answer for whichever fixture gatekeeper this URL belongs to, and
+ * `null` for a URL that is none of theirs, so a caller can fall through to the
+ * rest of its stub.
+ *
+ * Every fixture gatekeeper is served rather than the one a spec mints as:
+ * verification fetches the `jku` of whoever signed, so a spec about a deployment
+ * listing two origins needs both answered, and one left out fails as a 401 about
+ * nothing the spec is testing. The path is {@link jwksUrl}'s, which is the
+ * package that owns it; a stub spelling it itself stops matching the day it
+ * moves. {@link file://./harness.ts interceptGatekeeper} is this with the push
+ * callback and the model around it.
+ */
+export function gatekeeperJwksResponse(url: string): Response | null {
+  const gatekeeper = TEST_GATEKEEPERS.find((gk) => url === jwksUrl(gk.origin));
+  if (!gatekeeper) return null;
+  return new Response(gatekeeperPublicJwks(gatekeeper), {
+    headers: { "content-type": "application/json" }
+  });
 }
 
 /**
