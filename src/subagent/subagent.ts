@@ -145,6 +145,25 @@ export abstract class SubAgent<
     return this.plugins.actions(this.pluginContext());
   }
 
+  /**
+   * The verified caller this run is for, from the dispatch that started the
+   * turn — the same value the parent is keyed by, and what an artifact this run
+   * writes on is owned by (see
+   * {@link file://../artifacts/store.ts ArtifactStore.open}).
+   *
+   * A run's own object is keyed by its run id rather than by its caller, so
+   * unlike `StepAgent.callerKey` this is read off the turn and throws outside
+   * one: there is no caller to answer between turns, and answering some other
+   * run's would be worse than failing.
+   */
+  protected callerKey(): string {
+    const key = (
+      this.activeTurnMetadata as Partial<SubAgentEnvelope> | undefined
+    )?.callerKey;
+    if (!key) throw new Error("this sub-agent run carries no caller key");
+    return key;
+  }
+
   protected pluginContext(): PluginContext<Env> {
     const turn = () =>
       this.activeTurnMetadata as Partial<SubAgentEnvelope> | undefined;
@@ -152,11 +171,7 @@ export abstract class SubAgent<
       env: this.env,
       storage: this.ctx.storage,
       agentName: this.name,
-      callerKey: () => {
-        const key = turn()?.callerKey;
-        if (!key) throw new Error("this sub-agent run carries no caller key");
-        return key;
-      },
+      callerKey: () => this.callerKey(),
       workspace: () => this.workspace,
       runtime: () => turn()?.runtime
     };

@@ -15,6 +15,7 @@ import {
 
 const contents = (over: Partial<ArtifactContents> = {}): ArtifactContents => ({
   kind: "discovery-report",
+  owner: "custom:1:someone",
   status: null,
   locked: false,
   entries: [],
@@ -65,6 +66,18 @@ describe("artifactMarkdown", () => {
     expect(artifactMarkdown(contents({ status: "filed" }))).toContain(
       'status: "filed"'
     );
+  });
+
+  it("says nothing about the owner, which is a writer's business and not a reader's", () => {
+    // A reader holds the link and nothing else, and the owner is the caller key
+    // of whoever opened the page. The document is what anybody holding the link
+    // gets, so the one field that is about authorization stays out of it.
+    const markdown = artifactMarkdown(
+      contents({ owner: "custom:7:analytics" })
+    );
+
+    expect(markdown).not.toContain("custom:7:analytics");
+    expect(markdown).not.toContain("owner");
   });
 
   it("quotes and escapes both fields, since each is a writer's string", () => {

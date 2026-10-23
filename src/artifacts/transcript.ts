@@ -71,6 +71,14 @@ export interface SubagentNote {
    * link — see {@link file://../a2a/self-origin.ts SelfOrigin}.
    */
   origin: string | undefined;
+  /**
+   * Whose transcript this is, stamped on the artifact when this note opens it —
+   * see {@link file://./store.ts ArtifactStore.open}. Core's own emission
+   * passes the verified caller. A note without one opens a transcript nothing
+   * can later claim as its own, which costs its reader nothing and its writer
+   * only the ability to assert ownership of the writes.
+   */
+  owner?: string;
   /** Who is speaking. Both halves, always — see `labelSubagentNote`. */
   source: { type: string; ordinal: number };
   text: string;
@@ -119,7 +127,8 @@ export async function transcribeNote(
   const stub = requireArtifactsStub(env);
   const token = await stub.createArtifact(
     SESSION_TRANSCRIPT_KIND,
-    note.transcript
+    note.transcript,
+    note.owner
   );
   const recorded = await stub.addEntry(token, {
     key: note.key,

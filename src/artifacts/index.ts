@@ -2,11 +2,13 @@
  * `@dynamicagents/core/artifacts` — what a run had to say, stored behind a link.
  *
  * A **general** store first and a transcript second. An artifact is a kind, a
- * token, an append-only list of labelled notes and a settle status; nothing in
- * {@link Artifacts} knows what a kind means or when a run is finished, because
- * the machinery that owns the work is the only thing that does. The first kind
- * is `session-transcript` and it needs no code inside the object, which is how
- * the split is checked.
+ * token, an owner, an append-only list of labelled notes and a settle status;
+ * nothing in {@link Artifacts} knows what a kind means or when a run is
+ * finished, because the machinery that owns the work is the only thing that
+ * does. The token is what a reader needs and the owner is what a writer
+ * asserts, which is the one distinction the object itself enforces. The first
+ * kind is `session-transcript` and it needs no code inside the object, which is
+ * how the split is checked.
  *
  * Three pieces, wired independently:
  *
@@ -56,6 +58,7 @@ export {
 export {
   ARTIFACT_RETENTION_MS,
   mintArtifactToken,
+  type AppendOptions,
   type AppendResult,
   type Artifact,
   type ArtifactEntry,
