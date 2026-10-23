@@ -87,6 +87,19 @@ const SCOPE_SEPARATOR = "#";
  * such an object says which gatekeeper's callers wrote it, so no issuer can be
  * handed its contents. What this costs a deployment is one re-key, and
  * `README.md` says what to expect of it.
+ *
+ * **Injectivity is a property of the scopes composed here, not of the names
+ * already in the namespace.** The old name was `identity.key` verbatim, and the
+ * protocol leaves that an arbitrary string, so an object written before the
+ * change can carry a name this composes today, and no encoding closes that: a
+ * digest of the pair is public, and a gatekeeper choosing its own keys can
+ * compute one. What bounds it is who minted the key rather than how the name is
+ * spelled. On a deployment that has listed one origin throughout, that
+ * gatekeeper is both the writer of such a name and the one now reaching it: it
+ * mints every key it claims, and which of its own callers are distinct was its
+ * decision before this change and still is. An object written while a second
+ * origin was listed is the case the composition cannot speak for, and
+ * `README.md` says what a deployment does about it.
  */
 export function verifiedCaller(
   issuer: string,

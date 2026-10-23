@@ -168,12 +168,26 @@ tenant. A deployment needing that boundary has to carry a per-origin tenant
 authorization of its own; nothing here reads one.
 
 > **A deployment taking this re-keys its callers once.** Objects written before it are
-> named by the bare claimed key and are not read again: tasks in flight finish and still
-> call back, but a task parked on a person's answer at that moment can no longer be
-> answered, and anything a plugin keyed by `callerKey` (a sandbox, a checkout) is created
-> fresh on the next task. Deploy it when little is in flight. There is no fallback to the
-> old name on purpose: where more than one origin is listed, nothing in such an object
-> says which gatekeeper's caller wrote it, so no caller can be handed its contents.
+> named by the bare claimed key, and nothing composes that name again: tasks in flight
+> finish and still call back, but a task parked on a person's answer at that moment can no
+> longer be answered, and anything a plugin keyed by `callerKey` (a sandbox, a checkout) is
+> created fresh on the next task. Deploy it when little is in flight. There is no fallback
+> to the old name on purpose: where more than one origin is listed, nothing in such an
+> object says which gatekeeper's caller wrote it, so no caller can be handed its contents.
+
+> **The new names are not disjoint from the old ones, and one case is worth a look before
+> deploying.** The old name was the claimed key verbatim, and the protocol leaves that an
+> arbitrary string, so a caller minted as `https://gatekeeper.example#remote:7:analytics`
+> already named the object that caller `remote:7:analytics` of
+> `https://gatekeeper.example` composes to afterwards. No naming scheme avoids that, since
+> the old names were every string. What decides whether it matters is who wrote such an
+> object. **On a deployment that has listed one origin throughout, nobody else could
+> have:** that gatekeeper mints every key it claims, so a collision is it reaching state it
+> wrote, and which of its own callers share an object was its decision before this change
+> and still is. Only a deployment that has listed a second origin can hold an object
+> written under one issuer that another now composes the name of, and a re-key there lands
+> on that state rather than on a fresh object. Give the affected namespaces a fresh binding
+> if you need the isolation to hold over what is already there.
 
 ### 3. Write your host, your pipeline and your agent
 
