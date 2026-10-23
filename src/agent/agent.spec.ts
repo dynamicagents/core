@@ -51,7 +51,8 @@ import worker, {
 
 const testEnv = env as unknown as TestEnv;
 
-type AgentBinding = "TEST_AGENT" | "CAPPED_AGENT" | "STALE_AGENT";
+type AgentBinding =
+  "TEST_AGENT" | "CAPPED_AGENT" | "STALE_AGENT" | "NOPROGRESS_AGENT";
 
 function harnessFor(label: string, binding: AgentBinding = "TEST_AGENT") {
   const key = `${label}:${crypto.randomUUID()}`;
@@ -905,12 +906,23 @@ describe("an awaited sub-agent", () => {
   });
 
   it("files a note the live path missed, from the replay", async () => {
-    const { harness, debug } = harnessFor("noprogress");
+    const { harness, debug } = harnessFor("noprogress", "NOPROGRESS_AGENT");
     using _ = harness.interceptGatekeeper();
 
-    const accepted = await harness.send("delegate:sleep:1");
+    const accepted = await harness.send("noprogress:delegate:sleep:1");
     await harness.waitForTerminal(accepted.id);
     const runId = (await debug(accepted.id)).work[0]!.workId;
+
+    // The entries below are what a run whose live notes all landed reads too:
+    // the replay dedupes on the note's key. So what makes them the replay's
+    // work is this, asserted first: the live path filed none of them, one drop
+    // for each entry the transcript ends with.
+    const ns = testEnv.NOPROGRESS_AGENT;
+    const dropped = await ns
+      .get(ns.idFromName(harness.callerScope))
+      .debugDroppedNotes();
+    expect(dropped).toEqual([runId, runId, runId]);
+
     await until(
       "the replayed note",
       () => transcriptEntries(runId),
