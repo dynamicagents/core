@@ -121,6 +121,20 @@ export interface TaskHostStub {
 /** A job that reported `failed`: the one failure a step retries. */
 class StepJobFailed extends Error {}
 
+/**
+ * How long a job's next wait lasts: back to `afterMs` once anything arrived,
+ * twice the last while nothing does, never past `maxMs`. So a wait nobody
+ * answers costs about one wake per `maxMs` once it has doubled up to it, and
+ * each wake is two steps of an instance's ceiling (the wait and its pull).
+ */
+export function nextWait(
+  reconcile: Reconcile,
+  current: number,
+  found: boolean
+): number {
+  return found ? reconcile.afterMs : Math.min(current * 2, reconcile.maxMs);
+}
+
 /** Where a reader is: the next number it wants from each writer. */
 interface Cursor {
   agent: number;
@@ -177,10 +191,8 @@ class JobReader {
       }
       if (arrived && arrived.seq <= this.cursor[arrived.from]) {
         const ready = this.#take([arrived]);
-        if (ready.length > 0) {
-          this.#wait = this.reconcile.afterMs;
-          return ready;
-        }
+        this.#wait = nextWait(this.reconcile, this.#wait, ready.length > 0);
+        if (ready.length > 0) return ready;
         continue;
       }
       const pulled = await this.pull({
@@ -188,11 +200,8 @@ class JobReader {
         attempt: this.#pulls++
       });
       const ready = this.#take(arrived ? [arrived, ...pulled] : pulled);
-      if (ready.length > 0) {
-        this.#wait = this.reconcile.afterMs;
-        return ready;
-      }
-      this.#wait = Math.min(this.#wait * 2, this.reconcile.maxMs);
+      this.#wait = nextWait(this.reconcile, this.#wait, ready.length > 0);
+      if (ready.length > 0) return ready;
     }
   }
 

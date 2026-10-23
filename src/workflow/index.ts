@@ -10,6 +10,7 @@
 
 export {
   TaskWorkflow,
+  nextWait,
   type AgentStepOptions,
   type AskStepOptions,
   type StepAgentStub,

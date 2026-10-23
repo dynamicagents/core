@@ -27,6 +27,7 @@ import worker, {
   type TestHost
 } from "../../test/worker.js";
 import type { StepJob, TaskParams, TaskResult } from "./types.js";
+import { nextWait } from "./workflow.js";
 
 /**
  * The task workflow, end to end through core's real edge: a signed
@@ -746,6 +747,40 @@ describe("G11: an event the platform loses", () => {
     });
     const done = await harness.waitForTerminal(task.id);
     expect(done.text).toBe("Yes");
+  });
+});
+
+describe("the cost of waiting", () => {
+  /** How many wakes a wait nobody answers takes to last `totalMs`. */
+  function wakes(
+    reconcile: { afterMs: number; maxMs: number },
+    totalMs: number
+  ) {
+    let waited = 0;
+    let wait = reconcile.afterMs;
+    let n = 0;
+    while (waited < totalMs) {
+      waited += wait;
+      wait = nextWait(reconcile, wait, false);
+      n++;
+    }
+    return n;
+  }
+
+  it("keeps a week-long wait far under an instance's step ceiling", () => {
+    // A question may stay open for a week; a Workflow instance holds 10,000
+    // steps by default, and each wake is two: the wait and its pull.
+    const week = 7 * 24 * 60 * 60_000;
+    const n = wakes({ afterMs: 5 * 60_000, maxMs: 30 * 60_000 }, week);
+    expect(n).toBeLessThan(340);
+    expect(2 * n).toBeLessThan(10_000 / 10);
+  });
+
+  it("starts over at the first bound once anything arrives", () => {
+    const reconcile = { afterMs: 1_000, maxMs: 8_000 };
+    expect(nextWait(reconcile, 1_000, false)).toBe(2_000);
+    expect(nextWait(reconcile, 8_000, false)).toBe(8_000);
+    expect(nextWait(reconcile, 8_000, true)).toBe(1_000);
   });
 });
 
