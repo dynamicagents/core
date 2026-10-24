@@ -125,7 +125,7 @@ describe("transitions", () => {
       expect(ledger.settle(buildFailedTask("t1", "c1", "no"))).toBe(false);
       expect(ledger.row("t1")?.state).toBe("completed");
 
-      ledger.delivered("t1", "completed");
+      ledger.delivered("t1", "completed", ledger.owed("t1", "completed")!);
       ledger.hooksRan("t1");
       expect(ledger.pendingDeliveries()).toEqual([]);
       expect(ledger.pendingHooks()).toEqual([]);
@@ -311,7 +311,8 @@ describe("the requests a task asks", () => {
       ledger.markWorking("t1");
       ledger.ask("t1", "job", request, asking(request));
       ledger.ask("t1", "job", second, asking(second));
-      ledger.delivered("t1", questionKey(second.requestId));
+      const key = questionKey(second.requestId);
+      ledger.delivered("t1", key, ledger.owed("t1", key)!);
 
       expect(ledger.closeRequest("t1", request.requestId, "answered")).toBe(
         true
@@ -388,7 +389,20 @@ describe("a task's state while it runs", () => {
       expect(ledger.owed("t1", STATE_KEY)?.status?.state).toBe(
         TaskState.TASK_STATE_WORKING
       );
-      ledger.delivered("t1", STATE_KEY);
+      // A state that replaces the one posting is still owed once it lands.
+      const posted = ledger.owed("t1", STATE_KEY)!;
+      ledger.setState(
+        "t1",
+        "input-required",
+        buildWaitingTask("t1", "c1", "w4")
+      );
+      expect(ledger.delivered("t1", STATE_KEY, posted)).toBe(false);
+      expect(ledger.owed("t1", STATE_KEY)?.status?.state).toBe(
+        TaskState.TASK_STATE_INPUT_REQUIRED
+      );
+      expect(
+        ledger.delivered("t1", STATE_KEY, ledger.owed("t1", STATE_KEY)!)
+      ).toBe(true);
       expect(ledger.owed("t1", STATE_KEY)).toBeNull();
     });
   });

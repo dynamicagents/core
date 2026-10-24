@@ -18,9 +18,10 @@ export interface NoticeJob {
  * with, so a start cut short can be run again; the step jobs its steps
  * started, so a cancel reaches them and the end of the task notifies them; the
  * notices not yet delivered, so one that ran out of retries is sent again at
- * the next start; which job takes the messages that join the task; and the
+ * the next start; which job takes the messages that join the task; the
  * inputs relayed to each job, numbered, so the workflow can put them in order
- * and pull one that is late.
+ * and pull one that is late; and which of the task's branches wait on the
+ * person, which is what its A2A state is read from.
  *
  * On the same SQLite as the task ledger (`./tasks.ts`), whose rows these
  * outlive only until the retention sweep.
@@ -65,6 +66,12 @@ export class TaskRuns {
       created_at INTEGER NOT NULL,
       PRIMARY KEY (step_job_id, seq)
     )`;
+    this.sql`CREATE TABLE IF NOT EXISTS da_task_branches (
+      task_id TEXT NOT NULL,
+      branch_id TEXT NOT NULL,
+      waiting INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (task_id, branch_id)
+    )`;
     this.#ensured = true;
   }
 
@@ -94,6 +101,7 @@ export class TaskRuns {
     this.sql`INSERT OR IGNORE INTO da_task_step_jobs
       (task_id, step_job_id, binding, created_at)
       VALUES (${taskId}, ${job.stepJobId}, ${job.binding}, ${Date.now()})`;
+    this.openBranch(taskId, job.stepJobId);
     if (job.joins) {
       this.sql`INSERT INTO da_task_joins (task_id, step_job_id, closed)
         VALUES (${taskId}, ${job.stepJobId}, 0)
@@ -117,6 +125,47 @@ export class TaskRuns {
     this.#ensure();
     this.sql`UPDATE da_task_joins SET closed = ${open ? 0 : 1}
       WHERE task_id = ${taskId} AND step_job_id = ${stepJobId}`;
+  }
+
+  /** Whether this task already took the input `messageId` names. */
+  hasInput(taskId: string, messageId: string): boolean {
+    this.#ensure();
+    return (
+      (this.sql<{ n: number }>`SELECT COUNT(*) AS n FROM da_task_inputs
+        WHERE task_id = ${taskId} AND message_id = ${messageId}`[0]?.n ?? 0) > 0
+    );
+  }
+
+  /**
+   * Give a failed job's joined messages to the job retrying it: those from
+   * number `from` on, which it never read, renumbered after the retry's own,
+   * and every message that joins after. Answers stay: they answer questions
+   * only the failed job asked. Returns the numbers the retry now owes.
+   */
+  handOverJoins(
+    taskId: string,
+    stepJobId: string,
+    to: string,
+    from: number
+  ): number[] {
+    this.#ensure();
+    if (this.joinTarget(taskId) !== stepJobId) return [];
+    const unread = this.inputs(taskId, stepJobId, from).filter(
+      (event) => event.input.kind === "join"
+    );
+    let next =
+      this.sql<{ n: number }>`SELECT COUNT(*) AS n FROM da_task_inputs
+        WHERE step_job_id = ${to}`[0]?.n ?? 0;
+    const moved: number[] = [];
+    for (const event of unread) {
+      this.sql`UPDATE da_task_inputs
+        SET step_job_id = ${to}, seq = ${next}, sent = 0
+        WHERE step_job_id = ${stepJobId} AND seq = ${event.seq}`;
+      moved.push(next++);
+    }
+    this.sql`UPDATE da_task_joins SET step_job_id = ${to}, closed = 0
+      WHERE task_id = ${taskId}`;
+    return moved;
   }
 
   /**
@@ -194,6 +243,36 @@ export class TaskRuns {
     }));
   }
 
+  /** A branch of the task is running: a job, or a pipeline's own question. */
+  openBranch(taskId: string, branchId: string): void {
+    this.#ensure();
+    this.sql`INSERT OR IGNORE INTO da_task_branches (task_id, branch_id)
+      VALUES (${taskId}, ${branchId})`;
+  }
+
+  /** A branch waits on the person, or works again. Opens one not yet open. */
+  setWaiting(taskId: string, branchId: string, waiting: boolean): void {
+    this.#ensure();
+    this.sql`INSERT INTO da_task_branches (task_id, branch_id, waiting)
+      VALUES (${taskId}, ${branchId}, ${waiting ? 1 : 0})
+      ON CONFLICT (task_id, branch_id) DO UPDATE SET waiting = excluded.waiting`;
+  }
+
+  endBranch(taskId: string, branchId: string): void {
+    this.#ensure();
+    this.sql`DELETE FROM da_task_branches
+      WHERE task_id = ${taskId} AND branch_id = ${branchId}`;
+  }
+
+  /** Whether the task has a branch open and every one waits on the person. */
+  waiting(taskId: string): boolean {
+    this.#ensure();
+    const row = this.sql<{ open: number; waiting: number | null }>`
+      SELECT COUNT(*) AS open, SUM(waiting) AS waiting FROM da_task_branches
+      WHERE task_id = ${taskId}`[0];
+    return !!row && row.open > 0 && row.waiting === row.open;
+  }
+
   jobs(taskId: string): NotedStepJob[] {
     this.#ensure();
     return this.sql<{ step_job_id: string; binding: string }>`
@@ -249,6 +328,8 @@ export class TaskRuns {
     this.sql`DELETE FROM da_task_joins
       WHERE task_id NOT IN (SELECT task_id FROM da_a2a_tasks)`;
     this.sql`DELETE FROM da_task_inputs
+      WHERE task_id NOT IN (SELECT task_id FROM da_a2a_tasks)`;
+    this.sql`DELETE FROM da_task_branches
       WHERE task_id NOT IN (SELECT task_id FROM da_a2a_tasks)`;
   }
 }

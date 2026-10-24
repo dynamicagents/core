@@ -987,6 +987,25 @@ export class TestTask extends TaskWorkflow<TestEnv> {
       return { reply: answers.map((a) => a.answers.q1?.text).join(" and ") };
     }
 
+    // A job that asks beside one that works: the task waits on the person only
+    // once the worker is done.
+    const parallel = after(text, "parallel:");
+    if (parallel !== undefined) {
+      const [asked] = await Promise.all([
+        step.agent("asker", {
+          agent: "TEST_AGENT",
+          input: `ask:${parallel}`,
+          reconcile: RECONCILE
+        }),
+        step.agent("worker", {
+          agent: "TEST_STEP_B",
+          input: "bgdelegate:sleep:3",
+          reconcile: RECONCILE
+        })
+      ]);
+      return { reply: asked };
+    }
+
     if (text === "retry-named:") {
       await step.agent("main:retry", {
         agent: "TEST_AGENT",

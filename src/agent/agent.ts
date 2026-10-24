@@ -627,12 +627,19 @@ export abstract class StepAgent<
     return this.ledger.complete(stepJobId);
   }
 
-  /** A job's reports from `from` on: what its workflow pulls when one is late. */
+  /**
+   * A job's reports from `from` on: what its workflow pulls when one is late.
+   * Only those a resend would send: a failure waits on its job's stop like its
+   * delivery does, or the retry would start while the failed work runs.
+   */
   async stepJobReports(
     stepJobId: string,
     from: number
   ): Promise<Extract<JobEvent, { from: "agent" }>[]> {
-    return this.ledger.reports(stepJobId, from);
+    const ready = new Set(this.ledger.resendable(stepJobId));
+    return this.ledger
+      .reports(stepJobId, from)
+      .filter((event) => ready.has(event.seq));
   }
 
   /**

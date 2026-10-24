@@ -425,7 +425,7 @@ function readContinuation(rpcBody: {
  *
  * The handler then loads the Task this has already recorded on, so what the
  * caller is answered with is the Task as the message left it. `taken` is the
- * agent's word on whether a reply was: see {@link answerEnded}.
+ * agent's word on whether the message was: see {@link answerEnded}.
  */
 async function recordReply(
   agent: TenantAgent,
@@ -501,14 +501,15 @@ const TERMINAL_STATES: ReadonlySet<TaskState | undefined> = new Set([
 ]);
 
 /**
- * The Task a reply ended, to answer its `SendMessage` with — or `null`, and the
- * handler's answer stands.
+ * The Task a message it took has since ended, to answer its `SendMessage`
+ * with, or `null`, and the handler's answer stands.
  *
  * A reply can end its Task before the handler loads it: a pipeline that returns
- * on the answer settles the Task while the reply's own request is in flight. The
- * handler refuses a message onto a terminal Task, which would tell the caller an
- * answer the run already took was not. A reply the agent did not take keeps the
- * refusal — one onto a Task already closed, or one a cancel beat.
+ * on the answer settles the Task while the reply's own request is in flight. A
+ * join sent again, its accept lost, can find its Task ended since. The handler
+ * refuses a message onto a terminal Task, which would tell the caller a message
+ * the run already took was not. One the agent did not take keeps the refusal:
+ * one onto a Task already closed, or one a cancel beat.
  */
 async function answerEnded(
   agent: TenantAgent,
@@ -862,7 +863,10 @@ export function createA2AWorker<TEnv extends object>(
       if (Symbol.asyncIterator in result) {
         return new Response("streaming not supported", { status: 501 });
       }
-      if (continuation?.kind === "reply" && recorded && "error" in result) {
+      // A message the task took, an answer or a join, sent again after the
+      // task ended: the handler refuses a terminal task, but the message was
+      // taken, and a refusal would have the caller act on it a second time.
+      if (continuation && recorded && "error" in result) {
         const ended = await answerEnded(
           agent,
           identity,

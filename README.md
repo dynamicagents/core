@@ -249,10 +249,14 @@ task, rather than as a new one, becomes the job's next turn, in Think's order. W
 no such step running, a joined message is refused, and the gatekeeper starts a task
 with it instead. `step.ask(name, request, { reconcile })` asks the caller questions
 of the pipeline's own, in the g2a form, and returns their answers keyed by question
-id; one nobody answered before the gatekeeper gave up on it fails the task.
-`step.say(text)` pushes one progress line. `step.do` is Workflows' own. A step whose
-job reports `failed` runs once more, as `<name>:retry` with `attempt: 2`; a second
-failure fails the task, and a step named with that suffix is refused. A name used
+id; one nobody answered before the gatekeeper gave up on it fails the task. The task
+waits on the person (`input-required`, which stops the gatekeeper's clock) only once
+every job and question of the pipeline's running waits on one; a step the pipeline
+runs itself counts as working. `step.say(text)` pushes one progress line. `step.do`
+is Workflows' own. A step whose job reports `failed` runs once more, as
+`<name>:retry` with `attempt: 2`, and takes over the messages that joined the first
+attempt; a second failure fails the task, and a step named with that suffix is
+refused. A name used
 twice in one run, as a loop without a `key` uses one, fails the task by name, because
 Workflows would otherwise hand the second the first one's result.
 

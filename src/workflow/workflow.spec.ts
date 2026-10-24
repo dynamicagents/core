@@ -194,6 +194,43 @@ async function sendAs(
   return body.result.task.id;
 }
 
+/**
+ * Send a message onto a task, as the gatekeeper does, until the task's job is
+ * there to take it: one sent before its start step has run is refused.
+ */
+async function joinOnce(
+  harness: AgentHarness,
+  taskId: string,
+  text: string,
+  messageId = crypto.randomUUID()
+): Promise<void> {
+  await until(
+    "the join taken",
+    async () => {
+      const res = await harness.rpc({
+        jsonrpc: "2.0",
+        id: 5,
+        method: "SendMessage",
+        params: {
+          tenant: TEST_TENANT,
+          message: {
+            messageId,
+            role: "ROLE_USER",
+            taskId,
+            parts: [{ text }]
+          },
+          configuration: {
+            taskPushNotificationConfig: { url: harness.pushUrl, token: "tok" }
+          }
+        }
+      });
+      return (await res.json<{ error?: unknown }>()).error === undefined;
+    },
+    (taken) => taken,
+    5_000
+  );
+}
+
 async function trackedCount(key: string, taskId: string): Promise<number> {
   const host = testEnv.TEST_HOST.get(testEnv.TEST_HOST.idFromName(key));
   return runInDurableObject(host, (instance) => {
@@ -694,6 +731,68 @@ describe("G10: a message that joins the task", () => {
     expect(done.text).toBe("Yes");
   });
 
+  it("is answered with the task, not refused, when sent again after the task ended", async () => {
+    const { harness } = setup("g10-replay");
+    using _ = harness.interceptGatekeeper();
+    const task = await harness.send("bgdelegate:sleep:1");
+    const messageId = crypto.randomUUID();
+    await joinOnce(harness, task.id, "echo:once more", messageId);
+    await harness.waitForTerminal(task.id);
+
+    // The gatekeeper lost the accept and sends the same message again.
+    const res = await harness.rpc({
+      jsonrpc: "2.0",
+      id: 6,
+      method: "SendMessage",
+      params: {
+        tenant: TEST_TENANT,
+        message: {
+          messageId,
+          role: "ROLE_USER",
+          taskId: task.id,
+          parts: [{ text: "echo:once more" }]
+        },
+        configuration: {
+          taskPushNotificationConfig: { url: harness.pushUrl, token: "tok" }
+        }
+      }
+    });
+    const body = await res.json<{
+      result?: { task?: { status?: { state?: string } } };
+      error?: unknown;
+    }>();
+    expect(body.error).toBeUndefined();
+    expect(body.result?.task?.status?.state).toBe("TASK_STATE_COMPLETED");
+  });
+
+  it("is handed to the job even when it arrives in one batch after the job went idle", async () => {
+    const { harness, agent, host } = setup("g10-batch");
+    using _ = harness.interceptGatekeeper();
+    // Both lost, so the pull brings them together: the idle report, then the
+    // join that came in before it was read.
+    await agent.dropReport(0);
+    await host.dropInput(0);
+    const task = await harness.send("echo:first");
+    await joinOnce(harness, task.id, "echo:second");
+    const done = await harness.waitForTerminal(task.id);
+    expect(done.state).toBe("TASK_STATE_COMPLETED");
+    expect(done.text).toBe("second");
+  });
+
+  it("reaches the retry of a job that failed before reading it", async () => {
+    const { harness, agent, host } = setup("g10-retry");
+    using _ = harness.interceptGatekeeper();
+    await agent.dropReport(0);
+    await host.dropInput(0);
+    const task = await harness.send("flaky");
+    await joinOnce(harness, task.id, "echo:still there?");
+    const done = await harness.waitForTerminal(task.id);
+    expect(done.state).toBe("TASK_STATE_COMPLETED");
+    expect(done.text).toBe("still there?");
+    const output = (await status(task.id)).output as TaskResult;
+    expect(output.verdict.steps).toEqual(["main", "main:retry"]);
+  });
+
   it("is refused by a task whose step takes none, so the caller starts another", async () => {
     const { harness } = setup("g10-solo");
     using _ = harness.interceptGatekeeper();
@@ -1175,6 +1274,36 @@ describe("a pipeline's own guards", () => {
     expect(done.state).toBe("TASK_STATE_FAILED");
     const { error } = await status(task.id);
     expect(error?.message).toContain('step "agent:main" ran twice');
+  });
+
+  it("waits on the person while it asks, and works again once answered", async () => {
+    const { harness } = setup("ask-state");
+    using _ = harness.interceptGatekeeper();
+    const task = await harness.send("ask-id:q1");
+    const question = await lastQuestion(harness, task.id);
+    await harness.waitForState(task.id, "TASK_STATE_INPUT_REQUIRED");
+    await harness.answer(task.id, question.requestId, { q1: { text: "ok" } });
+    const done = await harness.waitForTerminal(task.id);
+    expect(done.text).toBe("ok");
+  });
+
+  it("waits on the person only once no other branch works", async () => {
+    const { harness, debug, agentB } = setup("parallel");
+    using _ = harness.interceptGatekeeper();
+    const task = await harness.send("parallel:which one?");
+    const question = await lastQuestion(harness, task.id);
+
+    // The asker idles on its question at once; the worker sleeps on.
+    await harness.waitForState(task.id, "TASK_STATE_INPUT_REQUIRED");
+    expect((await debug(`${task.id}:worker`, agentB)).row?.state).toBe(
+      "completed"
+    );
+
+    await harness.answer(task.id, question.requestId, {
+      q1: { optionIds: ["q1.o1"] }
+    });
+    const done = await harness.waitForTerminal(task.id);
+    expect(done.text).toBe("Yes");
   });
 
   it("asks two questions of its own at once, and takes both answers", async () => {

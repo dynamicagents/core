@@ -536,13 +536,22 @@ export class A2ATasks {
     });
   }
 
-  /** Acknowledge one callback — only if it is still the one owed. */
-  delivered(taskId: string, key: string): void {
+  /**
+   * Acknowledge the callback that was posted, `sent`. `false`, and nothing
+   * acknowledged, when another replaced it under the same key while it
+   * posted: that one is still owed.
+   */
+  delivered(taskId: string, key: string, sent: PlainTask): boolean {
     this.#ensure();
-    this.sql`UPDATE da_a2a_tasks SET delivery_key = NULL
-      WHERE task_id = ${taskId} AND delivery_key = ${key}`;
-    this.sql`DELETE FROM da_a2a_deliveries
-      WHERE task_id = ${taskId} AND key = ${key}`;
+    return this.transaction(() => {
+      const now = this.owed(taskId, key);
+      if (now && JSON.stringify(now) !== JSON.stringify(sent)) return false;
+      this.sql`UPDATE da_a2a_tasks SET delivery_key = NULL
+        WHERE task_id = ${taskId} AND delivery_key = ${key}`;
+      this.sql`DELETE FROM da_a2a_deliveries
+        WHERE task_id = ${taskId} AND key = ${key}`;
+      return true;
+    });
   }
 
   /** The settle hooks ran. */

@@ -1578,9 +1578,11 @@ describe("stopping a job's work", () => {
         instance.finishStopWork({ stepJobId: job.stepJobId })
       ).rejects.toThrow("not stopped yet");
       expect(instance.ledger.openWorkRows(job.stepJobId)).toHaveLength(1);
-      // A redelivered start sends nothing early either.
+      // A redelivered start sends nothing early either, and a pull finds it
+      // not yet there: a retry would start while the failed work runs.
       await instance.startStepJob(job);
       expect(queued).not.toContain("deliverStepJobReport");
+      expect(await instance.stepJobReports(job.stepJobId, 0)).toEqual([]);
       // A restart retries the stop, and sends the report only after it.
       expect(instance.ledger.unstopped()).toContain(job.stepJobId);
       expect(instance.ledger.unsent()).not.toContainEqual({
@@ -1592,6 +1594,11 @@ describe("stopping a job's work", () => {
       await instance.finishStopWork({ stepJobId: job.stepJobId });
       expect(instance.ledger.openWorkRows(job.stepJobId)).toEqual([]);
       expect(queued).toContain("deliverStepJobReport");
+      expect(
+        (await instance.stepJobReports(job.stepJobId, 0)).map(
+          (event) => event.report.kind
+        )
+      ).toEqual(["failed"]);
       return job;
     });
 

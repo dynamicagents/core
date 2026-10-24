@@ -282,7 +282,9 @@ export abstract class TaskHost<
    * the conversation it belongs to. Relayed to the job its pipeline named to
    * take joined messages. `closed` when the task has ended, or takes none right
    * now: the gatekeeper starts a new task with the message instead. Idempotent
-   * on `messageId`.
+   * on `messageId`, and checked before either: a message already taken, sent
+   * again because its accept was lost, is taken again rather than refused, or
+   * the gatekeeper would start a second task with it.
    */
   async joinTask(input: {
     taskId: string;
@@ -292,7 +294,9 @@ export abstract class TaskHost<
     const { taskId, messageId, text } = input;
     const owed = this.ctx.storage.transactionSync(() => {
       const row = this.ledger.row(taskId);
-      if (!row || isTerminalState(row.state)) return "closed" as const;
+      if (!row) return "closed" as const;
+      if (this.runs.hasInput(taskId, messageId)) return "taken" as const;
+      if (isTerminalState(row.state)) return "closed" as const;
       const stepJobId = this.runs.joinTarget(taskId);
       if (!stepJobId) return "closed" as const;
       const seq = this.runs.addInput(taskId, stepJobId, messageId, {
@@ -303,6 +307,7 @@ export abstract class TaskHost<
       return { stepJobId, seq };
     });
     if (owed === "closed") return "closed";
+    if (owed === "taken") return "joined";
     if (owed.seq !== null) {
       await this.#queueInput({
         taskId,
@@ -324,6 +329,7 @@ export abstract class TaskHost<
     const row = this.ledger.row(taskId);
     if (!row || isTerminalState(row.state)) return false;
     this.runs.note(taskId, job);
+    await this.#settleState(taskId);
     return true;
   }
 
@@ -349,39 +355,72 @@ export abstract class TaskHost<
   }
 
   /**
-   * The task's job is idle. With requests open, all the task does is wait on
-   * the person: `input-required`, which is what stops the gatekeeper's clock.
-   * With none, nothing changes here: the workflow is finishing the job.
+   * A branch of the task (a job, or a pipeline's own question) waits on the
+   * person: idle, with nothing open but its requests.
    */
-  async idle(taskId: string): Promise<void> {
-    const row = this.ledger.row(taskId);
-    if (!row || isTerminalState(row.state)) return;
-    if (this.ledger.openRequests(taskId).length === 0) return;
-    const waiting = buildWaitingTask(
-      taskId,
-      row.contextId,
-      `${taskId}:${crypto.randomUUID()}`
-    );
-    if (this.ledger.setState(taskId, "input-required", waiting)) {
-      await this.#enqueueDelivery(taskId, STATE_KEY);
-    }
+  async idle(taskId: string, branchId: string): Promise<void> {
+    this.runs.setWaiting(taskId, branchId, true);
+    await this.#settleState(taskId);
+  }
+
+  /** A branch went back to work: an answer, a message or a result woke it. */
+  async working(taskId: string, branchId: string): Promise<void> {
+    this.runs.setWaiting(taskId, branchId, false);
+    await this.#settleState(taskId);
+  }
+
+  /** A branch finished: its job completed, or its question was answered. */
+  async endBranch(taskId: string, branchId: string): Promise<void> {
+    this.runs.endBranch(taskId, branchId);
+    await this.#settleState(taskId);
   }
 
   /**
-   * The task's job went back to work: an answer, a message or a result woke
-   * it. `working` again, posted with nothing to say, so the gatekeeper's clock
-   * runs again.
+   * A job failed. Its branch ends, and the retry's opens in the same write,
+   * so a sibling waiting on the person does not read as the whole task
+   * waiting in between. A job that took joined messages hands the retry those
+   * it never read, from number `from` on, and every one that joins after; with
+   * no retry (`to` null) it takes none.
    */
-  async working(taskId: string): Promise<void> {
+  async handOver(
+    taskId: string,
+    stepJobId: string,
+    to: string | null,
+    from: number
+  ): Promise<void> {
+    const moved = this.ctx.storage.transactionSync(() => {
+      this.runs.endBranch(taskId, stepJobId);
+      if (!to) {
+        this.runs.setJoins(taskId, stepJobId, false);
+        return [];
+      }
+      this.runs.openBranch(taskId, to);
+      return this.runs.handOverJoins(taskId, stepJobId, to, from);
+    });
+    for (const seq of moved) {
+      await this.#queueInput({ taskId, stepJobId: to as string, seq });
+    }
+    await this.#settleState(taskId);
+  }
+
+  /**
+   * The task's A2A state, read from its branches: `input-required` once every
+   * branch open waits on the person, which is what stops the gatekeeper's
+   * clock; `working` otherwise, posted with nothing to say. A step a pipeline
+   * runs itself is no branch, so a task waiting on one alone reads working.
+   */
+  async #settleState(taskId: string): Promise<void> {
     const row = this.ledger.row(taskId);
     if (!row || isTerminalState(row.state)) return;
-    const working = buildWorkingTask(
-      taskId,
-      row.contextId,
-      "",
-      crypto.randomUUID()
-    );
-    if (this.ledger.setState(taskId, "working", working)) {
+    const waiting =
+      this.runs.waiting(taskId) && this.ledger.openRequests(taskId).length > 0;
+    const id = crypto.randomUUID();
+    const task = waiting
+      ? buildWaitingTask(taskId, row.contextId, `${taskId}:${id}`)
+      : buildWorkingTask(taskId, row.contextId, "", id);
+    if (
+      this.ledger.setState(taskId, waiting ? "input-required" : "working", task)
+    ) {
       await this.#enqueueDelivery(taskId, STATE_KEY);
     }
   }
@@ -502,13 +541,18 @@ export abstract class TaskHost<
    * neither sent nor acknowledged.
    */
   async deliverTask(job: DeliveryJob): Promise<void> {
-    const row = this.ledger.row(job.taskId);
-    const task = this.ledger.owed(job.taskId, job.key);
-    if (!row?.push || !task) return;
-    await createPushChannel(this.env.A2A_SIGNING_KEY, row.push).deliver(
-      Task.fromJSON(Task.toJSON(task as Task))
-    );
-    this.ledger.delivered(job.taskId, job.key);
+    // A state that replaced this one while it posted is owed too, and this is
+    // the queue item that would post it: a repeat under the same id replaced
+    // the item running, which its finishing then removes.
+    for (;;) {
+      const row = this.ledger.row(job.taskId);
+      const task = this.ledger.owed(job.taskId, job.key);
+      if (!row?.push || !task) return;
+      await createPushChannel(this.env.A2A_SIGNING_KEY, row.push).deliver(
+        Task.fromJSON(Task.toJSON(task as Task))
+      );
+      if (this.ledger.delivered(job.taskId, job.key, task)) return;
+    }
   }
 
   /**

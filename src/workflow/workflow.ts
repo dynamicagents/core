@@ -102,8 +102,15 @@ export interface TaskHostStub {
     stepJobId: string,
     request: HitlRequestData
   ): Promise<ParkOutcome>;
-  idle(taskId: string): Promise<void>;
-  working(taskId: string): Promise<void>;
+  idle(taskId: string, branchId: string): Promise<void>;
+  working(taskId: string, branchId: string): Promise<void>;
+  endBranch(taskId: string, branchId: string): Promise<void>;
+  handOver(
+    taskId: string,
+    stepJobId: string,
+    to: string | null,
+    from: number
+  ): Promise<void>;
   closeJoins(
     taskId: string,
     stepJobId: string,
@@ -420,9 +427,13 @@ export abstract class TaskWorkflow<
         ])
     );
 
+    // The host's inputs handed to the agent so far. Not the reader's cursor,
+    // which a batch of events advances past inputs this loop has yet to hand.
+    let handed = 0;
     for (;;) {
       for (const event of await reader.next()) {
         if (event.from === "host") {
+          handed = event.seq + 1;
           await step.do(`${prefix}:input:${event.seq}`, START, async () => {
             const agent = await this.#stepAgent(options.agent, params);
             const input = event.input;
@@ -446,7 +457,25 @@ export abstract class TaskWorkflow<
         }
         const report = event.report;
         const at = `${prefix}:${report.kind}:${event.seq}`;
-        if (report.kind === "failed") throw new StepJobFailed(report.error);
+        if (report.kind === "failed") {
+          // The retry takes over the branch, with the messages that joined
+          // this attempt and it never read.
+          const retry =
+            attempt === 1
+              ? await stepJobIdFor(
+                  this.workflowId,
+                  `${name}${RETRY_SUFFIX}`,
+                  options.key
+                )
+              : null;
+          await step.do(`${at}:hand-over`, START, async () => {
+            await (
+              await this.#host(params)
+            ).handOver(params.taskId, stepJobId, retry, handed);
+            return null;
+          });
+          throw new StepJobFailed(report.error);
+        }
         if (report.kind === "asked") {
           await step.do(at, START, async () => {
             const parked = await (
@@ -462,8 +491,9 @@ export abstract class TaskWorkflow<
         if (report.kind === "working" || report.open.length > 0) {
           await step.do(at, START, async () => {
             const host = await this.#host(params);
-            if (report.kind === "working") await host.working(params.taskId);
-            else await host.idle(params.taskId);
+            if (report.kind === "working") {
+              await host.working(params.taskId, stepJobId);
+            } else await host.idle(params.taskId, stepJobId);
             return null;
           });
           continue;
@@ -473,17 +503,23 @@ export abstract class TaskWorkflow<
           (await this.#host(params)).closeJoins(
             params.taskId,
             stepJobId,
-            reader.cursor.host
+            handed
           )
         );
         const outcome: CompleteOutcome =
           unread.length > 0
             ? { done: false }
-            : await step.do(`${at}:complete`, START, async () =>
-                (await this.#stepAgent(options.agent, params)).completeStepJob(
-                  stepJobId
-                )
-              );
+            : await step.do(`${at}:complete`, START, async () => {
+                const done = await (
+                  await this.#stepAgent(options.agent, params)
+                ).completeStepJob(stepJobId);
+                if (done.done) {
+                  await (
+                    await this.#host(params)
+                  ).endBranch(params.taskId, stepJobId);
+                }
+                return done;
+              });
         if (outcome.done) return outcome.reply;
         // It carries on, so what it would have ended on is said now.
         await step.do(`${at}:carry-on`, START, async () => {
@@ -528,6 +564,9 @@ export abstract class TaskWorkflow<
       if (parked === "closed") {
         throw new NonRetryableError("the task is closed");
       }
+      // A branch that waits on the person until answered, so a pipeline that
+      // waits on nothing else stops the gatekeeper's clock.
+      await (await this.#host(params)).idle(params.taskId, askId);
       return null;
     });
     const reader = new JobReader(
@@ -547,10 +586,15 @@ export abstract class TaskWorkflow<
     for (;;) {
       for (const event of await reader.next()) {
         if (event.from !== "host" || event.input.kind === "join") continue;
-        if (event.input.kind === "expiry") {
+        const input = event.input;
+        await step.do(`${prefix}:done`, START, async () => {
+          await (await this.#host(params)).endBranch(params.taskId, askId);
+          return null;
+        });
+        if (input.kind === "expiry") {
           throw new NonRetryableError(`"${name}" was never answered`);
         }
-        return { answers: event.input.answers };
+        return { answers: input.answers };
       }
     }
   }
