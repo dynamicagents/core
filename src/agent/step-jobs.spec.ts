@@ -55,11 +55,12 @@ const request: HitlRequestData = {
   requestId: "t1:main:call-1",
   questions: [{ kind: "text", id: "q1", prompt: "Which one?" }]
 };
+const second: HitlRequestData = { ...request, requestId: "t1:main:call-2" };
 
 function reports(ledger: StepJobs, stepJobId = "t1:main") {
   return ledger
     .numbers(stepJobId)
-    .map((n) => ledger.report(stepJobId, n)!.report.state);
+    .map((n) => ledger.report(stepJobId, n)!.report.kind);
 }
 
 describe("a job", () => {
@@ -87,55 +88,113 @@ describe("a job", () => {
   it("tells a turn for a job that has ended to stop", async () => {
     await withLedger((ledger) => {
       ledger.accept(job());
-      expect(ledger.markWorking("t1:main")).toBe("ok");
+      expect(ledger.markWorking("t1:main")).toEqual({
+        closed: false,
+        report: null
+      });
       expect(ledger.row("t1:main")?.state).toBe("working");
-      ledger.settle("t1:main", { state: "failed", error: "cut" });
-      expect(ledger.markWorking("t1:main")).toBe("closed");
+      ledger.fail("t1:main", "cut");
+      expect(ledger.markWorking("t1:main").closed).toBe(true);
       expect(ledger.closed("unknown")).toBe(true);
     });
   });
 });
 
 describe("reports", () => {
-  it("settles once, owing its report in the same write", async () => {
+  it("fails once, owing its report in the same write", async () => {
     await withLedger((ledger) => {
       ledger.accept(job());
       ledger.markWorking("t1:main");
-      expect(
-        ledger.settle("t1:main", { state: "completed", reply: "done" })
-      ).toBe(0);
-      expect(
-        ledger.settle("t1:main", { state: "failed", error: "late" })
-      ).toBeNull();
-      expect(reports(ledger)).toEqual(["completed"]);
+      expect(ledger.fail("t1:main", "cut")).toBe(0);
+      expect(ledger.fail("t1:main", "late")).toBeNull();
+      expect(reports(ledger)).toEqual(["failed"]);
       expect(ledger.unsent()).toEqual([{ stepJobId: "t1:main", n: 0 }]);
       ledger.sent("t1:main", 0);
       expect(ledger.unsent()).toEqual([]);
     });
   });
 
-  it("numbers a question's report, then the one that settles the job", async () => {
+  it("goes idle with what it would end on, and finishes only on its workflow's word", async () => {
     await withLedger((ledger) => {
       ledger.accept(job());
       ledger.markWorking("t1:main");
-      expect(ledger.park("t1:main", request)).toBe(0);
-      expect(ledger.row("t1:main")?.request?.requestId).toBe(request.requestId);
-      // A park run twice finds it parked and owes nothing twice.
-      expect(ledger.park("t1:main", request)).toBeNull();
+      expect(ledger.idle("t1:main", "done")).toBe(0);
+      // Only a working job goes idle.
+      expect(ledger.idle("t1:main", "again")).toBeNull();
+      expect(ledger.report("t1:main", 0)?.report).toEqual({
+        kind: "idle",
+        open: [],
+        reply: "done"
+      });
+      // Anything that wakes it is a report of its own.
+      expect(ledger.markWorking("t1:main")).toEqual({
+        closed: false,
+        report: 1
+      });
+      expect(ledger.complete("t1:main")).toEqual({ done: false });
+      expect(ledger.idle("t1:main", "done now")).toBe(2);
+      expect(ledger.complete("t1:main")).toEqual({
+        done: true,
+        reply: "done now"
+      });
+      expect(ledger.row("t1:main")?.state).toBe("completed");
+      expect(reports(ledger)).toEqual(["idle", "working", "idle"]);
+    });
+  });
 
-      const answer = { id: `answer:${request.requestId}`, text: "Yes" };
-      expect(ledger.resume("t1:main", answer)).toBe(true);
-      expect(ledger.resume("t1:main", answer)).toBe(false);
-      expect(ledger.pendingAnswers()).toEqual(["t1:main"]);
-      ledger.answered("t1:main", "answer:another");
-      expect(ledger.row("t1:main")?.answer).toEqual(answer);
-      ledger.answered("t1:main", answer.id);
-      expect(ledger.pendingAnswers()).toEqual([]);
+  it("asks as often as it needs, and holds the job open until each request closes", async () => {
+    await withLedger((ledger) => {
+      ledger.accept(job());
+      ledger.markWorking("t1:main");
+      expect(ledger.ask("t1:main", request)).toBe(0);
+      // A settlement run again finds the request recorded and owes nothing twice.
+      expect(ledger.ask("t1:main", request)).toBeNull();
+      expect(ledger.ask("t1:main", second)).toBe(1);
+      expect(ledger.idle("t1:main", "")).toBe(2);
+      expect(ledger.report("t1:main", 2)?.report).toEqual({
+        kind: "idle",
+        open: [request.requestId, second.requestId],
+        reply: ""
+      });
+      expect(ledger.complete("t1:main")).toEqual({ done: false });
 
       expect(
-        ledger.settle("t1:main", { state: "completed", reply: "done" })
-      ).toBe(1);
-      expect(reports(ledger)).toEqual(["input-required", "completed"]);
+        ledger.closeRequest("t1:main", request.requestId, "answered")?.requestId
+      ).toBe(request.requestId);
+      // An answer relayed again finds it closed.
+      expect(
+        ledger.closeRequest("t1:main", request.requestId, "answered")
+      ).toBeNull();
+      expect(ledger.request("t1:main", request.requestId)?.state).toBe(
+        "answered"
+      );
+      ledger.markWorking("t1:main");
+      ledger.closeRequest("t1:main", second.requestId, "expired");
+      expect(ledger.openRequests("t1:main")).toEqual([]);
+      ledger.idle("t1:main", "done");
+      expect(ledger.complete("t1:main")).toEqual({ done: true, reply: "done" });
+      expect(reports(ledger)).toEqual([
+        "asked",
+        "asked",
+        "idle",
+        "working",
+        "idle"
+      ]);
+    });
+  });
+
+  it("finishes no job with work still open", async () => {
+    await withLedger((ledger) => {
+      ledger.accept(job());
+      ledger.markWorking("t1:main");
+      ledger.addWork({
+        workId: "d",
+        stepJobId: "t1:main",
+        kind: "detached",
+        name: "C"
+      });
+      ledger.idle("t1:main", "started it");
+      expect(ledger.complete("t1:main")).toEqual({ done: false });
     });
   });
 
@@ -150,12 +209,11 @@ describe("reports", () => {
         name: "C"
       });
       // An open job's question goes out whatever runs beside it.
-      ledger.park("t1:main", request);
+      ledger.ask("t1:main", request);
       expect(ledger.unsent()).toEqual([{ stepJobId: "t1:main", n: 0 }]);
       ledger.sent("t1:main", 0);
 
-      ledger.resume("t1:main", { id: "answer:a", text: "Yes" });
-      ledger.settle("t1:main", { state: "failed", error: "cut" });
+      ledger.fail("t1:main", "cut");
       expect(ledger.unsent()).toEqual([]);
       expect(ledger.unstopped()).toEqual(["t1:main"]);
       expect(ledger.unsentOf("t1:main")).toEqual([1]);
@@ -172,14 +230,12 @@ describe("reports", () => {
     await withLedger((ledger) => {
       ledger.accept(job());
       ledger.markWorking("t1:main");
-      ledger.park("t1:main", request);
+      ledger.ask("t1:main", request);
       expect(ledger.cancel("t1:main")).toBe(true);
       expect(ledger.cancel("t1:main")).toBe(false);
       expect(ledger.unsent()).toEqual([]);
-      expect(ledger.row("t1:main")?.request).toBeNull();
-      expect(
-        ledger.settle("t1:main", { state: "completed", reply: "late" })
-      ).toBeNull();
+      expect(ledger.fail("t1:main", "late")).toBeNull();
+      expect(ledger.ask("t1:main", second)).toBeNull();
     });
   });
 });
@@ -190,7 +246,9 @@ describe("the jobs of a task", () => {
       ledger.accept(job("t1:plan"));
       ledger.accept(job("t1:code"));
       ledger.accept(job("t2:main", "t2"));
-      ledger.settle("t1:plan", { state: "completed", reply: "plan" });
+      ledger.markWorking("t1:plan");
+      ledger.idle("t1:plan", "plan");
+      ledger.complete("t1:plan");
       expect(ledger.openJobsOf("t1")).toEqual(["t1:code"]);
       expect(
         ledger
@@ -366,7 +424,8 @@ describe("retention", () => {
   it("sweeps settled jobs past the window, with what they owned, and never an open one", async () => {
     await withLedger((ledger) => {
       ledger.accept(job("t1:main"));
-      ledger.settle("t1:main", { state: "completed", reply: "done" });
+      ledger.ask("t1:main", request);
+      ledger.fail("t1:main", "cut");
       ledger.addWork({
         workId: "d",
         stepJobId: "t1:main",
@@ -377,6 +436,7 @@ describe("retention", () => {
       ledger.sweep(Date.now() + TASK_RETENTION_MS);
       expect(ledger.row("t1:main")).toBeNull();
       expect(ledger.numbers("t1:main")).toEqual([]);
+      expect(ledger.request("t1:main", request.requestId)).toBeNull();
       expect(ledger.work("d")).toBeNull();
       expect(ledger.row("t2:main")).not.toBeNull();
     });

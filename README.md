@@ -169,12 +169,14 @@ import { gatewayLogFields, workersAIModel } from "@dynamicagents/core/model";
 export class MyAgentTasks extends TaskHost<Env> {
   protected readonly copy = {
     failed: "Something went wrong on my side.",
-    emptyReply: "I finished, but had nothing to say.",
-    questionExpired: "Nobody answered in time, so I stopped."
+    emptyReply: "I finished, but had nothing to say."
   };
   protected readonly workflowBinding = "MY_AGENT_TASK";
   protected readonly hostBinding = "MyAgentTasks";
 }
+
+// How long a wait for a job's next event lasts before it pulls: your numbers.
+const reconcile = { afterMs: 5 * 60_000, maxMs: 4 * 60 * 60_000 };
 
 export class MyAgentTask extends TaskWorkflow<Env> {
   // Required, one line, in every pipeline: see below.
@@ -186,27 +188,37 @@ export class MyAgentTask extends TaskWorkflow<Env> {
     const plan = await step.agent("plan", {
       agent: "MyAgent",
       role: "plan",
-      input: event.payload.text
+      input: event.payload.text,
+      reconcile
     });
-    const { answers } = await step.ask("approve", {
-      questions: [
-        {
-          kind: "choice",
-          id: "plan",
-          prompt: plan,
-          options: [
-            { id: "approve", label: "Approve" },
-            { id: "reject", label: "Reject" }
-          ]
-        }
-      ]
-    });
+    const { answers } = await step.ask(
+      "approve",
+      {
+        questions: [
+          {
+            kind: "choice",
+            id: "plan",
+            prompt: plan,
+            options: [
+              { id: "approve", label: "Approve" },
+              { id: "reject", label: "Reject" }
+            ]
+          }
+        ]
+      },
+      { reconcile }
+    );
     if (answers.plan?.optionIds?.[0] !== "approve") {
       return { reply: "Stopped at the plan." };
     }
     await step.say("Building it.");
     return {
-      reply: await step.agent("build", { agent: "MyAgent", input: plan })
+      reply: await step.agent("build", {
+        agent: "MyAgent",
+        input: plan,
+        joins: true,
+        reconcile
+      })
     };
   }
 }
@@ -229,29 +241,47 @@ export class MyAgent extends StepAgent<Env> {
 }
 ```
 
-**The pipeline's helpers.** `step.agent(name, { agent, input, role?, key? })` runs a
-job on a step agent — `agent` is its binding name, and the instance is always the
-caller's — and returns its reply. `step.ask(name, request)` parks the task on
-questions of the pipeline's own, in the g2a form, and returns their answers keyed by
-question id. `step.say(text)` pushes one
-progress line. `step.do` is Workflows' own. A step whose job reports `failed` runs
-once more, as `<name>:retry` with `attempt: 2`; a second failure fails the task, and
-a step named with that suffix is refused. A name used twice in one run — a loop
-without a `key` — fails the task by name, because Workflows would otherwise hand the
-second the first one's result. A task holds one request at a time, however many
-questions it asks, so a `step.ask`, or a job's `ask_user`, made while another waits
-fails the task.
+**The pipeline's helpers.** `step.agent(name, { agent, input, role?, key?, joins?,
+reconcile })` runs a job on a step agent (`agent` is its binding name, and the
+instance is always the caller's) and returns its reply. `joins: true` makes the step
+the task's taker of joined messages: a message the gatekeeper sends onto the open
+task, rather than as a new one, becomes the job's next turn, in Think's order. With
+no such step running, a joined message is refused, and the gatekeeper starts a task
+with it instead. `step.ask(name, request, { reconcile })` asks the caller questions
+of the pipeline's own, in the g2a form, and returns their answers keyed by question
+id; one nobody answered before the gatekeeper gave up on it fails the task. The task
+waits on the person (`input-required`, which stops the gatekeeper's clock) only once
+every job and question of the pipeline's running waits on one; a step the pipeline
+runs itself counts as working. `step.say(text)` pushes one progress line. `step.do`
+is Workflows' own. A step whose job reports `failed` runs once more, as
+`<name>:retry` with `attempt: 2`, and takes over the messages that joined the first
+attempt and never ran; the first attempt's questions close, and the retry asks again
+if it needs to. A second failure fails the task, and a step named with that suffix
+is refused. A name used
+twice in one run, as a loop without a `key` uses one, fails the task by name, because
+Workflows would otherwise hand the second the first one's result.
+
+**Every input travels through the workflow.** A job's reports and the host's inputs
+(answers, joined messages, expiries) arrive as events under the job's one type, each
+writer numbering its own, and the workflow reads them in order and hands each input
+to the agent. Every wait is bounded by `reconcile`: one that ends without an event
+pulls both writers for what it has not read, doubling the next wait up to `maxMs`
+while nothing is owed. An event the platform loses costs a delay, not the task. Core
+ships no numbers for it.
 
 **Every pipeline declares `run()`,** as the one line above. The agents SDK gives a
 workflow its host and its helpers only on a class that defines `run` itself, and an
 inherited one would get neither, silently. The base constructor refuses a pipeline
 that does not.
 
-**A job spans turns.** It ends the way every Think turn does, when the model stops
-calling tools, and its last words are its reply. On top of that, core gives the model
-`ask_user` — every question the model needs answered in one call, the job parks, the
-host asks the caller, and the answers are the job's next turn — and
-`search_history` over the conversation's own full-text index. A choice always takes
+**A job spans turns.** It goes idle the way every Think turn ends, when the model stops
+calling tools; once nothing runs for it and nothing is open, its workflow finishes it,
+and its last words are its reply. On top of that, core gives the model `ask_user`:
+every question the model needs answered in one call, the host asks the caller, and the
+answers are a turn of their own. A job holds as many requests open as it asks, and
+nothing waits behind them: a result, a joined message and each answer get their turn
+in Think's order. Core also gives it `search_history` over the conversation's own
+full-text index. A choice always takes
 a typed answer too, and an answer that does not fit the questions is refused to the
 gatekeeper with why. A question naming an `artifact` is an approval of it: it carries
 the artifact's id and link, the caller answers Approve, Reject or with a typed

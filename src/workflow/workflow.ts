@@ -12,31 +12,20 @@ import {
 } from "@dynamicagents/g2a-protocol";
 import type { CoreEnv } from "../env.js";
 import type { TaskHost } from "../task/host.js";
-import {
-  answerEventType,
-  digest,
-  reportEventType,
-  stepJobIdFor
-} from "./keys.js";
+import { digest, jobEventType, stepJobIdFor } from "./keys.js";
 import type {
   AskRequest,
+  CompleteOutcome,
+  JobEvent,
   NotedStepJob,
   ParkOutcome,
   PipelineResult,
+  Reconcile,
   StepAnswer,
   StepJob,
-  StepJobReport,
   TaskParams,
   TaskResult
 } from "./types.js";
-
-/**
- * Every wait passes the platform's ceiling. Unset, a wait gives up after a day
- * and fails the instance; a person's answer and a long coding job are both
- * allowed to take longer. The task's own bounds — the gatekeeper's, a
- * question's expiry, a cancel — end it sooner by stopping the instance.
- */
-export const WAIT_CEILING = "365 days";
 
 /** What `step.agent` runs a job with. */
 export interface AgentStepOptions {
@@ -46,6 +35,20 @@ export interface AgentStepOptions {
   role?: string;
   /** Distinguishes repeats of one step name, as a loop makes. */
   key?: string;
+  /**
+   * Whether messages that join the task while this step runs are its input. A
+   * task takes them for one step at a time; with no such step running, a
+   * joining message starts a task of its own.
+   */
+  joins?: boolean;
+  /** How long a wait for the job's next event lasts before it pulls. */
+  reconcile: Reconcile;
+}
+
+/** What `step.ask` asks with. */
+export interface AskStepOptions {
+  /** How long a wait for the answer lasts before it pulls. */
+  reconcile: Reconcile;
 }
 
 /** The step helpers a pipeline gets, beside `step.do` and the rest. */
@@ -58,16 +61,36 @@ export interface TaskStep extends AgentWorkflowStep {
   /** A progress line to the caller. */
   say(text: string): Promise<void>;
   /**
-   * Park the task on a question to the caller, and return the answer. A task
-   * holds one question at a time, so one asked while another waits fails.
+   * Ask the caller a question of the pipeline's own, and return the answer. A
+   * question nobody answered before the gatekeeper gave up on it fails the
+   * task.
    */
-  ask(name: string, request: AskRequest): Promise<StepAnswer>;
+  ask(
+    name: string,
+    request: AskRequest,
+    options: AskStepOptions
+  ): Promise<StepAnswer>;
 }
 
 /** The step agent surface a workflow and a host call. */
 export interface StepAgentStub {
   startStepJob(job: StepJob): Promise<void>;
-  answerStepJob(stepJobId: string, answer: StepAnswer): Promise<void>;
+  answerStepJob(
+    stepJobId: string,
+    requestId: string,
+    answers: StepAnswer["answers"]
+  ): Promise<void>;
+  joinStepJob(
+    stepJobId: string,
+    message: { messageId: string; text: string }
+  ): Promise<void>;
+  expireStepJobQuestion(stepJobId: string, requestId: string): Promise<void>;
+  completeStepJob(stepJobId: string): Promise<CompleteOutcome>;
+  stepJobUnrunJoins(stepJobId: string): Promise<string[]>;
+  stepJobReports(
+    stepJobId: string,
+    from: number
+  ): Promise<Extract<JobEvent, { from: "agent" }>[]>;
   cancelStepJob(stepJobId: string): Promise<void>;
   stepTaskSettled(taskId: string, state: number): Promise<void>;
 }
@@ -75,12 +98,147 @@ export interface StepAgentStub {
 /** The task host surface a workflow's steps call. */
 export interface TaskHostStub {
   noteStepJob(taskId: string, job: NotedStepJob): Promise<boolean>;
-  park(taskId: string, request: HitlRequestData): Promise<ParkOutcome>;
+  park(
+    taskId: string,
+    stepJobId: string,
+    request: HitlRequestData
+  ): Promise<ParkOutcome>;
+  idle(taskId: string, branchId: string): Promise<void>;
+  working(taskId: string, branchId: string): Promise<void>;
+  endBranch(taskId: string, branchId: string): Promise<void>;
+  handOver(
+    taskId: string,
+    stepJobId: string,
+    to: string | null,
+    unread: { from: number; unrun: string[] }
+  ): Promise<void>;
+  closeJoins(
+    taskId: string,
+    stepJobId: string,
+    from: number
+  ): Promise<Extract<JobEvent, { from: "host" }>[]>;
+  openJoins(taskId: string, stepJobId: string): Promise<void>;
+  stepJobInputs(
+    taskId: string,
+    stepJobId: string,
+    from: number
+  ): Promise<Extract<JobEvent, { from: "host" }>[]>;
   progress(taskId: string, text: string, key: string): Promise<void>;
 }
 
 /** A job that reported `failed`: the one failure a step retries. */
 class StepJobFailed extends Error {}
+
+/**
+ * How long a job's next wait lasts: back to `afterMs` once anything arrived,
+ * twice the last while nothing does, never past `maxMs`. So a wait nobody
+ * answers costs about one wake per `maxMs` once it has doubled up to it, and
+ * each wake is two steps of an instance's ceiling (the wait and its pull).
+ */
+export function nextWait(
+  reconcile: Reconcile,
+  current: number,
+  found: boolean
+): number {
+  return found ? reconcile.afterMs : Math.min(current * 2, reconcile.maxMs);
+}
+
+/** Where a reader is: the next number it wants from each writer. */
+interface Cursor {
+  agent: number;
+  host: number;
+}
+
+/**
+ * Reads one job's events in each writer's own order, each once.
+ *
+ * The platform keeps every event sent under a type and hands them out in the
+ * order they arrived, which for two sends in flight at once is either order.
+ * So each writer numbers its own, a number already read is dropped, and a
+ * number past the next one is a gap the reader pulls from that writer first.
+ *
+ * Every wait is bounded. One that ends without an event pulls both writers
+ * from where the cursor stands; one that finds nothing owed doubles the next
+ * wait, up to the ceiling, and anything arriving starts it over. Everything it
+ * decides it decides from step results, so a replay reads the same way.
+ */
+class JobReader {
+  readonly cursor: Cursor = { agent: 0, host: 0 };
+  #waits = 0;
+  #pulls = 0;
+  #wait: number;
+  #held: JobEvent[] = [];
+
+  constructor(
+    private readonly step: TaskStep,
+    private readonly prefix: string,
+    private readonly type: string,
+    private readonly reconcile: Reconcile,
+    private readonly pull: (
+      next: Cursor & { attempt: number }
+    ) => Promise<JobEvent[]>
+  ) {
+    this.#wait = reconcile.afterMs;
+  }
+
+  /** The next events in order: one or more, after as many waits as it takes. */
+  async next(): Promise<JobEvent[]> {
+    for (;;) {
+      const held = this.#take([]);
+      if (held.length > 0) return held;
+      let arrived: JobEvent | null = null;
+      try {
+        const event = await this.step.waitForEvent<JobEvent>(
+          `${this.prefix}:event:${this.#waits++}`,
+          { type: this.type, timeout: this.#wait }
+        );
+        arrived = event.payload as JobEvent;
+      } catch {
+        // A timeout, or a wait an eviction cut: either way, pull. The pull only
+        // reads, so a replay that finds the event there instead loses nothing.
+      }
+      if (arrived && arrived.seq <= this.cursor[arrived.from]) {
+        const ready = this.#take([arrived]);
+        this.#wait = nextWait(this.reconcile, this.#wait, ready.length > 0);
+        if (ready.length > 0) return ready;
+        continue;
+      }
+      const pulled = await this.pull({
+        ...this.cursor,
+        attempt: this.#pulls++
+      });
+      const ready = this.#take(arrived ? [arrived, ...pulled] : pulled);
+      this.#wait = nextWait(this.reconcile, this.#wait, ready.length > 0);
+      if (ready.length > 0) return ready;
+    }
+  }
+
+  /** Events read some other way, the host's unread inputs among them. */
+  unread(events: JobEvent[]): void {
+    this.#held.push(...events);
+  }
+
+  /**
+   * The events that are next in each writer's order, in the order they came,
+   * with anything already read dropped and anything past a gap held back.
+   */
+  #take(events: JobEvent[]): JobEvent[] {
+    const candidates = [...this.#held, ...events];
+    const ready: JobEvent[] = [];
+    let progressed = true;
+    while (progressed) {
+      progressed = false;
+      for (const event of candidates) {
+        if (event.seq !== this.cursor[event.from]) continue;
+        ready.push(event);
+        this.cursor[event.from] += 1;
+        progressed = true;
+      }
+    }
+    this.#held = candidates.filter((e) => e.seq >= this.cursor[e.from]);
+    return ready;
+  }
+}
 
 /**
  * A step's second attempt runs under its name plus this, so a step named with
@@ -168,8 +326,8 @@ export abstract class TaskWorkflow<
     taskStep.agent = (name, options) =>
       this.#agentStep(taskStep, params, name, options);
     taskStep.say = (text) => this.#say(taskStep, params, text);
-    taskStep.ask = (name, request) =>
-      this.#askStep(taskStep, params, name, request);
+    taskStep.ask = (name, request, options) =>
+      this.#askStep(taskStep, params, name, request, options);
     return taskStep;
   }
 
@@ -200,10 +358,18 @@ export abstract class TaskWorkflow<
   }
 
   /**
-   * Start a job, then wait for its reports until it settles. The start is its
-   * own step, and nothing holds an RPC open while the agent works: the agent
-   * reports through `sendWorkflowEvent`, which a parked instance waits on
-   * without holding concurrency.
+   * Start a job, then read its events until it finishes. The start is its own
+   * step, and nothing holds an RPC open while the agent works: the agent's
+   * reports and the host's inputs both arrive as events under the job's one
+   * type, which a waiting instance holds no concurrency for.
+   *
+   * Every input reaches the agent from here, after this has read it, so the
+   * workflow knows of every wait and what ended it. Every wait is bounded: one
+   * that times out pulls from both writers what this has not read, so an event
+   * the platform loses costs a delay and not the task.
+   *
+   * The job finishes here, not on the agent's word: only this sees whether an
+   * input is already on its way when the agent goes idle with nothing open.
    */
   async #job(
     step: TaskStep,
@@ -235,35 +401,151 @@ export abstract class TaskWorkflow<
       // Noted before it starts, so a cancel landing in between still finds it.
       const noted = await (
         await this.#host(params)
-      ).noteStepJob(params.taskId, { stepJobId, binding: options.agent });
+      ).noteStepJob(params.taskId, {
+        stepJobId,
+        binding: options.agent,
+        ...(options.joins ? { joins: true } : {})
+      });
       if (!noted) throw new NonRetryableError("the task is closed");
       await (await this.#stepAgent(options.agent, params)).startStepJob(job);
       return null;
     });
 
-    for (let n = 0; ; n++) {
-      const event = await step.waitForEvent<StepJobReport>(
-        `agent:${label}:wait:${n}`,
-        {
-          type: await reportEventType(stepJobId, n),
-          timeout: WAIT_CEILING
+    const prefix = `agent:${label}`;
+    const reader = new JobReader(
+      step,
+      prefix,
+      await jobEventType(stepJobId),
+      options.reconcile,
+      (next) =>
+        step.do(`${prefix}:pull:${next.attempt}`, START, async () => [
+          ...(await (
+            await this.#stepAgent(options.agent, params)
+          ).stepJobReports(stepJobId, next.agent)),
+          ...(await (
+            await this.#host(params)
+          ).stepJobInputs(params.taskId, stepJobId, next.host))
+        ])
+    );
+
+    // The host's inputs handed to the agent so far. Not the reader's cursor,
+    // which a batch of events advances past inputs this loop has yet to hand.
+    let handed = 0;
+    for (;;) {
+      for (const event of await reader.next()) {
+        if (event.from === "host") {
+          handed = event.seq + 1;
+          await step.do(`${prefix}:input:${event.seq}`, START, async () => {
+            const agent = await this.#stepAgent(options.agent, params);
+            const input = event.input;
+            if (input.kind === "answer") {
+              await agent.answerStepJob(
+                stepJobId,
+                input.requestId,
+                input.answers
+              );
+            } else if (input.kind === "join") {
+              await agent.joinStepJob(stepJobId, {
+                messageId: input.messageId,
+                text: input.text
+              });
+            } else {
+              await agent.expireStepJobQuestion(stepJobId, input.requestId);
+            }
+            return null;
+          });
+          continue;
         }
-      );
-      const report = event.payload;
-      if (report.state === "completed") return report.reply;
-      if (report.state === "failed") throw new StepJobFailed(report.error);
-      const answer = await this.#ask(
-        step,
-        params,
-        `agent:${label}:${n}`,
-        report.request
-      );
-      await step.do(`agent:${label}:answer:${n}`, START, async () => {
-        await (
-          await this.#stepAgent(options.agent, params)
-        ).answerStepJob(stepJobId, answer);
-        return null;
-      });
+        const report = event.report;
+        const at = `${prefix}:${report.kind}:${event.seq}`;
+        if (report.kind === "failed") {
+          // The retry takes over the branch, with the messages that joined
+          // this attempt and it never ran: those this loop never handed it,
+          // and those it was handed too late, or queued behind the turn that
+          // failed.
+          const retry =
+            attempt === 1
+              ? await stepJobIdFor(
+                  this.workflowId,
+                  `${name}${RETRY_SUFFIX}`,
+                  options.key
+                )
+              : null;
+          await step.do(`${at}:hand-over`, START, async () => {
+            const unrun = await (
+              await this.#stepAgent(options.agent, params)
+            ).stepJobUnrunJoins(stepJobId);
+            await (
+              await this.#host(params)
+            ).handOver(params.taskId, stepJobId, retry, {
+              from: handed,
+              unrun
+            });
+            return null;
+          });
+          throw new StepJobFailed(report.error);
+        }
+        if (report.kind === "asked") {
+          await step.do(at, START, async () => {
+            const parked = await (
+              await this.#host(params)
+            ).park(params.taskId, stepJobId, report.request);
+            if (parked === "closed") {
+              throw new NonRetryableError("the task is closed");
+            }
+            return null;
+          });
+          continue;
+        }
+        if (report.kind === "working" || report.open.length > 0) {
+          await step.do(at, START, async () => {
+            const host = await this.#host(params);
+            if (report.kind === "working") {
+              await host.working(params.taskId, stepJobId);
+            } else await host.idle(params.taskId, stepJobId);
+            return null;
+          });
+          continue;
+        }
+        // Idle with nothing open: finished, unless an input is already here.
+        const unread = await step.do(`${at}:close`, START, async () =>
+          (await this.#host(params)).closeJoins(
+            params.taskId,
+            stepJobId,
+            handed
+          )
+        );
+        const outcome: CompleteOutcome =
+          unread.length > 0
+            ? { done: false }
+            : await step.do(`${at}:complete`, START, async () => {
+                const done = await (
+                  await this.#stepAgent(options.agent, params)
+                ).completeStepJob(stepJobId);
+                if (done.done) {
+                  await (
+                    await this.#host(params)
+                  ).endBranch(params.taskId, stepJobId);
+                }
+                return done;
+              });
+        if (outcome.done) return outcome.reply;
+        // It carries on, so what it would have ended on is said now.
+        await step.do(`${at}:carry-on`, START, async () => {
+          const host = await this.#host(params);
+          if (unread.length === 0)
+            await host.openJoins(params.taskId, stepJobId);
+          if (report.reply) {
+            await host.progress(
+              params.taskId,
+              report.reply,
+              `${stepJobId}:${at}`
+            );
+          }
+          return null;
+        });
+        reader.unread(unread);
+      }
     }
   }
 
@@ -271,44 +553,59 @@ export abstract class TaskWorkflow<
     step: TaskStep,
     params: TaskParams,
     name: string,
-    request: AskRequest
+    request: AskRequest,
+    options: AskStepOptions
   ): Promise<StepAnswer> {
     this.#claim(`ask:${name}`);
     this.#steps.push(name);
-    return this.#ask(step, params, `ask:${name}`, {
-      ...request,
-      type: HITL_REQUEST_TYPE,
-      requestId: `${this.workflowId}:${name}`
-    });
-  }
-
-  /** Park the task on a question, then wait for the host to relay the answer. */
-  async #ask(
-    step: TaskStep,
-    params: TaskParams,
-    label: string,
-    request: HitlRequestData
-  ): Promise<StepAnswer> {
-    const parked = await step.do(`${label}:park`, START, async () => {
+    const prefix = `ask:${name}`;
+    // A job id of its own, so its answer travels the way a job's input does.
+    const askId = `${this.workflowId}:ask:${name}`;
+    const requestId = `${this.workflowId}:${name}`;
+    await step.do(`${prefix}:park`, START, async () => {
       const parked = await (
         await this.#host(params)
-      ).park(params.taskId, request);
+      ).park(params.taskId, askId, {
+        ...request,
+        type: HITL_REQUEST_TYPE,
+        requestId
+      });
       if (parked === "closed") {
         throw new NonRetryableError("the task is closed");
       }
-      return parked;
+      // A branch that waits on the person until answered, so a pipeline that
+      // waits on nothing else stops the gatekeeper's clock.
+      await (await this.#host(params)).idle(params.taskId, askId);
+      return null;
     });
-    // Thrown outside the step, so the task's error keeps the reason.
-    if (parked === "asking") {
-      throw new Error(
-        `"${label}" asked while the task waits on another question: ask one at a time`
-      );
+    const reader = new JobReader(
+      step,
+      prefix,
+      await jobEventType(askId),
+      options.reconcile,
+      (next) =>
+        step.do(`${prefix}:pull:${next.attempt}`, START, async () =>
+          (await this.#host(params)).stepJobInputs(
+            params.taskId,
+            askId,
+            next.host
+          )
+        )
+    );
+    for (;;) {
+      for (const event of await reader.next()) {
+        if (event.from !== "host" || event.input.kind === "join") continue;
+        const input = event.input;
+        await step.do(`${prefix}:done`, START, async () => {
+          await (await this.#host(params)).endBranch(params.taskId, askId);
+          return null;
+        });
+        if (input.kind === "expiry") {
+          throw new NonRetryableError(`"${name}" was never answered`);
+        }
+        return { answers: input.answers };
+      }
     }
-    const event = await step.waitForEvent<StepAnswer>(`${label}:reply`, {
-      type: await answerEventType(request.requestId),
-      timeout: WAIT_CEILING
-    });
-    return event.payload;
   }
 
   /** Numbered, so saying one thing twice is two lines and a replay is none. */
