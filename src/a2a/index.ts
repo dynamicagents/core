@@ -45,7 +45,8 @@ export {
 } from "@dynamicagents/g2a-protocol";
 
 export {
-  buildInputRequiredTask,
+  buildAskingTask,
+  buildWaitingTask,
   formRequestText,
   readHumanReply,
   type HumanAnswer,

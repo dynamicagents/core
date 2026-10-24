@@ -106,7 +106,8 @@ export interface AgentHarness {
    */
   readonly callerScope: string;
   /**
-   * Send one turn and return the accepted Task.
+   * Send one turn and return the accepted Task. With `taskId`, the message is
+   * sent onto that open Task, as a gatekeeper sends one that joins it.
    *
    * Throws on a JSON-RPC error rather than returning it, so a spec asserting the
    * happy path fails with the agent's own message instead of on a later

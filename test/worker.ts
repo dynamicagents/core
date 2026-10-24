@@ -19,7 +19,9 @@ import { StepAgent } from "../src/agent/agent.js";
 import { TaskHost, type A2ACopy } from "../src/task/host.js";
 import { TaskWorkflow, type TaskStep } from "../src/workflow/workflow.js";
 import type {
+  JobEvent,
   PipelineResult,
+  Reconcile,
   StepJob,
   TaskParams
 } from "../src/workflow/types.js";
@@ -67,9 +69,33 @@ export interface TestEnv extends CoreEnv {
 
 export const COPY: A2ACopy = {
   failed: "Something went wrong on my side.",
-  emptyReply: "I finished, but had nothing to say.",
-  questionExpired: "Nobody answered in time, so I stopped."
+  emptyReply: "I finished, but had nothing to say."
 };
+
+/**
+ * Short, so a spec that loses an event sees the pull within a second or two.
+ * A deployment's own are minutes: see `Reconcile`.
+ */
+export const RECONCILE: Reconcile = { afterMs: 1_000, maxMs: 4_000 };
+
+/**
+ * Swallow the next send of one numbered event while reporting it sent: what the
+ * platform did to the report a task waited a year for. Durable, so a spec sets
+ * it before the event exists.
+ */
+function dropsEvent(
+  sql: TestAgent["sql"],
+  event: { payload: unknown }
+): boolean {
+  sql`CREATE TABLE IF NOT EXISTS test_drops (from_ TEXT, seq INTEGER)`;
+  const payload = event.payload as Partial<JobEvent> | undefined;
+  if (!payload?.from || payload.seq === undefined) return false;
+  return (
+    sql<{ seq: number }>`DELETE FROM test_drops
+      WHERE from_ = ${payload.from} AND seq = ${payload.seq}
+      RETURNING seq`.length > 0
+  );
+}
 
 /** The text of the most recent tool result, as the model was shown it. */
 function lastToolOutput(view: ModelTurnView): string {
@@ -417,6 +443,25 @@ abstract class TestSubAgentBase extends SubAgent<TestEnv> {
     };
   }
 
+  /**
+   * Age this run's turn by `ms`, as the runtime's ceiling ages one it cuts:
+   * Think reads a turn's age from its chat fiber, its task run and its stream.
+   */
+  async debugAge(ms: number): Promise<number> {
+    let aged = 0;
+    for (const table of [
+      "cf_agents_runs",
+      "cf_agents_task_runs",
+      "cf_agents_streams"
+    ]) {
+      aged += this.ctx.storage.sql.exec(
+        `UPDATE ${table} SET created_at = created_at - ?`,
+        ms
+      ).rowsWritten;
+    }
+    return aged;
+  }
+
   /** How often this run parked in `child_park`, and the messages it wrote. */
   async debugRun(): Promise<{ parks: number; assistantMessages: number }> {
     this.sql`CREATE TABLE IF NOT EXISTS test_parks (at INTEGER)`;
@@ -443,13 +488,20 @@ export class TestBackground extends TestSubAgentBase {
 export interface StepReportDebug {
   stepJobId: string;
   n: number;
-  report: { state: string; reply?: string; error?: string };
+  report: {
+    kind: string;
+    reply?: string;
+    error?: string;
+    open?: string[];
+    request?: { requestId: string };
+  };
   sent: boolean;
 }
 
 /** One job's ledger, as JSON: what a report cannot carry. */
 export interface JobDebug {
-  row: { state: string; request: { requestId: string } | null } | null;
+  /** The job's state, and the requests it still waits on. */
+  row: { state: string; open: string[] } | null;
   work: {
     workId: string;
     kind: string;
@@ -553,6 +605,19 @@ export class TestAgent extends StepAgent<TestEnv> {
     return [...this.#holding.keys()];
   }
 
+  /** Lose report `seq` of any job on this object: see {@link dropsEvent}. */
+  async dropReport(seq: number): Promise<void> {
+    this.sql`CREATE TABLE IF NOT EXISTS test_drops (from_ TEXT, seq INTEGER)`;
+    this.sql`INSERT INTO test_drops VALUES ('agent', ${seq})`;
+  }
+
+  override async sendWorkflowEvent(
+    ...args: Parameters<StepAgent<TestEnv>["sendWorkflowEvent"]>
+  ): Promise<void> {
+    if (dropsEvent(this.sql.bind(this), args[2])) return;
+    await super.sendWorkflowEvent(...args);
+  }
+
   /** Free a parked `test_hold`, or the next turn that parks on that key. */
   async releaseHold(key: string): Promise<void> {
     const free = this.#holding.get(key);
@@ -596,10 +661,7 @@ export class TestAgent extends StepAgent<TestEnv> {
     }
     const debug: JobDebug = {
       row: row
-        ? {
-            state: row.state,
-            request: row.request ? { requestId: row.request.requestId } : null
-          }
+        ? { state: row.state, open: this.ledger.openRequests(stepJobId) }
         : null,
       work: this.ledger.workRows(stepJobId).map((w) => ({
         workId: w.workId,
@@ -760,6 +822,19 @@ export class TestHost extends TaskHost<TestEnv> {
     this.sql`INSERT INTO test_settled VALUES (${taskId}, ${state})`;
   }
 
+  /** Lose input `seq` of any job on this host: see {@link dropsEvent}. */
+  async dropInput(seq: number): Promise<void> {
+    this.sql`CREATE TABLE IF NOT EXISTS test_drops (from_ TEXT, seq INTEGER)`;
+    this.sql`INSERT INTO test_drops VALUES ('host', ${seq})`;
+  }
+
+  override async sendWorkflowEvent(
+    ...args: Parameters<TaskHost<TestEnv>["sendWorkflowEvent"]>
+  ): Promise<void> {
+    if (dropsEvent(this.sql.bind(this) as TestAgent["sql"], args[2])) return;
+    await super.sendWorkflowEvent(...args);
+  }
+
   async debugTask(taskId: string): Promise<string> {
     const row = this.ledger.row(taskId);
     this
@@ -794,10 +869,12 @@ export class TestHost extends TaskHost<TestEnv> {
  *  - `stale:<text>` — the one step, on {@link StaleAgent};
  *  - `orphan:<text>` — the one step, beside a branch that throws while it works;
  *  - `twice:` — one label run twice;
- *  - `asks:` — two questions at once;
+ *  - `asks:`: two questions at once, both answered;
+ *  - `solo:<text>`: the one step, taking no joined messages;
  *  - `retry-named:` — a step named as a retry;
  *  - `throw` — the pipeline throws;
- *  - anything else — one step on {@link TestAgent}, fed the text.
+ *  - anything else: one step on {@link TestAgent}, fed the text, taking the
+ *    messages that join the task.
  */
 export class TestTask extends TaskWorkflow<TestEnv> {
   override run(event: WorkflowEvent<TaskParams>, step: WorkflowStep) {
@@ -815,11 +892,13 @@ export class TestTask extends TaskWorkflow<TestEnv> {
     if (two !== undefined) {
       const first = await step.agent("first", {
         agent: "TEST_AGENT",
-        input: two
+        input: two,
+        reconcile: RECONCILE
       });
       const second = await step.agent("second", {
         agent: "TEST_STEP_B",
-        input: `echo:B saw ${first}`
+        input: `echo:B saw ${first}`,
+        reconcile: RECONCILE
       });
       return { reply: second };
     }
@@ -827,9 +906,13 @@ export class TestTask extends TaskWorkflow<TestEnv> {
     // One words question under a caller-chosen id; the reply is the answer.
     const askId = after(text, "ask-id:");
     if (askId !== undefined) {
-      const { answers } = await step.ask("ask-id", {
-        questions: [{ kind: "text", id: askId, prompt: `Asked as ${askId}` }]
-      });
+      const { answers } = await step.ask(
+        "ask-id",
+        {
+          questions: [{ kind: "text", id: askId, prompt: `Asked as ${askId}` }]
+        },
+        { reconcile: RECONCILE }
+      );
       return { reply: answers[askId]?.text ?? "" };
     }
 
@@ -841,26 +924,32 @@ export class TestTask extends TaskWorkflow<TestEnv> {
           agent: "TEST_AGENT",
           input: `echo:plan ${n} for ${approve}${feedback}`,
           role: "plan",
-          key: String(n)
+          key: String(n),
+          reconcile: RECONCILE
         });
-        const { answers } = await step.ask(`approve:${n}`, {
-          questions: [
-            {
-              kind: "choice",
-              id: "plan",
-              prompt: plan,
-              options: [
-                { id: HITL_APPROVE_OPTION_ID, label: "Approve" },
-                { id: HITL_REJECT_OPTION_ID, label: "Reject" }
-              ]
-            }
-          ]
-        });
+        const { answers } = await step.ask(
+          `approve:${n}`,
+          {
+            questions: [
+              {
+                kind: "choice",
+                id: "plan",
+                prompt: plan,
+                options: [
+                  { id: HITL_APPROVE_OPTION_ID, label: "Approve" },
+                  { id: HITL_REJECT_OPTION_ID, label: "Reject" }
+                ]
+              }
+            ]
+          },
+          { reconcile: RECONCILE }
+        );
         if (answers.plan?.optionIds?.[0] === HITL_APPROVE_OPTION_ID) {
           const done = await step.agent("code", {
             agent: "TEST_AGENT",
             input: `echo:did ${plan}`,
-            role: "code"
+            role: "code",
+            reconcile: RECONCILE
           });
           return { reply: done };
         }
@@ -876,7 +965,8 @@ export class TestTask extends TaskWorkflow<TestEnv> {
         reply: await step.agent("main", {
           agent: "TEST_AGENT",
           input: rest.join(":"),
-          role: name
+          role: name,
+          reconcile: RECONCILE
         })
       };
     }
@@ -884,7 +974,11 @@ export class TestTask extends TaskWorkflow<TestEnv> {
     const orphan = after(text, "orphan:");
     if (orphan !== undefined) {
       const [reply] = await Promise.all([
-        step.agent("main", { agent: "TEST_AGENT", input: orphan }),
+        step.agent("main", {
+          agent: "TEST_AGENT",
+          input: orphan,
+          reconcile: RECONCILE
+        }),
         (async () => {
           await step.sleep("orphan:pause", "1 second");
           throw new Error("the pipeline threw beside a working step");
@@ -894,24 +988,57 @@ export class TestTask extends TaskWorkflow<TestEnv> {
     }
 
     if (text === "twice:") {
-      await step.agent("main", { agent: "TEST_AGENT", input: "echo:once" });
-      await step.agent("main", { agent: "TEST_AGENT", input: "echo:twice" });
+      await step.agent("main", {
+        agent: "TEST_AGENT",
+        input: "echo:once",
+        reconcile: RECONCILE
+      });
+      await step.agent("main", {
+        agent: "TEST_AGENT",
+        input: "echo:twice",
+        reconcile: RECONCILE
+      });
       return { reply: "never" };
     }
 
     if (text === "asks:") {
-      await Promise.all(
+      const answers = await Promise.all(
         ["one", "two"].map((name) =>
-          step.ask(name, {
-            questions: [{ kind: "text", id: "q1", prompt: name }]
-          })
+          step.ask(
+            name,
+            { questions: [{ kind: "text", id: "q1", prompt: name }] },
+            { reconcile: RECONCILE }
+          )
         )
       );
-      return { reply: "never" };
+      return { reply: answers.map((a) => a.answers.q1?.text).join(" and ") };
+    }
+
+    // A job that asks beside one that works: the task waits on the person only
+    // once the worker is done.
+    const parallel = after(text, "parallel:");
+    if (parallel !== undefined) {
+      const [asked] = await Promise.all([
+        step.agent("asker", {
+          agent: "TEST_AGENT",
+          input: `ask:${parallel}`,
+          reconcile: RECONCILE
+        }),
+        step.agent("worker", {
+          agent: "TEST_STEP_B",
+          input: "bgdelegate:sleep:3",
+          reconcile: RECONCILE
+        })
+      ]);
+      return { reply: asked };
     }
 
     if (text === "retry-named:") {
-      await step.agent("main:retry", { agent: "TEST_AGENT", input: "echo:x" });
+      await step.agent("main:retry", {
+        agent: "TEST_AGENT",
+        input: "echo:x",
+        reconcile: RECONCILE
+      });
       return { reply: "never" };
     }
 
@@ -922,8 +1049,26 @@ export class TestTask extends TaskWorkflow<TestEnv> {
     ] as const) {
       const input = after(text, prefix);
       if (input !== undefined) {
-        return { reply: await step.agent("main", { agent, input }) };
+        return {
+          reply: await step.agent("main", {
+            agent,
+            input,
+            reconcile: RECONCILE
+          })
+        };
       }
+    }
+
+    // One step that takes no joined messages: one sent onto the task is refused.
+    const solo = after(text, "solo:");
+    if (solo !== undefined) {
+      return {
+        reply: await step.agent("main", {
+          agent: "TEST_AGENT",
+          input: solo,
+          reconcile: RECONCILE
+        })
+      };
     }
 
     const said = after(text, "say:");
@@ -931,7 +1076,9 @@ export class TestTask extends TaskWorkflow<TestEnv> {
     return {
       reply: await step.agent("main", {
         agent: "TEST_AGENT",
-        input: said ?? text
+        input: said ?? text,
+        joins: true,
+        reconcile: RECONCILE
       })
     };
   }

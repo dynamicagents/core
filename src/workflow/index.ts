@@ -10,24 +10,24 @@
 
 export {
   TaskWorkflow,
-  WAIT_CEILING,
+  nextWait,
   type AgentStepOptions,
+  type AskStepOptions,
   type StepAgentStub,
   type TaskHostStub,
   type TaskStep
 } from "./workflow.js";
-export {
-  answerEventType,
-  digest,
-  reportEventType,
-  stepJobIdFor
-} from "./keys.js";
+export { digest, jobEventType, stepJobIdFor } from "./keys.js";
 export type {
   AskRequest,
+  CompleteOutcome,
+  JobEvent,
   NotedStepJob,
   ParkOutcome,
   PipelineResult,
+  Reconcile,
   StepAnswer,
+  StepInput,
   StepJob,
   StepJobReport,
   TaskParams,

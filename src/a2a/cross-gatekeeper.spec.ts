@@ -26,10 +26,12 @@ import worker, { type TestEnv } from "../../test/worker.js";
  * enumerable by design.
  *
  * What a caller must not reach of another's: its task list, a task by id, a
- * cancel on one, the question it has parked on a person's answer, and the push
- * channel its callbacks go to. Each is asserted negatively below, and each is
- * paired with the same call made by the caller that owns the task, so that a
- * green run means "refused" rather than "broken for everybody".
+ * cancel on one, a message joined onto one, the question it has parked on a
+ * person's answer, and the push channel its callbacks go to. Each is asserted
+ * negatively below, and each is paired with the same call made by the caller
+ * that owns the task, so that a green run means "refused" rather than "broken
+ * for everybody". The join's pair is the only one that lives elsewhere, for the
+ * reason given where it is asserted.
  */
 
 const testEnv = env as unknown as TestEnv;
@@ -75,23 +77,31 @@ function setup(label: string) {
 
 const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** The question a parked task asked, off the `input-required` callback. */
+/**
+ * The question a parked task asked, off the callback that carried it.
+ *
+ * A question rides a `working` status update, and the `input-required` that
+ * follows carries no parts: it says only that the agent is now idle with
+ * nothing but open questions left to wait on. So the park is waited for, since
+ * that is the state the probes below are about, and the question is then read
+ * off the callbacks already captured, the earlier `working` one among them.
+ */
 async function parkedQuestion(
   harness: AgentHarness,
   taskId: string
 ): Promise<HitlRequestData> {
-  const [asked] = await harness.waitForState(
-    taskId,
-    "TASK_STATE_INPUT_REQUIRED"
-  );
-  const body = asked.body as {
-    task?: { status?: { message?: { parts?: { data?: unknown }[] } } };
-  };
-  for (const part of body.task?.status?.message?.parts ?? []) {
-    const data = part.data as HitlRequestData | undefined;
-    if (data?.requestId) return data;
+  await harness.waitForState(taskId, "TASK_STATE_INPUT_REQUIRED");
+  for (const callback of harness.callbacks) {
+    if (callback.taskId !== taskId) continue;
+    const body = callback.body as {
+      task?: { status?: { message?: { parts?: { data?: unknown }[] } } };
+    };
+    for (const part of body.task?.status?.message?.parts ?? []) {
+      const data = part.data as HitlRequestData | undefined;
+      if (data?.requestId) return data;
+    }
   }
-  throw new Error("the input-required callback carried no question");
+  throw new Error("no callback on this task carried a question");
 }
 
 type RpcEnvelope = {
@@ -201,6 +211,22 @@ describe("a second listed gatekeeper claiming another's caller key", () => {
       await cancelTask(harness, task.id, theirs)
     );
     expect(canceled.error).toBeDefined();
+
+    // A plain message joined onto it, which carries no answer and so reaches
+    // the run as words rather than as a verdict. The same `resolveAgent` the
+    // answer below goes through, so it is refused for the same reason: the
+    // scope this token composes holds no such task. The paired positive is the
+    // join suite in `src/workflow/workflow.spec.ts`, which drives this path for
+    // the caller that owns the task.
+    const joined = await envelopeOf(
+      await sendAsOther(harness, theirs, {
+        messageId: crypto.randomUUID(),
+        role: "ROLE_USER",
+        taskId: task.id,
+        parts: [{ text: "and make it blue" }]
+      })
+    );
+    expect(joined.error).toBeDefined();
 
     // The parked question, which is a person's answer to give. An answer taken
     // here would be taken as that person's, including an approval's verdict.

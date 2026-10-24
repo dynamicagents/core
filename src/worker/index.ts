@@ -10,7 +10,11 @@ import {
   validateVersion,
   type PushNotificationSender
 } from "@a2a-js/sdk/server";
-import { RequestMalformedError, toJsonRpcError } from "@a2a-js/sdk/errors";
+import {
+  RequestMalformedError,
+  UnsupportedOperationError,
+  toJsonRpcError
+} from "@a2a-js/sdk/errors";
 import {
   HITL_RESPONSE_TYPE,
   HITL_TIMEOUT_TYPE,
@@ -35,8 +39,12 @@ import {
   type GatekeeperIdentity
 } from "../a2a/verify.js";
 import { A2AExecutor } from "../a2a/executor.js";
-import { readHumanReply, type HumanReply } from "../a2a/hitl.js";
-import { inboundTextError } from "../a2a/parts.js";
+import {
+  hasHumanReplyPart,
+  readHumanReply,
+  type HumanReply
+} from "../a2a/hitl.js";
+import { inboundTextError, textOf } from "../a2a/parts.js";
 import { DurableTaskStore } from "../a2a/task-store.js";
 import type { AgentResolver } from "../a2a/agent-stub.js";
 import { parseGatekeeperOrigins, type A2ASecretsEnv } from "../env.js";
@@ -348,24 +356,27 @@ function messageTextError(rpcBody: {
   return params.message ? inboundTextError(params.message) : undefined;
 }
 
-/** A reply onto an existing Task, as read off the `SendMessage` carrying it. */
-interface Continuation {
+/**
+ * A message onto an existing Task, as read off the `SendMessage` carrying it:
+ * the answer to one of its requests, or a message that joins it.
+ */
+type Continuation = {
   taskId: string;
   /** Empty when the message names none, which the handler accepts too. */
   contextId: string;
   messageId: string;
-  reply: HumanReply;
-}
+} & ({ kind: "reply"; reply: HumanReply } | { kind: "join"; text: string });
 
 /**
- * The reply a `SendMessage` carries onto an existing Task, or why it is refused,
- * or `null` for a message naming no Task — which begins one, and is no concern
- * of this.
+ * What a `SendMessage` carries onto an existing Task, or why it is refused, or
+ * `null` for a message naming no Task: that begins one, and is no concern of
+ * this.
  *
- * A message on a Task is only ever the answer to a question that Task asked.
- * Refused here as a JSON-RPC error, because past this point a refusal would be an
- * executor throw — which the handler turns into a failed Task, ending the Task
- * the person was answering.
+ * A message on a Task answers one of the requests it asked, when it carries an
+ * answer or an expiry part, and otherwise joins it: the next message of the
+ * same conversation, for the work already running. Refused here as a JSON-RPC
+ * error, because past this point a refusal would be an executor throw, which
+ * the handler turns into a failed Task: the Task the person was talking to.
  */
 function readContinuation(rpcBody: {
   method?: string;
@@ -381,40 +392,53 @@ function readContinuation(rpcBody: {
   }
   const message = params.message;
   if (!message?.taskId) return null;
-  const reply = readHumanReply(message);
-  if (!reply) {
-    return {
-      refused:
-        "a message on an existing task must answer the question the task asked, " +
-        `in a ${HITL_RESPONSE_TYPE} or ${HITL_TIMEOUT_TYPE} data part`
-    };
-  }
-  return {
+  const at = {
     taskId: message.taskId,
     contextId: message.contextId,
-    messageId: message.messageId,
-    reply
+    messageId: message.messageId
   };
+  const reply = readHumanReply(message);
+  if (reply) return { ...at, kind: "reply", reply };
+  if (hasHumanReplyPart(message)) {
+    // An answer that does not parse is refused, not joined: as a turn, its
+    // text would reach the model as conversation and the question stay open.
+    return {
+      refused: `a ${HITL_RESPONSE_TYPE} or ${HITL_TIMEOUT_TYPE} data part that does not parse`
+    };
+  }
+  const text = textOf(message).trim();
+  if (!text) {
+    return {
+      refused:
+        "a message on an existing task carries an answer, in a " +
+        `${HITL_RESPONSE_TYPE} or ${HITL_TIMEOUT_TYPE} data part, or text that joins it`
+    };
+  }
+  return { ...at, kind: "join", text };
 }
 
 /**
- * Record a reply in the Durable Object, before the request handler runs — or
- * return the JSON-RPC error to answer with instead.
+ * Record a reply or a joined message in the Durable Object, before the request
+ * handler runs, or return the JSON-RPC error to answer with instead.
  *
  * Here and not in the executor for the reason {@link readContinuation} gives,
  * which applies to a failure as much as to a refusal: a Durable Object call that
- * throws in the executor fails the Task the person was answering. Failing here
- * leaves the Task parked and answers with an internal error, the code for a
+ * throws in the executor fails the Task the person was talking to. Failing here
+ * leaves the Task as it was and answers with an internal error, the code for a
  * fault inside the agent rather than a verdict on the message. Answering with
- * the Task as though the reply had landed would be worse than either: the
- * gatekeeper would take the question as answered, on an answer nobody holds.
+ * the Task as though the message had landed would be worse than either: the
+ * gatekeeper would take it as delivered, to a run that never got it.
  *
- * Nothing here counts on the answer being sent again. Recording is idempotent on
- * the message id, so an answer that does arrive twice records once.
+ * A message onto a Task that has closed, or that takes no joined messages, is
+ * refused with `UnsupportedOperationError`, the code the handler itself gives a
+ * message onto a terminal Task: the gatekeeper starts a new Task with it.
  *
- * The handler then loads the Task this has already resumed, so what the caller
- * is answered with is the Task as the reply left it. `taken` is the agent's
- * word on whether this reply was: see {@link answerEnded}.
+ * Nothing here counts on the message being sent again. Recording is idempotent
+ * on the message id, so one that does arrive twice records once.
+ *
+ * The handler then loads the Task this has already recorded on, so what the
+ * caller is answered with is the Task as the message left it. `taken` is the
+ * agent's word on whether the message was: see {@link answerEnded}.
  */
 async function recordReply(
   agent: TenantAgent,
@@ -422,13 +446,13 @@ async function recordReply(
   continuation: Continuation
 ): Promise<{ error: { code: number; message: string } } | { taken: boolean }> {
   const stub = agent.resolveAgent(caller);
-  const { contextId, ...answer } = continuation;
+  const { taskId, messageId, contextId } = continuation;
   try {
     // The one refusal the handler makes after this that recording could get
-    // ahead of — a missing Task names no question, and a closed question takes
+    // ahead of: a missing Task names no request, and a closed request takes
     // no answer. Recorded first, the handler's refusal would reach the person
-    // over an answer the run had already taken.
-    const task = await stub.getTask(answer.taskId);
+    // over a message the run had already taken.
+    const task = await stub.getTask(taskId);
     if (task?.contextId && contextId && contextId !== task.contextId) {
       return {
         error: toJsonRpcError(
@@ -438,24 +462,41 @@ async function recordReply(
         )
       };
     }
-    const verdict = await stub.answerTask(answer);
+    if (continuation.kind === "join") {
+      const joined = await stub.joinTask({
+        taskId,
+        messageId,
+        text: continuation.text
+      });
+      if (joined === "closed") {
+        return {
+          error: toJsonRpcError(
+            new UnsupportedOperationError(
+              `task '${taskId}' takes no more messages: start a new task with this one`
+            )
+          )
+        };
+      }
+      return { taken: true };
+    }
+    const verdict = await stub.answerTask({
+      taskId,
+      messageId,
+      reply: continuation.reply
+    });
     if (typeof verdict === "object") {
       return {
-        error: toJsonRpcError(
-          new RequestMalformedError(
-            `the answer does not fit the question: ${verdict.refused}`
-          )
-        )
+        error: toJsonRpcError(new RequestMalformedError(verdict.refused))
       };
     }
     return { taken: verdict };
   } catch (err) {
-    console.error("[worker] could not record a reply", {
-      taskId: continuation.taskId,
+    console.error("[worker] could not record a message on a task", {
+      taskId,
       err: String(err)
     });
     return {
-      error: toJsonRpcError(new Error("the agent could not record the answer"))
+      error: toJsonRpcError(new Error("the agent could not record the message"))
     };
   }
 }
@@ -469,14 +510,15 @@ const TERMINAL_STATES: ReadonlySet<TaskState | undefined> = new Set([
 ]);
 
 /**
- * The Task a reply ended, to answer its `SendMessage` with — or `null`, and the
- * handler's answer stands.
+ * The Task a message it took has since ended, to answer its `SendMessage`
+ * with, or `null`, and the handler's answer stands.
  *
  * A reply can end its Task before the handler loads it: a pipeline that returns
- * on the answer settles the Task while the reply's own request is in flight. The
- * handler refuses a message onto a terminal Task, which would tell the caller an
- * answer the run already took was not. A reply the agent did not take keeps the
- * refusal — one onto a Task already closed, or one a cancel beat.
+ * on the answer settles the Task while the reply's own request is in flight. A
+ * join sent again, its accept lost, can find its Task ended since. The handler
+ * refuses a message onto a terminal Task, which would tell the caller a message
+ * the run already took was not. One the agent did not take keeps the refusal:
+ * one onto a Task already closed, or one a cancel beat.
  */
 async function answerEnded(
   agent: TenantAgent,
@@ -840,6 +882,9 @@ export function createA2AWorker<TEnv extends object>(
       if (Symbol.asyncIterator in result) {
         return new Response("streaming not supported", { status: 501 });
       }
+      // A message the task took, an answer or a join, sent again after the
+      // task ended: the handler refuses a terminal task, but the message was
+      // taken, and a refusal would have the caller act on it a second time.
       if (continuation && recorded && "error" in result) {
         const ended = await answerEnded(
           agent,

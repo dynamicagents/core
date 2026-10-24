@@ -33,6 +33,7 @@ import type { StepJob, TaskParams } from "../workflow/types.js";
 import worker, {
   COPY,
   EARLIER_NOTE_AT,
+  TestBackground,
   type JobDebug,
   type TestAgent,
   type TestEnv
@@ -119,9 +120,16 @@ function terminals(harness: AgentHarness, taskId: string): CapturedCallback[] {
   );
 }
 
+/** What the agent said while it worked: the progress lines, without questions. */
 function working(harness: AgentHarness, taskId: string): string[] {
   return harness.callbacks
-    .filter((c) => c.taskId === taskId && c.state === "TASK_STATE_WORKING")
+    .filter(
+      (c) =>
+        c.taskId === taskId &&
+        c.state === "TASK_STATE_WORKING" &&
+        !questionIn(c) &&
+        c.text
+    )
     .map((c) => c.text);
 }
 
@@ -138,7 +146,8 @@ function firstOption(request: HitlRequestData): Record<string, HitlAnswer> {
   return { [question.id]: { optionIds: [question.options[0]!.id] } };
 }
 
-function questionOf(callback: CapturedCallback): HitlRequestData {
+/** The question a callback carries, on whatever status it rides, or `null`. */
+function questionIn(callback: CapturedCallback): HitlRequestData | null {
   const body = callback.body as {
     task?: { status?: { message?: { parts?: { data?: unknown }[] } } };
   };
@@ -146,7 +155,30 @@ function questionOf(callback: CapturedCallback): HitlRequestData {
     const data = part.data as HitlRequestData | undefined;
     if (data?.requestId) return data;
   }
-  throw new Error("the input-required callback carried no question");
+  return null;
+}
+
+function questionOf(callback: CapturedCallback): HitlRequestData {
+  const question = questionIn(callback);
+  if (!question) throw new Error("the callback carried no question");
+  return question;
+}
+
+/**
+ * Wait for `count` callbacks of a task that carry a question, and return them
+ * in the order they went out. A question rides a `working` update, asked
+ * whatever else the task is doing.
+ */
+async function asked(
+  harness: AgentHarness,
+  taskId: string,
+  count = 1
+): Promise<CapturedCallback[]> {
+  return until(
+    `${count} question(s) of task ${taskId}`,
+    () => harness.callbacks.filter((c) => c.taskId === taskId && questionIn(c)),
+    (found) => found.length >= count
+  );
 }
 
 /** A `SendMessage` under a chosen `messageId`, as a gatekeeper retry sends it. */
@@ -233,7 +265,7 @@ function seedJob(instance: TestAgent, workflowId: string): StepJob {
 }
 
 function reportsOf(job: JobDebug): string[] {
-  return job.reports.map((r) => r.report.state);
+  return job.reports.map((r) => r.report.kind);
 }
 
 describe("a one-step task", () => {
@@ -249,7 +281,8 @@ describe("a one-step task", () => {
     expect(done.text).toBe("hello there");
     await pause(300);
     expect(terminals(harness, accepted.id)).toHaveLength(1);
-    expect(reportsOf(await debug(accepted.id))).toEqual(["completed"]);
+    // Idle with nothing open, and finished on its workflow's word.
+    expect(reportsOf(await debug(accepted.id))).toEqual(["idle"]);
     // The host's end-of-task notice reaches the agent that ran the job.
     expect(
       await until(
@@ -419,10 +452,7 @@ describe("asking the caller", () => {
     using _ = harness.interceptGatekeeper();
 
     const accepted = await harness.send("ask:which one?");
-    const [parked] = await harness.waitForState(
-      accepted.id,
-      "TASK_STATE_INPUT_REQUIRED"
-    );
+    const [parked] = await asked(harness, accepted.id);
     const question = questionOf(parked);
     expect(question.requestId.startsWith(`${accepted.id}:main:`)).toBe(true);
     expect(choiceOf(question)).toEqual({
@@ -475,16 +505,13 @@ describe("asking the caller", () => {
       using _ = harness.interceptGatekeeper();
 
       const accepted = await harness.send("ask:which one?");
-      const [parked] = await harness.waitForState(
-        accepted.id,
-        "TASK_STATE_INPUT_REQUIRED"
-      );
+      const [parked] = await asked(harness, accepted.id);
       await expect(
         harness.answer(accepted.id, questionOf(parked).requestId, answers)
       ).rejects.toThrow(why);
       await pause(500);
 
-      expect((await debug(accepted.id)).row?.state).toBe("input-required");
+      expect((await debug(accepted.id)).row?.open).toHaveLength(1);
       expect(terminals(harness, accepted.id)).toHaveLength(0);
     }
   );
@@ -494,10 +521,7 @@ describe("asking the caller", () => {
     using _ = harness.interceptGatekeeper();
 
     const accepted = await harness.send("ask:which one?");
-    const [parked] = await harness.waitForState(
-      accepted.id,
-      "TASK_STATE_INPUT_REQUIRED"
-    );
+    const [parked] = await asked(harness, accepted.id);
     await harness.answer(accepted.id, questionOf(parked).requestId, {
       q1: { text: "neither, the third" }
     });
@@ -511,10 +535,7 @@ describe("asking the caller", () => {
     using _ = harness.interceptGatekeeper();
 
     const accepted = await harness.send("form:");
-    const [parked] = await harness.waitForState(
-      accepted.id,
-      "TASK_STATE_INPUT_REQUIRED"
-    );
+    const [parked] = await asked(harness, accepted.id);
     const question = questionOf(parked);
     expect(question.prompt).toBe("Before I start:");
     expect(question.questions).toEqual([
@@ -564,30 +585,30 @@ describe("asking the caller", () => {
     using _ = harness.interceptGatekeeper();
 
     const accepted = await harness.send("ask:which one?");
-    await harness.waitForState(accepted.id, "TASK_STATE_INPUT_REQUIRED");
+    await asked(harness, accepted.id);
     await harness.answer(accepted.id, "another-question", {
       q1: { optionIds: ["q1.o1"] }
     });
     await pause(500);
 
-    expect((await debug(accepted.id)).row?.state).toBe("input-required");
+    expect((await debug(accepted.id)).row?.open).toHaveLength(1);
     expect(terminals(harness, accepted.id)).toHaveLength(0);
   });
 
-  it("fails a task whose question expired unanswered", async () => {
-    const { harness } = harnessFor("expire");
+  it("tells the model a question expired, and finishes on what it says", async () => {
+    const { harness, debug } = harnessFor("expire");
     using _ = harness.interceptGatekeeper();
 
     const accepted = await harness.send("ask:which one?");
-    const [parked] = await harness.waitForState(
-      accepted.id,
-      "TASK_STATE_INPUT_REQUIRED"
-    );
+    const [parked] = await asked(harness, accepted.id);
     await harness.timeout(accepted.id, questionOf(parked).requestId);
 
-    const failed = await harness.waitForTerminal(accepted.id);
-    expect(failed.state).toBe("TASK_STATE_FAILED");
-    expect(failed.text).toBe(COPY.questionExpired);
+    const done = await harness.waitForTerminal(accepted.id);
+    expect(done.state).toBe("TASK_STATE_COMPLETED");
+    expect(done.text).toBe(
+      'Nobody answered "which one?" before it expired. Go on without the answer, or ask again.'
+    );
+    expect((await debug(accepted.id)).row?.open).toEqual([]);
   });
 });
 
@@ -606,10 +627,7 @@ describe("asking the caller to approve an artifact", () => {
     const token = await plan();
 
     const accepted = await harness.send(`approve-artifact:${token}`);
-    const [parked] = await harness.waitForState(
-      accepted.id,
-      "TASK_STATE_INPUT_REQUIRED"
-    );
+    const [parked] = await asked(harness, accepted.id);
     expect(questionOf(parked).questions).toEqual([
       {
         kind: "approval",
@@ -629,10 +647,7 @@ describe("asking the caller to approve an artifact", () => {
     const token = await plan();
 
     const accepted = await harness.send(`approve-artifact:${token}`);
-    const [parked] = await harness.waitForState(
-      accepted.id,
-      "TASK_STATE_INPUT_REQUIRED"
-    );
+    const [parked] = await asked(harness, accepted.id);
     await harness.answer(accepted.id, questionOf(parked).requestId, {
       q1: { optionIds: ["approve"] }
     });
@@ -661,10 +676,7 @@ describe("asking the caller to approve an artifact", () => {
     const token = await plan();
 
     const accepted = await harness.send(`approve-artifact:${token}`);
-    const [parked] = await harness.waitForState(
-      accepted.id,
-      "TASK_STATE_INPUT_REQUIRED"
-    );
+    const [parked] = await asked(harness, accepted.id);
     await harness.answer(accepted.id, questionOf(parked).requestId, {
       q1: { optionIds: ["approve"] }
     });
@@ -694,20 +706,14 @@ describe("asking the caller to approve an artifact", () => {
     const token = await plan();
 
     const rejected = await harness.send(`approve-artifact:${token}`);
-    const [first] = await harness.waitForState(
-      rejected.id,
-      "TASK_STATE_INPUT_REQUIRED"
-    );
+    const [first] = await asked(harness, rejected.id);
     await harness.answer(rejected.id, questionOf(first).requestId, {
       q1: { optionIds: ["reject"] }
     });
     expect((await harness.waitForTerminal(rejected.id)).text).toBe("Rejected.");
 
     const commented = await harness.send(`approve-artifact:${token}`);
-    const [second] = await harness.waitForState(
-      commented.id,
-      "TASK_STATE_INPUT_REQUIRED"
-    );
+    const [second] = await asked(harness, commented.id);
     await harness.answer(commented.id, questionOf(second).requestId, {
       q1: { text: "leave the tests alone" }
     });
@@ -739,15 +745,9 @@ describe("asking the caller to approve an artifact", () => {
     const token = await plan();
 
     const first = await harness.send(`approve-artifact:${token}`);
-    const [a] = await harness.waitForState(
-      first.id,
-      "TASK_STATE_INPUT_REQUIRED"
-    );
+    const [a] = await asked(harness, first.id);
     const second = await harness.send(`approve-artifact:${token}`);
-    const [b] = await harness.waitForState(
-      second.id,
-      "TASK_STATE_INPUT_REQUIRED"
-    );
+    const [b] = await asked(harness, second.id);
 
     await harness.answer(first.id, questionOf(a).requestId, {
       q1: { optionIds: ["approve"] }
@@ -773,10 +773,7 @@ describe("asking the caller to approve an artifact", () => {
     const token = await plan();
 
     const accepted = await harness.send(`approve-form:${token}`);
-    const [parked] = await harness.waitForState(
-      accepted.id,
-      "TASK_STATE_INPUT_REQUIRED"
-    );
+    const [parked] = await asked(harness, accepted.id);
     const question = questionOf(parked);
     expect(question.questions.map((q) => q.kind)).toEqual([
       "choice",
@@ -976,7 +973,7 @@ describe("a detached sub-agent", () => {
     expect(state.work).toEqual([
       expect.objectContaining({ kind: "detached", open: false, settled: true })
     ]);
-    expect(reportsOf(state)).toEqual(["completed"]);
+    expect(reportsOf(state)).toEqual(["idle"]);
   });
 
   it("settles only once every run has reported", async () => {
@@ -1094,7 +1091,7 @@ describe("a detached sub-agent", () => {
     );
     await pause(500);
     const settled = await jobDebug(job.stepJobId);
-    expect(reportsOf(settled)).toEqual(["completed"]);
+    expect(reportsOf(settled)).toEqual(["idle"]);
     expect(state.reports[0].report.reply).toContain("late but real");
   });
 
@@ -1127,6 +1124,42 @@ describe("a detached sub-agent", () => {
     // The reason `SubAgent` reads the summary itself: Think's own is the first
     // message alone, "step 1.". Were this one message, Think's would do.
     expect((await debug(accepted.id)).runs[0].assistantMessages).toBe(2);
+  });
+
+  /**
+   * A deploy replaces a run's object as readily as its parent's. A run that has
+   * worked longer than Think's staleness cutoff for a submission
+   * (`submissionRecoveryStaleMs`, which `SubAgent` leaves at Think's default)
+   * is continued all the same: the cutoff does not reach an agent-tool run.
+   */
+  it("continues a run cut after it has worked longer than Think's staleness cutoff", async () => {
+    const { harness, stub, debug } = harnessFor("bg-stale-cut");
+    using _ = harness.interceptGatekeeper();
+
+    const accepted = await harness.send("bgdelegate:cut:1");
+    const runId = await until(
+      "the run's park",
+      () => debug(accepted.id),
+      (d) => (d.runs[0]?.parks ?? 0) >= 1
+    ).then((d) => d.runs[0]!.runId);
+    await runInDurableObject(stub(), async (instance: TestAgent) => {
+      const child = await instance.dynamicAgents.get(TestBackground, runId);
+      // Something to age: a turn with no fiber, task run or stream would
+      // pass for the wrong reason.
+      expect(await child.debugAge(16 * 60_000)).toBeGreaterThan(0);
+    });
+    await runInDurableObject(stub(), (_instance, state) => {
+      state.abort("cut");
+    }).catch(() => {});
+
+    await until(
+      "the run to finish",
+      () => debug(accepted.id),
+      (d) => d.runs[0]?.status === "completed",
+      45_000
+    );
+    const done = await harness.waitForTerminal(accepted.id);
+    expect(done.text).toContain("the answer.");
   });
 });
 
@@ -1217,34 +1250,32 @@ describe("a run's transcript", () => {
 });
 
 /**
- * A job holds one question at a time: the person answers the one in front of
- * them, and a second `ask_user` cannot park a job already parked. So a result
- * that lands while the job waits on the person is held, still owed, until the
- * answer's turn ends — never run beside the question, where it could neither
- * ask about itself nor finish without finishing over it.
+ * Nothing waits behind a question. A result that lands while the job waits on
+ * the person gets its turn in Think's order, and may ask again: a job holds as
+ * many questions open as it asks, each answered on its own.
  */
 describe("a result that lands while the person is being asked", () => {
-  it("is held until the question is answered, then carried on", async () => {
+  it("runs as a turn of its own, and the question stays open", async () => {
     const { harness, debug } = harnessFor("bg-parked");
     using _ = harness.interceptGatekeeper();
 
     const accepted = await harness.send("bgask:sleep:1");
-    const [parked] = await harness.waitForState(
-      accepted.id,
-      "TASK_STATE_INPUT_REQUIRED"
-    );
+    const [parked] = await asked(harness, accepted.id);
+    // The result's turn ran, and said so, while the question waited.
     await until(
-      "the run to report",
-      () => debug(accepted.id),
-      (d) => d.work.some((w) => w.kind === "detached" && !w.open)
+      "the result's turn",
+      () => working(harness, accepted.id),
+      (lines) => lines.some((l) => l.includes("child did: sleep:1"))
     );
-    await pause(500);
-    const waiting = await debug(accepted.id);
-    expect(waiting.row?.state).toBe("input-required");
-    expect(reportsOf(waiting)).toEqual(["input-required"]);
+    const waiting = await until(
+      "the job idle on its question",
+      () => debug(accepted.id),
+      (d) => d.row?.state === "idle"
+    );
+    const question = questionOf(parked);
+    expect(waiting.row?.open).toEqual([question.requestId]);
     expect(terminals(harness, accepted.id)).toHaveLength(0);
 
-    const question = questionOf(parked);
     await harness.answer(
       accepted.id,
       question.requestId,
@@ -1252,57 +1283,48 @@ describe("a result that lands while the person is being asked", () => {
     );
     const done = await harness.waitForTerminal(accepted.id);
     expect(done.state).toBe("TASK_STATE_COMPLETED");
-    expect(done.text).toContain("child did: sleep:1");
+    expect(done.text).toBe("Yes");
     expect(reportsOf(await debug(accepted.id))).toEqual([
-      "input-required",
-      "completed"
+      "asked",
+      "idle",
+      "working",
+      "idle"
     ]);
   });
 
-  it("asks about each result in turn, one question at a time", async () => {
+  it("asks about each result as it lands, both questions open at once", async () => {
     const { harness, debug } = harnessFor("bg-asks");
     using _ = harness.interceptGatekeeper();
 
     const accepted = await harness.send(
       "bgdelegate2:please-ask:1|please-ask:2"
     );
-    const questions = async (): Promise<HitlRequestData[]> =>
-      (
-        await harness.waitForState(accepted.id, "TASK_STATE_INPUT_REQUIRED")
-      ).map(questionOf);
-
-    const [first] = await questions();
-    await until(
-      "both runs to report",
-      () => debug(accepted.id),
-      (d) => d.work.filter((w) => w.kind === "detached" && !w.open).length === 2
-    );
-    await pause(500);
-    // The second result is held, not asked beside the first.
-    expect(await questions()).toHaveLength(1);
-    expect(reportsOf(await debug(accepted.id))).toEqual(["input-required"]);
-
-    await harness.answer(accepted.id, first!.requestId, firstOption(first!));
-    const second = await until(
-      "the second question",
-      questions,
-      (qs) => qs.length === 2
-    ).then((qs) => qs[1]!);
-    expect([choiceOf(first!).prompt, choiceOf(second).prompt].sort()).toEqual([
+    const both = (await asked(harness, accepted.id, 2)).map(questionOf);
+    expect(both.map((q) => choiceOf(q).prompt).sort()).toEqual([
       "About please-ask:1?",
       "About please-ask:2?"
     ]);
-    expect(second.requestId).not.toBe(first!.requestId);
+    await until(
+      "the job idle on both",
+      () => debug(accepted.id),
+      (d) => d.row?.state === "idle" && d.row.open.length === 2
+    );
 
-    await harness.answer(accepted.id, second.requestId, firstOption(second));
+    // Answered in the other order: each answer reaches its own question.
+    await harness.answer(
+      accepted.id,
+      both[1]!.requestId,
+      firstOption(both[1]!)
+    );
+    await harness.answer(
+      accepted.id,
+      both[0]!.requestId,
+      firstOption(both[0]!)
+    );
     expect((await harness.waitForTerminal(accepted.id)).state).toBe(
       "TASK_STATE_COMPLETED"
     );
-    expect(reportsOf(await debug(accepted.id))).toEqual([
-      "input-required",
-      "input-required",
-      "completed"
-    ]);
+    expect((await debug(accepted.id)).row?.open).toEqual([]);
   });
 });
 
@@ -1380,7 +1402,7 @@ describe("a turn the runtime cuts", () => {
     expect(done.state).toBe("TASK_STATE_COMPLETED");
     await pause(500);
     expect(terminals(harness, accepted.id)).toHaveLength(1);
-    expect(reportsOf(await debug(accepted.id))).toEqual(["completed"]);
+    expect(reportsOf(await debug(accepted.id))).toEqual(["idle"]);
     expect(await submissions(stub)).toEqual(["completed"]);
     expect(await said(stub, "waited 4")).toBe(1);
   });
@@ -1398,7 +1420,7 @@ describe("a turn the runtime cuts", () => {
     await pause(500);
     expect(reportsOf(await debug(accepted.id))).toEqual(["failed"]);
     expect(reportsOf(await jobDebug(`${accepted.id}:main:retry`))).toEqual([
-      "completed"
+      "idle"
     ]);
     expect(await submissions(stub)).toEqual(["completed", "error"]);
     // The retry's reply alone.
@@ -1460,7 +1482,7 @@ describe("recovering what an eviction cut short", () => {
     );
     expect(state.reports[0].report.reply).toBe("second");
     await pause(500);
-    expect(reportsOf(await jobDebug(job.stepJobId))).toEqual(["completed"]);
+    expect(reportsOf(await jobDebug(job.stepJobId))).toEqual(["idle"]);
   });
 
   it("sends the follow-up a closed work row still owes", async () => {
@@ -1494,10 +1516,10 @@ describe("recovering what an eviction cut short", () => {
     );
     expect(state.reports[0].report.reply).toBe("recovered");
     await pause(500);
-    expect(reportsOf(await jobDebug(job.stepJobId))).toEqual(["completed"]);
+    expect(reportsOf(await jobDebug(job.stepJobId))).toEqual(["idle"]);
   });
 
-  it("submits the answer a resumed job still owes, once", async () => {
+  it("takes an answer its workflow relays twice as one turn", async () => {
     const { agent, jobDebug } = harnessFor("answer");
     const ended = await endedInstance();
 
@@ -1508,17 +1530,13 @@ describe("recovering what an eviction cut short", () => {
         requestId: `${job.stepJobId}:call-1`,
         questions: [{ kind: "text", id: "q1", prompt: "Which one?" }]
       };
-      instance.ledger.park(job.stepJobId, request);
-      // Resumed, and the object gone before the submit.
-      instance.ledger.resume(job.stepJobId, {
-        id: "answer:cut",
-        text: "echo:answered"
-      });
-      // The workflow's retry, then what the start-up sweep queues.
-      await instance.answerStepJob(job.stepJobId, {
-        answers: { q1: { text: "again" } }
-      });
-      await instance.submitAnswer({ stepJobId: job.stepJobId });
+      instance.ledger.ask(job.stepJobId, request);
+      // The workflow's step, run again after a cut it cannot see past.
+      for (let n = 0; n < 2; n++) {
+        await instance.answerStepJob(job.stepJobId, request.requestId, {
+          q1: { text: "echo:answered" }
+        });
+      }
       return job;
     });
 
@@ -1527,8 +1545,9 @@ describe("recovering what an eviction cut short", () => {
       () => jobDebug(job.stepJobId),
       (d) => d.reports.length > 1
     );
-    expect(reportsOf(state)).toEqual(["input-required", "completed"]);
+    expect(reportsOf(state)).toEqual(["asked", "idle"]);
     expect(state.reports[1].report.reply).toBe("answered");
+    expect(state.row?.open).toEqual([]);
   });
 });
 
@@ -1575,9 +1594,11 @@ describe("stopping a job's work", () => {
         instance.finishStopWork({ stepJobId: job.stepJobId })
       ).rejects.toThrow("not stopped yet");
       expect(instance.ledger.openWorkRows(job.stepJobId)).toHaveLength(1);
-      // A redelivered start sends nothing early either.
+      // A redelivered start sends nothing early either, and a pull finds it
+      // not yet there: a retry would start while the failed work runs.
       await instance.startStepJob(job);
       expect(queued).not.toContain("deliverStepJobReport");
+      expect(await instance.stepJobReports(job.stepJobId, 0)).toEqual([]);
       // A restart retries the stop, and sends the report only after it.
       expect(instance.ledger.unstopped()).toContain(job.stepJobId);
       expect(instance.ledger.unsent()).not.toContainEqual({
@@ -1589,6 +1610,11 @@ describe("stopping a job's work", () => {
       await instance.finishStopWork({ stepJobId: job.stepJobId });
       expect(instance.ledger.openWorkRows(job.stepJobId)).toEqual([]);
       expect(queued).toContain("deliverStepJobReport");
+      expect(
+        (await instance.stepJobReports(job.stepJobId, 0)).map(
+          (event) => event.report.kind
+        )
+      ).toEqual(["failed"]);
       return job;
     });
 
@@ -1707,15 +1733,10 @@ describe("a turn for a job that has ended", () => {
       expect(await recover(open)).toBeUndefined();
 
       const completed = seedJob(instance, ended);
-      instance.ledger.settle(completed.stepJobId, {
-        state: "completed",
-        reply: "done"
-      });
+      instance.ledger.idle(completed.stepJobId, "done");
+      instance.ledger.complete(completed.stepJobId);
       const failed = seedJob(instance, ended);
-      instance.ledger.settle(failed.stepJobId, {
-        state: "failed",
-        error: "the turn failed"
-      });
+      instance.ledger.fail(failed.stepJobId, "the turn failed");
       const canceled = seedJob(instance, ended);
       instance.ledger.cancel(canceled.stepJobId);
       for (const job of [completed, failed, canceled]) {
@@ -1757,7 +1778,7 @@ describe("a turn for a job that has ended", () => {
       ).toBeUndefined();
       expect(await hooks.beforeToolCall(call)).toBeUndefined();
 
-      instance.ledger.settle(job.stepJobId, { state: "failed", error: "cut" });
+      instance.ledger.fail(job.stepJobId, "cut");
       expect((await hooks.beforeTurn({} as TurnContext))?.activeTools).toEqual(
         []
       );

@@ -6,6 +6,7 @@ import {
 } from "cloudflare:test";
 import {
   HITL_REQUEST_TYPE,
+  HITL_RESPONSE_TYPE,
   type HitlRequestData
 } from "@dynamicagents/g2a-protocol";
 import {
@@ -15,6 +16,7 @@ import {
   type CapturedCallback
 } from "../testing/harness.js";
 import { TaskState } from "@a2a-js/sdk";
+import { A2A_ERROR_CODE } from "@a2a-js/sdk/errors";
 import { buildFailedTask } from "../a2a/notify.js";
 import { TEST_TENANT } from "../testing/auth.js";
 import worker, {
@@ -26,6 +28,7 @@ import worker, {
   type TestHost
 } from "../../test/worker.js";
 import type { StepJob, TaskParams, TaskResult } from "./types.js";
+import { nextWait } from "./workflow.js";
 
 /**
  * The task workflow, end to end through core's real edge: a signed
@@ -98,21 +101,44 @@ function terminals(harness: AgentHarness, taskId: string): CapturedCallback[] {
   );
 }
 
+/** What the agent said while it worked: the progress lines, without questions. */
 function working(harness: AgentHarness, taskId: string): string[] {
   return harness.callbacks
-    .filter((c) => c.taskId === taskId && c.state === "TASK_STATE_WORKING")
+    .filter(
+      (c) =>
+        c.taskId === taskId &&
+        c.state === "TASK_STATE_WORKING" &&
+        !questionIn(c) &&
+        c.text
+    )
     .map((c) => c.text);
 }
 
-function questionOf(callback: CapturedCallback): HitlRequestData {
+/** The question a callback carries, on whatever status it rides. */
+function questionIn(callback: CapturedCallback): HitlRequestData | null {
   const body = callback.body as {
     task?: { status?: { message?: { parts?: { data?: unknown }[] } } };
+    statusUpdate?: { status?: { message?: { parts?: { data?: unknown }[] } } };
   };
-  for (const part of body.task?.status?.message?.parts ?? []) {
+  const parts =
+    body.task?.status?.message?.parts ??
+    body.statusUpdate?.status?.message?.parts ??
+    [];
+  for (const part of parts) {
     const data = part.data as HitlRequestData | undefined;
     if (data?.requestId) return data;
   }
-  throw new Error("the input-required callback carried no question");
+  return null;
+}
+
+/** Every question a task asked, in the order they went out. */
+function questionsOf(harness: AgentHarness, taskId: string): HitlRequestData[] {
+  const seen = new Map<string, HitlRequestData>();
+  for (const c of harness.callbacks) {
+    const q = c.taskId === taskId ? questionIn(c) : null;
+    if (q && !seen.has(q.requestId)) seen.set(q.requestId, q);
+  }
+  return [...seen.values()];
 }
 
 async function lastQuestion(
@@ -122,13 +148,17 @@ async function lastQuestion(
 ): Promise<HitlRequestData> {
   const asked = await until(
     `question ${count}`,
-    () =>
-      harness.callbacks.filter(
-        (c) => c.taskId === taskId && c.state === "TASK_STATE_INPUT_REQUIRED"
-      ),
-    (c) => c.length >= count
+    () => questionsOf(harness, taskId),
+    (q) => q.length >= count
   );
-  return questionOf(asked[asked.length - 1]);
+  return asked[count - 1];
+}
+
+/** The kinds of every report a job owes or sent, in order. */
+function kinds(reports: StepReportDebug[], stepJobId?: string): string[] {
+  return reports
+    .filter((r) => stepJobId === undefined || r.stepJobId === stepJobId)
+    .map((r) => r.report.kind);
 }
 
 async function status(taskId: string) {
@@ -169,6 +199,43 @@ async function sendAs(
   }>();
   if (!body.result?.task?.id) throw new Error(JSON.stringify(body));
   return body.result.task.id;
+}
+
+/**
+ * Send a message onto a task, as the gatekeeper does, until the task's job is
+ * there to take it: one sent before its start step has run is refused.
+ */
+async function joinOnce(
+  harness: AgentHarness,
+  taskId: string,
+  text: string,
+  messageId = crypto.randomUUID()
+): Promise<void> {
+  await until(
+    "the join taken",
+    async () => {
+      const res = await harness.rpc({
+        jsonrpc: "2.0",
+        id: 5,
+        method: "SendMessage",
+        params: {
+          tenant: TEST_TENANT,
+          message: {
+            messageId,
+            role: "ROLE_USER",
+            taskId,
+            parts: [{ text }]
+          },
+          configuration: {
+            taskPushNotificationConfig: { url: harness.pushUrl, token: "tok" }
+          }
+        }
+      });
+      return (await res.json<{ error?: unknown }>()).error === undefined;
+    },
+    (taken) => taken,
+    5_000
+  );
 }
 
 async function trackedCount(scope: string, taskId: string): Promise<number> {
@@ -407,7 +474,8 @@ describe("G3: a job that spans turns", () => {
     expect(done.text).toContain("child did: sleep:1");
     expect(working(harness, task.id)).toContain("Started in the background.");
     const sent = await reports();
-    expect(sent.map((r) => r.report.state)).toEqual(["completed"]);
+    // Idle once the follow-up ran, and finished on the workflow's word.
+    expect(kinds(sent)).toEqual(["idle"]);
     expect(sent.every((r) => r.sent)).toBe(true);
     expect(terminals(harness, task.id)).toHaveLength(1);
   });
@@ -421,18 +489,51 @@ describe("G4: a step agent's question", () => {
     const question = await lastQuestion(harness, task.id);
     expect(question.type).toBe(HITL_REQUEST_TYPE);
     expect(question.questions[0]?.prompt).toBe("which one?");
+    // Asked on a working update; input-required once all it does is wait.
+    await harness.waitForState(task.id, "TASK_STATE_INPUT_REQUIRED");
     await harness.answer(task.id, question.requestId, {
       q1: { optionIds: ["q1.o1"] }
     });
     const done = await harness.waitForTerminal(task.id);
     expect(done.state).toBe("TASK_STATE_COMPLETED");
     expect(done.text).toBe("Yes");
-    expect((await reports()).map((r) => r.report.state)).toEqual([
-      "input-required",
-      "completed"
+    expect(kinds(await reports())).toEqual([
+      "asked",
+      "idle",
+      "working",
+      "idle"
     ]);
     await pause(300);
     expect(terminals(harness, task.id)).toHaveLength(1);
+  });
+
+  it("holds two questions open at once, and takes their answers in either order", async () => {
+    const { harness } = setup("g4-two");
+    using _ = harness.interceptGatekeeper();
+    const task = await harness.send("ask:first?");
+    const first = await lastQuestion(harness, task.id, 1);
+    // A message that joins the task asks a second question beside the first.
+    await harness.send("ask:second?", { taskId: task.id });
+    const second = await lastQuestion(harness, task.id, 2);
+    expect(second.questions[0]?.prompt).toBe("second?");
+
+    await harness.answer(task.id, second.requestId, {
+      q1: { optionIds: ["q1.o2"] }
+    });
+    // The first is still open: its answer's turn names the one it answers.
+    await until(
+      "the second answer's turn",
+      () => working(harness, task.id),
+      (lines) => lines.some((l) => l.startsWith('Answer to "second?"'))
+    );
+    expect(terminals(harness, task.id)).toHaveLength(0);
+
+    await harness.answer(task.id, first.requestId, {
+      q1: { optionIds: ["q1.o1"] }
+    });
+    const done = await harness.waitForTerminal(task.id);
+    expect(done.state).toBe("TASK_STATE_COMPLETED");
+    expect(done.text).toBe("Yes");
   });
 });
 
@@ -496,25 +597,22 @@ describe("G5: stopping", () => {
     expect(terminals(harness, task.id)).toHaveLength(0);
   });
 
-  it("expires a question: the task fails in its words, and the run stops", async () => {
+  it("tells the job a question expired, and lets it decide", async () => {
     const { harness, debug } = setup("g5-expiry");
     using _ = harness.interceptGatekeeper();
     const task = await harness.send("ask:anyone?");
     const question = await lastQuestion(harness, task.id);
     await harness.timeout(task.id, question.requestId);
     const done = await harness.waitForTerminal(task.id);
-    expect(done.state).toBe("TASK_STATE_FAILED");
-    expect(done.text).toBe(COPY.questionExpired);
-    await until(
-      "terminated",
-      () => status(task.id),
-      (s) => s.status === "terminated"
+    // The task does not fail for it: the model was told, and it went on.
+    expect(done.state).toBe("TASK_STATE_COMPLETED");
+    expect(done.text).toBe(
+      'Nobody answered "anyone?" before it expired. Go on without the answer, or ask again.'
     );
-    await until(
-      "the job canceled",
-      () => debug(`${task.id}:main`),
-      (d) => d.row?.state === "canceled"
-    );
+    expect((await debug(`${task.id}:main`)).row).toEqual({
+      state: "completed",
+      open: []
+    });
   });
 
   it("starts nothing for a job stopped before its start arrived", async () => {
@@ -590,8 +688,343 @@ describe("G5: stopping", () => {
       (r) => r.some((x) => x.stepJobId === `${instanceId}:orphan` && x.sent)
     );
     expect(
-      sent.find((x) => x.stepJobId === `${instanceId}:orphan`)?.report.state
-    ).toBe("completed");
+      sent.find((x) => x.stepJobId === `${instanceId}:orphan`)?.report.kind
+    ).toBe("idle");
+  });
+});
+
+describe("G10: a message that joins the task", () => {
+  it("runs in the task while the job works, and the task ends once", async () => {
+    const { harness } = setup("g10-working");
+    using _ = harness.interceptGatekeeper();
+    const task = await harness.send("bgdelegate:sleep:3");
+    await harness.waitForState(task.id, "TASK_STATE_WORKING");
+
+    const joined = await harness.send("echo:and one more thing", {
+      taskId: task.id
+    });
+    expect(joined.id).toBe(task.id);
+    await until(
+      "the joined turn",
+      () => working(harness, task.id),
+      (lines) => lines.includes("and one more thing")
+    );
+    const done = await harness.waitForTerminal(task.id);
+    expect(done.state).toBe("TASK_STATE_COMPLETED");
+    expect(done.text).toContain("child did: sleep:3");
+    await pause(300);
+    expect(terminals(harness, task.id)).toHaveLength(1);
+  });
+
+  it("runs while a question is open, and leaves the question open", async () => {
+    const { harness } = setup("g10-asking");
+    using _ = harness.interceptGatekeeper();
+    const task = await harness.send("ask:which one?");
+    const question = await lastQuestion(harness, task.id);
+    await harness.waitForState(task.id, "TASK_STATE_INPUT_REQUIRED");
+
+    await harness.send("echo:any news?", { taskId: task.id });
+    await until(
+      "the joined turn",
+      () => working(harness, task.id),
+      (lines) => lines.includes("any news?")
+    );
+    expect(terminals(harness, task.id)).toHaveLength(0);
+
+    await harness.answer(task.id, question.requestId, {
+      q1: { optionIds: ["q1.o1"] }
+    });
+    const done = await harness.waitForTerminal(task.id);
+    expect(done.text).toBe("Yes");
+  });
+
+  it("is answered with the task, not refused, when sent again after the task ended", async () => {
+    const { harness } = setup("g10-replay");
+    using _ = harness.interceptGatekeeper();
+    const task = await harness.send("bgdelegate:sleep:1");
+    const messageId = crypto.randomUUID();
+    await joinOnce(harness, task.id, "echo:once more", messageId);
+    await harness.waitForTerminal(task.id);
+
+    // The gatekeeper lost the accept and sends the same message again.
+    const res = await harness.rpc({
+      jsonrpc: "2.0",
+      id: 6,
+      method: "SendMessage",
+      params: {
+        tenant: TEST_TENANT,
+        message: {
+          messageId,
+          role: "ROLE_USER",
+          taskId: task.id,
+          parts: [{ text: "echo:once more" }]
+        },
+        configuration: {
+          taskPushNotificationConfig: { url: harness.pushUrl, token: "tok" }
+        }
+      }
+    });
+    const body = await res.json<{
+      result?: { task?: { status?: { state?: string } } };
+      error?: unknown;
+    }>();
+    expect(body.error).toBeUndefined();
+    expect(body.result?.task?.status?.state).toBe("TASK_STATE_COMPLETED");
+  });
+
+  it("is handed to the job even when it arrives in one batch after the job went idle", async () => {
+    const { harness, agent, host } = setup("g10-batch");
+    using _ = harness.interceptGatekeeper();
+    // Both lost, so the pull brings them together: the idle report, then the
+    // join that came in before it was read.
+    await agent.dropReport(0);
+    await host.dropInput(0);
+    const task = await harness.send("echo:first");
+    await joinOnce(harness, task.id, "echo:second");
+    const done = await harness.waitForTerminal(task.id);
+    expect(done.state).toBe("TASK_STATE_COMPLETED");
+    expect(done.text).toBe("second");
+  });
+
+  it("reaches the retry of a job that failed before reading it", async () => {
+    const { harness, agent, host } = setup("g10-retry");
+    using _ = harness.interceptGatekeeper();
+    await agent.dropReport(0);
+    await host.dropInput(0);
+    const task = await harness.send("flaky");
+    await joinOnce(harness, task.id, "echo:still there?");
+    const done = await harness.waitForTerminal(task.id);
+    expect(done.state).toBe("TASK_STATE_COMPLETED");
+    expect(done.text).toBe("still there?");
+    const output = (await status(task.id)).output as TaskResult;
+    expect(output.verdict.steps).toEqual(["main", "main:retry"]);
+  });
+
+  it("reaches the retry of a job that failed after taking it", async () => {
+    const { harness, agent } = setup("g10-retry-late");
+    using _ = harness.interceptGatekeeper();
+    // The failure's report is late, so the join is read and handed first, to
+    // a job that has already ended and runs nothing more.
+    await agent.dropReport(0);
+    const task = await harness.send("flaky");
+    await joinOnce(harness, task.id, "echo:still there?");
+    const done = await harness.waitForTerminal(task.id);
+    expect(done.state).toBe("TASK_STATE_COMPLETED");
+    expect(done.text).toBe("still there?");
+  });
+
+  it("closes the questions of a step that failed, and refuses an answer to one", async () => {
+    const { harness } = setup("g10-retry-asked");
+    using _ = harness.interceptGatekeeper();
+    const task = await harness.send("ask:first?");
+    const first = await lastQuestion(harness, task.id);
+    await harness.waitForState(task.id, "TASK_STATE_INPUT_REQUIRED");
+
+    // A message whose turn fails the job; its retry asks again.
+    await joinOnce(harness, task.id, "boom");
+    const second = await lastQuestion(harness, task.id, 2);
+
+    await expect(
+      harness.answer(task.id, first.requestId, { q1: { optionIds: ["q1.o1"] } })
+    ).rejects.toThrow("is no longer open");
+    await harness.answer(task.id, second.requestId, {
+      q1: { optionIds: ["q1.o1"] }
+    });
+    expect((await harness.waitForTerminal(task.id)).state).toBe(
+      "TASK_STATE_COMPLETED"
+    );
+  });
+
+  it("leaves the caller on input-required when a question posts behind it", async () => {
+    const { harness } = setup("g10-question-order");
+    using _ = harness.interceptGatekeeper();
+    // The first empty `working` post fails once, so the state slot holds its
+    // place in the queue ahead of the question asked after it.
+    const intercept = globalThis.fetch;
+    let failed = false;
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit
+    ) => {
+      const url = typeof input === "string" ? input : String(input);
+      if (!failed && url === harness.pushUrl) {
+        const body = (await new Request(input as RequestInfo, init)
+          .json()
+          .catch(() => null)) as {
+          task?: {
+            status?: {
+              state?: string;
+              message?: { parts?: { text?: string; data?: unknown }[] };
+            };
+          };
+        } | null;
+        const status = body?.task?.status;
+        const parts = status?.message?.parts ?? [];
+        if (
+          status?.state === "TASK_STATE_WORKING" &&
+          !parts.some((p) => p.text || p.data)
+        ) {
+          failed = true;
+          return new Response(null, { status: 503 });
+        }
+      }
+      return intercept(input, init);
+    }) as typeof fetch;
+    try {
+      const task = await harness.send("ask:first?");
+      await harness.waitForState(task.id, "TASK_STATE_INPUT_REQUIRED");
+      await joinOnce(harness, task.id, "ask:second?");
+      await lastQuestion(harness, task.id, 2);
+      await until(
+        "the retried post",
+        () => failed,
+        (f) => f
+      );
+      await pause(6_000);
+      const last = harness.callbacks.filter((c) => c.taskId === task.id).at(-1);
+      expect(last?.state).toBe("TASK_STATE_INPUT_REQUIRED");
+    } finally {
+      globalThis.fetch = intercept;
+    }
+  }, 30_000);
+
+  it("works again the moment its last question is answered", async () => {
+    const { harness, host } = setup("g10-answered-state");
+    using _ = harness.interceptGatekeeper();
+    // The answer's event is lost, so the agent cannot be the one to say so.
+    await host.dropInput(0);
+    const task = await harness.send("ask:which one?");
+    const question = await lastQuestion(harness, task.id);
+    await harness.waitForState(task.id, "TASK_STATE_INPUT_REQUIRED");
+    await harness.answer(task.id, question.requestId, {
+      q1: { optionIds: ["q1.o1"] }
+    });
+    const state = await runInDurableObject(
+      host,
+      (instance: TestHost) => instance.ledger.row(task.id)?.state
+    );
+    expect(state).toBe("working");
+  });
+
+  it("refuses an answer that does not parse, rather than joining it", async () => {
+    const { harness } = setup("g10-bad-answer");
+    using _ = harness.interceptGatekeeper();
+    const task = await harness.send("ask:which one?");
+    await harness.waitForState(task.id, "TASK_STATE_INPUT_REQUIRED");
+    const res = await harness.rpc({
+      jsonrpc: "2.0",
+      id: 7,
+      method: "SendMessage",
+      params: {
+        tenant: TEST_TENANT,
+        message: {
+          messageId: crypto.randomUUID(),
+          role: "ROLE_USER",
+          taskId: task.id,
+          parts: [
+            { text: "Yes" },
+            {
+              data: { type: HITL_RESPONSE_TYPE, requestId: 7 },
+              mediaType: "application/json"
+            }
+          ]
+        },
+        configuration: {
+          taskPushNotificationConfig: { url: harness.pushUrl, token: "tok" }
+        }
+      }
+    });
+    const body = await res.json<{ error?: { message: string } }>();
+    expect(body.error?.message).toContain("does not parse");
+  });
+
+  it("is refused by a task whose step takes none, so the caller starts another", async () => {
+    const { harness } = setup("g10-solo");
+    using _ = harness.interceptGatekeeper();
+    const task = await harness.send("solo:bgdelegate:sleep:3");
+    await harness.waitForState(task.id, "TASK_STATE_WORKING");
+    const res = await harness.rpc({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "SendMessage",
+      params: {
+        tenant: TEST_TENANT,
+        message: {
+          messageId: crypto.randomUUID(),
+          role: "ROLE_USER",
+          taskId: task.id,
+          parts: [{ text: "and one more thing" }]
+        },
+        configuration: {
+          taskPushNotificationConfig: { url: harness.pushUrl, token: "tok" }
+        }
+      }
+    });
+    const body = await res.json<{ error?: { code: number } }>();
+    expect(body.error?.code).toBe(A2A_ERROR_CODE.UNSUPPORTED_OPERATION);
+  });
+});
+
+describe("G11: an event the platform loses", () => {
+  it("pulls a report whose event never arrived, and the task finishes", async () => {
+    const { harness, agent, reports } = setup("g11-report");
+    using _ = harness.interceptGatekeeper();
+    // The agent's first report is sent, as far as it knows, and never arrives.
+    await agent.dropReport(0);
+    const task = await harness.send("echo:still here");
+    const done = await harness.waitForTerminal(task.id);
+    expect(done.state).toBe("TASK_STATE_COMPLETED");
+    expect(done.text).toBe("still here");
+    expect((await reports()).map((r) => [r.report.kind, r.sent])).toEqual([
+      ["idle", true]
+    ]);
+  });
+
+  it("pulls an input whose event never arrived, and the job takes it", async () => {
+    const { harness, host } = setup("g11-input");
+    using _ = harness.interceptGatekeeper();
+    await host.dropInput(0);
+    const task = await harness.send("ask:which one?");
+    const question = await lastQuestion(harness, task.id);
+    await harness.answer(task.id, question.requestId, {
+      q1: { optionIds: ["q1.o1"] }
+    });
+    const done = await harness.waitForTerminal(task.id);
+    expect(done.text).toBe("Yes");
+  });
+});
+
+describe("the cost of waiting", () => {
+  /** How many wakes a wait nobody answers takes to last `totalMs`. */
+  function wakes(
+    reconcile: { afterMs: number; maxMs: number },
+    totalMs: number
+  ) {
+    let waited = 0;
+    let wait = reconcile.afterMs;
+    let n = 0;
+    while (waited < totalMs) {
+      waited += wait;
+      wait = nextWait(reconcile, wait, false);
+      n++;
+    }
+    return n;
+  }
+
+  it("keeps a week-long wait far under an instance's step ceiling", () => {
+    // A question may stay open for a week; a Workflow instance holds 10,000
+    // steps by default, and each wake is two: the wait and its pull.
+    const week = 7 * 24 * 60 * 60_000;
+    const n = wakes({ afterMs: 5 * 60_000, maxMs: 30 * 60_000 }, week);
+    expect(n).toBeLessThan(340);
+    expect(2 * n).toBeLessThan(10_000 / 10);
+  });
+
+  it("starts over at the first bound once anything arrives", () => {
+    const reconcile = { afterMs: 1_000, maxMs: 8_000 };
+    expect(nextWait(reconcile, 1_000, false)).toBe(2_000);
+    expect(nextWait(reconcile, 8_000, false)).toBe(8_000);
+    expect(nextWait(reconcile, 8_000, true)).toBe(1_000);
   });
 });
 
@@ -740,19 +1173,16 @@ describe("the host's own bookkeeping", () => {
     expect(state.settledHooks).toEqual([TaskState.TASK_STATE_FAILED]);
   });
 
-  it("stops the run an expiry cut short still owes", async () => {
+  it("stops the run a settle cut short still owes", async () => {
     const { harness, host, hostDebug, debug } = setup("stop-owed");
     using _ = harness.interceptGatekeeper();
     const task = await harness.send("ask:still there?");
     await lastQuestion(harness, task.id);
 
     await runInDurableObject(host, async (instance) => {
-      // The expiry's guarded write, and the host gone before the stop.
-      const failed = buildFailedTask(
-        task.id,
-        task.contextId,
-        COPY.questionExpired
-      );
+      // A settle the host makes while the run still goes, and the host gone
+      // before the stop.
+      const failed = buildFailedTask(task.id, task.contextId, COPY.failed);
       expect(instance.ledger.settle(failed, { stop: true })).toBe(true);
       await instance.runSettleHooks({ taskId: task.id });
     });
@@ -818,25 +1248,24 @@ describe("the host's own bookkeeping", () => {
     });
   });
 
-  it("relays an answer an earlier call left owed, before anything else", async () => {
-    const { harness, host } = setup("owed-answer");
+  it("relays an input an eviction left unsent, once, from its next start", async () => {
+    const { harness, host } = setup("owed-input");
     using _ = harness.interceptGatekeeper();
     const task = await harness.send("ask:which one?");
     const question = await lastQuestion(harness, task.id);
 
     await runInDurableObject(host, async (instance) => {
-      // Resumed, and the host gone before the relay — and before the guard
-      // against asking again was written.
-      instance.ledger.resume(task.id, {
-        id: "answer:cut",
+      // The answer recorded, and the host gone before it was relayed.
+      instance.ledger.closeRequest(task.id, question.requestId, "answered");
+      instance.runs.addInput(task.id, `${task.id}:main`, "m-cut", {
+        kind: "answer",
         requestId: question.requestId,
         answers: { q1: { optionIds: ["q1.o1"] } }
       });
-      expect(instance.runs.wasAnswered(question.requestId)).toBe(false);
-      // The gatekeeper's retry: not taken again, and it relays the one that was.
+      // The gatekeeper's retry, under the same message id, finds it taken.
       const taken = await instance.answerTask({
         taskId: task.id,
-        messageId: "m-retry",
+        messageId: "m-cut",
         reply: {
           kind: "answer",
           requestId: question.requestId,
@@ -847,18 +1276,13 @@ describe("the host's own bookkeeping", () => {
         }
       });
       expect(taken).toBe(false);
+      await instance.onStart();
     });
 
     const done = await harness.waitForTerminal(task.id);
     expect(done.text).toBe("Yes");
     await pause(300);
     expect(terminals(harness, task.id)).toHaveLength(1);
-    // The relay wrote the guard the eviction cut.
-    expect(
-      await runInDurableObject(host, (instance) =>
-        instance.runs.wasAnswered(question.requestId)
-      )
-    ).toBe(true);
   });
 
   function acceptInto(instance: TestHost, pushUrl: string, taskId: string) {
@@ -997,16 +1421,51 @@ describe("a pipeline's own guards", () => {
     expect(error?.message).toContain('step "agent:main" ran twice');
   });
 
-  it("fails a task that asks two questions at once, rather than leave one unanswerable", async () => {
+  it("waits on the person while it asks, and works again once answered", async () => {
+    const { harness } = setup("ask-state");
+    using _ = harness.interceptGatekeeper();
+    const task = await harness.send("ask-id:q1");
+    const question = await lastQuestion(harness, task.id);
+    await harness.waitForState(task.id, "TASK_STATE_INPUT_REQUIRED");
+    await harness.answer(task.id, question.requestId, { q1: { text: "ok" } });
+    const done = await harness.waitForTerminal(task.id);
+    expect(done.text).toBe("ok");
+  });
+
+  it("waits on the person only once no other branch works", async () => {
+    const { harness, debug, agentB } = setup("parallel");
+    using _ = harness.interceptGatekeeper();
+    const task = await harness.send("parallel:which one?");
+    const question = await lastQuestion(harness, task.id);
+
+    // The asker idles on its question at once; the worker sleeps on.
+    await harness.waitForState(task.id, "TASK_STATE_INPUT_REQUIRED");
+    expect((await debug(`${task.id}:worker`, agentB)).row?.state).toBe(
+      "completed"
+    );
+
+    await harness.answer(task.id, question.requestId, {
+      q1: { optionIds: ["q1.o1"] }
+    });
+    const done = await harness.waitForTerminal(task.id);
+    expect(done.text).toBe("Yes");
+  });
+
+  it("asks two questions of its own at once, and takes both answers", async () => {
     const { harness } = setup("asks");
     using _ = harness.interceptGatekeeper();
     const task = await harness.send("asks:");
+    const [one] = [await lastQuestion(harness, task.id, 1)];
+    const two = await lastQuestion(harness, task.id, 2);
+    await harness.answer(task.id, two.requestId, { q1: { text: "second" } });
+    await harness.answer(task.id, one.requestId, { q1: { text: "first" } });
     const done = await harness.waitForTerminal(task.id);
-    expect(done.state).toBe("TASK_STATE_FAILED");
-    const { error } = await status(task.id);
-    expect(error?.message).toContain(
-      "while the task waits on another question"
-    );
+    expect(done.state).toBe("TASK_STATE_COMPLETED");
+    expect([one, two].map((q) => q.questions[0]?.prompt).sort()).toEqual([
+      "one",
+      "two"
+    ]);
+    expect(done.text.split(" and ").sort()).toEqual(["first", "second"]);
   });
 
   it("refuses a step named as a retry", async () => {
