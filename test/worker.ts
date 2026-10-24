@@ -26,7 +26,11 @@ import type {
   TaskParams
 } from "../src/workflow/types.js";
 import type { SubAgentSpec } from "../src/contract/subagent.js";
-import { SubAgent, type SubAgentClass } from "../src/subagent/subagent.js";
+import {
+  NOTE_MILESTONE,
+  SubAgent,
+  type SubAgentClass
+} from "../src/subagent/subagent.js";
 import { createA2AWorker, defineAgent } from "../src/worker/index.js";
 import {
   askApproval,
@@ -58,6 +62,7 @@ export interface TestEnv extends CoreEnv {
   TEST_STEP_B: DurableObjectNamespace<TestStepB>;
   CAPPED_AGENT: DurableObjectNamespace<CappedAgent>;
   STALE_AGENT: DurableObjectNamespace<StaleAgent>;
+  NOPROGRESS_AGENT: DurableObjectNamespace<NoProgressAgent>;
   TEST_TASK: Workflow<TaskParams>;
   TEST_BAD_TASK: Workflow<TaskParams>;
 }
@@ -629,17 +634,6 @@ export class TestAgent extends StepAgent<TestEnv> {
     return job.attempt > 1 ? `retry:${job.input}` : job.input;
   }
 
-  /**
-   * An object whose name starts `noprogress:` drops live notes, so a spec can
-   * prove the finish replay delivers them.
-   */
-  override async onProgress(
-    ...args: Parameters<StepAgent<TestEnv>["onProgress"]>
-  ): Promise<void> {
-    if (this.name.startsWith("noprogress:")) return;
-    await super.onProgress(...args);
-  }
-
   /** Durable, so a spec reads what fired however the object was woken. */
   protected override async onTaskSettled(
     taskId: string,
@@ -749,6 +743,39 @@ export class TestStepB extends TestAgent {}
 export class StaleAgent extends TestAgent {
   protected static override submissionRecoveryStaleMs =
     Think.submissionRecoveryStaleMs;
+}
+
+/**
+ * Drops a child's live notes, so a spec can prove the finish replay delivers
+ * them. Selected by class and not by the object's name: a name is a routing
+ * value, so a fixture reading one is a fixture that stops suppressing the day
+ * routing changes what it composes, and the spec goes quietly vacuous.
+ *
+ * It records what it dropped, because the transcript alone cannot show the
+ * replay did the work: the replay dedupes on the note's key, so a run whose
+ * live notes all landed ends with the same entries as one whose notes only the
+ * replay filed.
+ */
+export class NoProgressAgent extends TestAgent {
+  override async onProgress(
+    ...args: Parameters<StepAgent<TestEnv>["onProgress"]>
+  ): Promise<void> {
+    const [run, progress] = args;
+    if (progress.milestone !== NOTE_MILESTONE) {
+      await super.onProgress(...args);
+      return;
+    }
+    this.sql`CREATE TABLE IF NOT EXISTS test_dropped_notes (run_id TEXT)`;
+    this.sql`INSERT INTO test_dropped_notes VALUES (${run.runId})`;
+  }
+
+  /** The runs whose live notes this object dropped, one row per note. */
+  async debugDroppedNotes(): Promise<string[]> {
+    this.sql`CREATE TABLE IF NOT EXISTS test_dropped_notes (run_id TEXT)`;
+    return this.sql<{
+      run_id: string;
+    }>`SELECT run_id FROM test_dropped_notes`.map((r) => r.run_id);
+  }
 }
 
 /** One task on the host, as JSON. */
@@ -1017,7 +1044,8 @@ export class TestTask extends TaskWorkflow<TestEnv> {
 
     for (const [prefix, agent] of [
       ["capped:", "CAPPED_AGENT"],
-      ["stale:", "STALE_AGENT"]
+      ["stale:", "STALE_AGENT"],
+      ["noprogress:", "NOPROGRESS_AGENT"]
     ] as const) {
       const input = after(text, prefix);
       if (input !== undefined) {

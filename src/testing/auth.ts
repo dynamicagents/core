@@ -8,9 +8,10 @@ import {
   jwksUrl
 } from "@dynamicagents/g2a-protocol";
 import {
-  TEST_GATEKEEPER_PRIVATE_JWK,
-  GATEKEEPER_ORIGIN,
-  AGENT_ORIGIN
+  TEST_CALLER_IDENTITY,
+  TEST_GATEKEEPER,
+  AGENT_ORIGIN,
+  type TestGatekeeper
 } from "./fixtures.js";
 
 export interface GatekeeperTokenOptions {
@@ -24,6 +25,25 @@ export interface GatekeeperTokenOptions {
    * the whole point of scoping the audience to the endpoint.
    */
   audience?: string;
+  /**
+   * Which gatekeeper mints it: the origin the `jku` and `iss` are derived from,
+   * and the key the signature is made with. Defaults to the fixtures'
+   * `TEST_GATEKEEPER`; pass their `TEST_SECOND_GATEKEEPER`
+   * ({@link file://./fixtures.ts}) for a token that is honest about being the
+   * other listed origin's.
+   *
+   * Set together, deliberately. The origin, the `jku` derived from it and the
+   * signing key agree in anything a real gatekeeper sends, and a verifier
+   * refuses a token where they do not, so a spec that could move them apart one
+   * at a time would be minting tokens whose rejection says nothing about the
+   * case it meant to test. {@link issuer} is the one exception, for the specs
+   * that exercise exactly that disagreement.
+   */
+  gatekeeper?: TestGatekeeper;
+  /**
+   * Override `iss` alone, leaving `jku` and the signature as the gatekeeper's.
+   * The mismatch an honest token never has, for the check that catches it.
+   */
   issuer?: string;
   /** Relative string ("5m"), absolute epoch seconds, or Date. Past values expire the token. */
   expiresIn?: string | number | Date;
@@ -51,16 +71,13 @@ export const TEST_TENANT = "main";
 export async function makeGatekeeperToken(
   options: GatekeeperTokenOptions = {}
 ): Promise<string> {
-  const privateKey = await importJWK(TEST_GATEKEEPER_PRIVATE_JWK, "EdDSA");
+  const gatekeeper = options.gatekeeper ?? TEST_GATEKEEPER;
+  const privateKey = await importJWK(gatekeeper.privateJwk, "EdDSA");
   const tenant = options.tenant ?? TEST_TENANT;
   return (
     new SignJWT({
-      [options.identityClaim ?? IDENTITY_CLAIM]: options.identity ?? {
-        key: "custom:1:test-agent",
-        name: "Test Agent",
-        kind: "custom",
-        workspaceId: 1
-      },
+      [options.identityClaim ?? IDENTITY_CLAIM]:
+        options.identity ?? TEST_CALLER_IDENTITY,
       // An empty tenant omits the claim entirely rather than signing `""` — that
       // is the "gatekeeper too old to scope its tokens" case, and it must be
       // rejected rather than treated as a wildcard.
@@ -72,10 +89,10 @@ export async function makeGatekeeperToken(
       // nothing in production would ever send.
       .setProtectedHeader({
         alg: A2A_JWS_ALG,
-        kid: TEST_GATEKEEPER_PRIVATE_JWK.kid,
-        jku: jwksUrl(GATEKEEPER_ORIGIN)
+        kid: gatekeeper.privateJwk.kid,
+        jku: jwksUrl(gatekeeper.origin)
       })
-      .setIssuer(options.issuer ?? GATEKEEPER_ORIGIN)
+      .setIssuer(options.issuer ?? gatekeeper.origin)
       .setAudience(options.audience ?? endpointUrl(AGENT_ORIGIN, A2A_RPC_PATH))
       .setExpirationTime(options.expiresIn ?? "5m")
       .sign(privateKey)

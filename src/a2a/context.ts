@@ -9,7 +9,7 @@ import {
   type ServerCallContext,
   type User
 } from "@a2a-js/sdk/server";
-import type { GatekeeperIdentity } from "./verify.js";
+import type { VerifiedCaller } from "./caller-scope.js";
 
 /**
  * The per-call {@link ServerCallContext} bridge for a Workers `fetch` handler.
@@ -21,20 +21,22 @@ import type { GatekeeperIdentity } from "./verify.js";
 
 /**
  * The verified calling gatekeeper-agent, as the SDK's {@link User}. `userName` is
- * the canonical instance key (e.g. `custom:7:analytics`) — the same value the
- * agent Durable Object is keyed by, so the SDK's owner-scoped bookkeeping lines
- * up with the isolation this Worker already enforces by routing.
+ * the caller's **scope** (e.g. `https://gatekeeper.example#custom:7:analytics`),
+ * which is the name the agent Durable Object is keyed by, so the SDK's
+ * owner-scoped bookkeeping lines up with the isolation this Worker enforces by
+ * routing. The claimed key alone would not: two listed gatekeepers may name the
+ * same one, and {@link file://./caller-scope.ts VerifiedCaller} is what keeps
+ * those apart.
  */
 class GatekeeperUser implements User {
-  constructor(private readonly identity: GatekeeperIdentity) {}
+  constructor(private readonly caller: VerifiedCaller) {}
 
   get isAuthenticated(): boolean {
     return true;
   }
 
   get userName(): string {
-    // The Worker rejects a keyless identity (400) before a context is built.
-    return this.identity.key ?? "";
+    return this.caller.scope;
   }
 }
 
@@ -57,7 +59,7 @@ class GatekeeperUser implements User {
  */
 export function buildCallContext(
   request: Request,
-  identity: GatekeeperIdentity
+  caller: VerifiedCaller
 ): ServerCallContext {
   const headers: RequestHeaders = {};
   for (const [name, value] of request.headers) headers[name] = value;
@@ -66,7 +68,7 @@ export function buildCallContext(
     extensions: Extensions.parseServiceParameter(
       request.headers.get(HTTP_EXTENSION_HEADER) ?? undefined
     ),
-    user: new GatekeeperUser(identity),
+    user: new GatekeeperUser(caller),
     headers,
     requestedVersion: request.headers.get(A2A_VERSION_HEADER) ?? undefined
   });

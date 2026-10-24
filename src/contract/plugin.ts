@@ -29,6 +29,12 @@ export interface PluginContext<Env = Cloudflare.Env> {
   /**
    * The verified caller this work is for. Constant for a parent (its object is
    * keyed by it); carried to a sub-agent with each dispatch.
+   *
+   * **Opaque.** It composes the origin that signed the call with the instance
+   * key that origin claimed, so that two gatekeepers naming one key address two
+   * objects: core's `/a2a` is where that composition lives and is the only thing
+   * that reads it apart. Use it whole, as a name to key by; parsing a half out
+   * of it couples a plugin to a routing decision that is not the plugin's.
    */
   callerKey(): string;
   /** The installing agent's Think workspace. */

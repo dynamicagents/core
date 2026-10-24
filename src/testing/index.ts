@@ -54,12 +54,20 @@ export { makeGatekeeperToken, type GatekeeperTokenOptions } from "./auth.js";
 export {
   AGENT_ORIGIN,
   GATEKEEPER_ORIGIN,
+  SECOND_GATEKEEPER_ORIGIN,
   TEST_AGENT_PRIVATE_JWK,
+  TEST_CALLER_IDENTITY,
+  TEST_GATEKEEPER,
+  TEST_GATEKEEPERS,
   TEST_GATEKEEPER_PRIVATE_JWK,
+  TEST_SECOND_GATEKEEPER,
+  TEST_SECOND_GATEKEEPER_PRIVATE_JWK,
+  gatekeeperJwksResponse,
   gatekeeperPublicJwks,
   testAgentMessage,
   testStatus,
-  testTask
+  testTask,
+  type TestGatekeeper
 } from "./fixtures.js";
 
 export { doStorage, makeDoHelpers, type DoTestHelpers } from "./do.js";

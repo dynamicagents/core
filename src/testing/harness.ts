@@ -5,15 +5,17 @@ import {
   HITL_TIMEOUT_TYPE,
   NOTIFICATION_TOKEN_HEADER,
   endpointUrl,
-  jwksUrl,
   type HitlAnswer
 } from "@dynamicagents/g2a-protocol";
+import { verifiedCaller } from "../a2a/caller-scope.js";
 import type { PlainTask } from "../a2a/task.js";
 import { makeGatekeeperToken, TEST_TENANT } from "./auth.js";
 import {
   AGENT_ORIGIN,
   GATEKEEPER_ORIGIN,
-  gatekeeperPublicJwks
+  TEST_CALLER_IDENTITY,
+  TEST_GATEKEEPER,
+  gatekeeperJwksResponse
 } from "./fixtures.js";
 
 /**
@@ -61,8 +63,9 @@ export interface AgentHarnessOptions<TEnv> {
   /** The origin the Worker is addressed on. Defaults to the test fixture's. */
   origin?: string;
   /**
-   * The gatekeeper identity every token carries. Its `key` names the agent's
-   * Durable Object, so two harnesses with different keys drive two objects —
+   * The gatekeeper identity every token carries. Its `key` is half of the name
+   * the agent's Durable Object is served under ({@link AgentHarness.callerScope}
+   * is the whole of it), so two harnesses with different keys drive two objects,
    * which is how specs stay apart when an object runs its turns one at a time.
    */
   identity?: {
@@ -92,6 +95,16 @@ export interface AgentHarness {
   readonly endpoint: string;
   /** The gatekeeper webhook the agent is told to call back on. */
   readonly pushUrl: string;
+  /**
+   * The Durable Object name the edge serves this harness's caller under: the
+   * gatekeeper origin it mints as, bound to the identity key it carries.
+   *
+   * A spec that reads an object's own state (a ledger, a job, a sandbox) has to
+   * address it by this and not by the identity key, which is one half of it. See
+   * {@link file://../a2a/caller-scope.ts VerifiedCaller} for why the name is
+   * composed, and `src/workflow/workflow.spec.ts` for the pattern.
+   */
+  readonly callerScope: string;
   /**
    * Send one turn and return the accepted Task. With `taskId`, the message is
    * sent onto that open Task, as a gatekeeper sends one that joins it.
@@ -226,6 +239,12 @@ export function createAgentHarness<TEnv>(
   // verifier while disagreeing with what a real gatekeeper would send.
   const endpoint = endpointUrl(origin, rpcPath);
   const tenant = options.tenant ?? TEST_TENANT;
+  // Composed with the real thing, so a harness cannot name one object while the
+  // edge it drives routes to another.
+  const callerScope = verifiedCaller(
+    TEST_GATEKEEPER.origin,
+    options.identity ?? TEST_CALLER_IDENTITY
+  ).scope;
   const pushUrl = `${GATEKEEPER_ORIGIN}/a2a/push`;
   const pushToken = "harness-push-token";
   const callbacks: CapturedCallback[] = [];
@@ -309,6 +328,7 @@ export function createAgentHarness<TEnv>(
   return {
     endpoint,
     pushUrl,
+    callerScope,
     callbacks,
     token,
     rpc,
@@ -397,13 +417,13 @@ export function createAgentHarness<TEnv>(
       ): Promise<Response> => {
         const url = typeof input === "string" ? input : String(input);
 
-        // The gatekeeper's public JWKS — without it every token fails to verify and
+        // A gatekeeper's public JWKS. Without it every token fails to verify, and
         // every spec below it reports a 401 that has nothing to do with its subject.
-        if (url === jwksUrl(GATEKEEPER_ORIGIN)) {
-          return new Response(gatekeeperPublicJwks(), {
-            headers: { "content-type": "application/json" }
-          });
-        }
+        // Every fixture gatekeeper is served, not only the one this harness mints
+        // as: a spec about a deployment with two listed origins drives the second
+        // one's calls through `rpc` with a token of its own.
+        const jwks = gatekeeperJwksResponse(url);
+        if (jwks) return jwks;
 
         if (url === pushUrl) {
           const request = new Request(input as RequestInfo, init);

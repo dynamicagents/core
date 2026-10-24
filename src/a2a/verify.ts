@@ -126,6 +126,14 @@ export function normalizeGatekeeperOrigins(origins: string[]): string[] {
  * signature/origin question, and only the caller knows which tenant the request
  * actually addressed. {@link createA2AWorker} compares the two.
  *
+ * `issuer` is the origin this token was verified against, and it is the half of
+ * a caller's identity the issuer did not write. Returning it is what lets
+ * routing bind the scope a call reaches to the gatekeeper that signed for it:
+ * see {@link file://./caller-scope.ts verifiedCaller}. Composing the scope here
+ * would mean either throwing on the absent-claim case this function deliberately
+ * answers with an empty value, or inventing an optional scope for callers the
+ * Worker is about to refuse.
+ *
  * Throws {@link GatekeeperAuthError} on any failure.
  */
 export async function verifyGatekeeperToken(
@@ -135,6 +143,7 @@ export async function verifyGatekeeperToken(
   payload: JWTPayload;
   identity: GatekeeperIdentity;
   tenant: string;
+  issuer: string;
 }> {
   try {
     const allowedOrigins = normalizeGatekeeperOrigins(opts.allowedOrigins);
@@ -177,7 +186,10 @@ export async function verifyGatekeeperToken(
     return {
       payload,
       identity: readIdentityClaim(payload, opts.identityClaim),
-      tenant: readTenantClaim(payload, opts.tenantClaim)
+      tenant: readTenantClaim(payload, opts.tenantClaim),
+      // The origin the checks above established, not a claim: `jwtVerify` has
+      // confirmed the signature came from the JWKS at this origin's `jku`.
+      issuer: issOrigin
     };
   } catch (err) {
     if (err instanceof GatekeeperAuthError) throw err;
