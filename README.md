@@ -255,8 +255,9 @@ every job and question of the pipeline's running waits on one; a step the pipeli
 runs itself counts as working. `step.say(text)` pushes one progress line. `step.do`
 is Workflows' own. A step whose job reports `failed` runs once more, as
 `<name>:retry` with `attempt: 2`, and takes over the messages that joined the first
-attempt; a second failure fails the task, and a step named with that suffix is
-refused. A name used
+attempt and never ran; the first attempt's questions close, and the retry asks again
+if it needs to. A second failure fails the task, and a step named with that suffix
+is refused. A name used
 twice in one run, as a loop without a `key` uses one, fails the task by name, because
 Workflows would otherwise hand the second the first one's result.
 

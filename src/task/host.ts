@@ -245,6 +245,18 @@ export abstract class TaskHost<
         taskId,
         requestId: reply.requestId
       });
+      // An answer to a question that has closed, sent for the first time: a
+      // failed step's, expired with it. Taken, it would be dropped unread; the
+      // gatekeeper tells the person instead. A replay, or a timeout, is not.
+      if (
+        row &&
+        !isTerminalState(row.state) &&
+        asked &&
+        reply.kind !== "timeout" &&
+        !this.runs.hasInput(taskId, messageId)
+      ) {
+        return { refused: `question ${reply.requestId} is no longer open` };
+      }
       return false;
     }
     let relayed: StepInput;
@@ -259,7 +271,7 @@ export abstract class TaskHost<
           requestId: reply.requestId,
           refused
         });
-        return { refused };
+        return { refused: `the answer does not fit the question: ${refused}` };
       }
       relayed = { kind: "answer", requestId: reply.requestId, answers };
     }
@@ -274,6 +286,9 @@ export abstract class TaskHost<
     });
     if (owed === null) return false;
     await this.#queueInput({ taskId, stepJobId: asked.stepJobId, seq: owed });
+    // The last open request answered: working again now, not once the agent
+    // reports it, which a lost event could put off by a whole wait.
+    await this.#settleState(taskId);
     return true;
   }
 
@@ -378,24 +393,31 @@ export abstract class TaskHost<
   /**
    * A job failed. Its branch ends, and the retry's opens in the same write,
    * so a sibling waiting on the person does not read as the whole task
-   * waiting in between. A job that took joined messages hands the retry those
-   * it never read, from number `from` on, and every one that joins after; with
-   * no retry (`to` null) it takes none.
+   * waiting in between. Its questions close as expired: nobody would read
+   * their answers, and the retry asks again if it needs to. A job that took
+   * joined messages hands the retry those it never ran (see
+   * `TaskRuns.handOverJoins`), and every one that joins after; with no retry
+   * (`to` null) it takes none.
    */
   async handOver(
     taskId: string,
     stepJobId: string,
     to: string | null,
-    from: number
+    unread: { from: number; unrun: string[] }
   ): Promise<void> {
     const moved = this.ctx.storage.transactionSync(() => {
+      for (const asked of this.ledger.openRequests(taskId)) {
+        if (asked.stepJobId === stepJobId) {
+          this.ledger.closeRequest(taskId, asked.requestId, "expired");
+        }
+      }
       this.runs.endBranch(taskId, stepJobId);
       if (!to) {
         this.runs.setJoins(taskId, stepJobId, false);
         return [];
       }
       this.runs.openBranch(taskId, to);
-      return this.runs.handOverJoins(taskId, stepJobId, to, from);
+      return this.runs.handOverJoins(taskId, stepJobId, to, unread);
     });
     for (const seq of moved) {
       await this.#queueInput({ taskId, stepJobId: to as string, seq });
@@ -548,8 +570,22 @@ export abstract class TaskHost<
       const row = this.ledger.row(job.taskId);
       const task = this.ledger.owed(job.taskId, job.key);
       if (!row?.push || !task) return;
+      // A question rides the state the task is in when it goes, not the one it
+      // was asked in: posted behind an `input-required` the queue sent first,
+      // a `working` would be the last state the caller saw.
+      const waiting =
+        job.key !== STATE_KEY && row.state === "input-required" && task.status;
+      const sent = waiting
+        ? {
+            ...task,
+            status: {
+              ...task.status,
+              state: TaskState.TASK_STATE_INPUT_REQUIRED
+            }
+          }
+        : task;
       await createPushChannel(this.env.A2A_SIGNING_KEY, row.push).deliver(
-        Task.fromJSON(Task.toJSON(task as Task))
+        Task.fromJSON(Task.toJSON(sent as Task))
       );
       if (this.ledger.delivered(job.taskId, job.key, task)) return;
     }
@@ -623,7 +659,11 @@ export abstract class TaskHost<
     this.ledger.bind(taskId);
     if (this.ledger.markWorking(taskId) === "canceled") {
       await this.#stopRun(taskId);
+      return;
     }
+    // A job that went idle on a question while the task was still `submitted`
+    // could not move it; it is `working` now, and may be waiting already.
+    await this.#settleState(taskId);
   }
 
   async #instanceExists(taskId: string): Promise<boolean> {

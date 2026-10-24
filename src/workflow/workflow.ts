@@ -86,6 +86,7 @@ export interface StepAgentStub {
   ): Promise<void>;
   expireStepJobQuestion(stepJobId: string, requestId: string): Promise<void>;
   completeStepJob(stepJobId: string): Promise<CompleteOutcome>;
+  stepJobUnrunJoins(stepJobId: string): Promise<string[]>;
   stepJobReports(
     stepJobId: string,
     from: number
@@ -109,7 +110,7 @@ export interface TaskHostStub {
     taskId: string,
     stepJobId: string,
     to: string | null,
-    from: number
+    unread: { from: number; unrun: string[] }
   ): Promise<void>;
   closeJoins(
     taskId: string,
@@ -459,7 +460,9 @@ export abstract class TaskWorkflow<
         const at = `${prefix}:${report.kind}:${event.seq}`;
         if (report.kind === "failed") {
           // The retry takes over the branch, with the messages that joined
-          // this attempt and it never read.
+          // this attempt and it never ran: those this loop never handed it,
+          // and those it was handed too late, or queued behind the turn that
+          // failed.
           const retry =
             attempt === 1
               ? await stepJobIdFor(
@@ -469,9 +472,15 @@ export abstract class TaskWorkflow<
                 )
               : null;
           await step.do(`${at}:hand-over`, START, async () => {
+            const unrun = await (
+              await this.#stepAgent(options.agent, params)
+            ).stepJobUnrunJoins(stepJobId);
             await (
               await this.#host(params)
-            ).handOver(params.taskId, stepJobId, retry, handed);
+            ).handOver(params.taskId, stepJobId, retry, {
+              from: handed,
+              unrun
+            });
             return null;
           });
           throw new StepJobFailed(report.error);

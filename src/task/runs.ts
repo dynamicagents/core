@@ -137,27 +137,29 @@ export class TaskRuns {
   }
 
   /**
-   * Give a failed job's joined messages to the job retrying it: those from
-   * number `from` on, which it never read, renumbered after the retry's own,
-   * and every message that joins after. Answers stay: they answer questions
-   * only the failed job asked. Returns the numbers the retry now owes.
+   * Give a failed job's joined messages to the job retrying it: those it
+   * never ran (from number `from` on, which its workflow never handed it, and
+   * those named in `unrun`), renumbered after the retry's own, and every
+   * message that joins after. Answers stay: they answer questions only the
+   * failed job asked. Returns the numbers the retry now owes.
    */
   handOverJoins(
     taskId: string,
     stepJobId: string,
     to: string,
-    from: number
+    unread: { from: number; unrun: string[] }
   ): number[] {
     this.#ensure();
     if (this.joinTarget(taskId) !== stepJobId) return [];
-    const unread = this.inputs(taskId, stepJobId, from).filter(
-      (event) => event.input.kind === "join"
+    const unrun = new Set(unread.unrun);
+    const owed = this.inputs(taskId, stepJobId, 0).filter(
+      (event) =>
+        event.input.kind === "join" &&
+        (event.seq >= unread.from || unrun.has(event.input.messageId))
     );
-    let next =
-      this.sql<{ n: number }>`SELECT COUNT(*) AS n FROM da_task_inputs
-        WHERE step_job_id = ${to}`[0]?.n ?? 0;
+    let next = this.#nextSeq(to);
     const moved: number[] = [];
-    for (const event of unread) {
+    for (const event of owed) {
       this.sql`UPDATE da_task_inputs
         SET step_job_id = ${to}, seq = ${next}, sent = 0
         WHERE step_job_id = ${stepJobId} AND seq = ${event.seq}`;
@@ -183,14 +185,23 @@ export class TaskRuns {
     const seen = this.sql<{ seq: number }>`
       SELECT seq FROM da_task_inputs WHERE message_id = ${messageId}`[0];
     if (seen) return null;
-    const seq =
-      this.sql<{ n: number }>`SELECT COUNT(*) AS n FROM da_task_inputs
-        WHERE step_job_id = ${stepJobId}`[0]?.n ?? 0;
+    const seq = this.#nextSeq(stepJobId);
     this.sql`INSERT INTO da_task_inputs
       (task_id, step_job_id, seq, message_id, input_json, created_at)
       VALUES (${taskId}, ${stepJobId}, ${seq}, ${messageId},
               ${JSON.stringify(input)}, ${Date.now()})`;
     return seq;
+  }
+
+  /**
+   * A job's next input number: past its highest, not its count, since a
+   * hand-over takes inputs out of the middle of a failed job's numbers.
+   */
+  #nextSeq(stepJobId: string): number {
+    const top = this.sql<{ top: number | null }>`
+      SELECT MAX(seq) AS top FROM da_task_inputs
+      WHERE step_job_id = ${stepJobId}`[0]?.top;
+    return top === null || top === undefined ? 0 : top + 1;
   }
 
   /** One input, as the event it is sent as, or `null`. */

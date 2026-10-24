@@ -189,6 +189,15 @@ const timeoutSchema = z.object({
  * in a shape that parses: how an ordinary message on a Task reads, which the
  * Worker joins to the Task rather than takes as an answer.
  */
+/** Whether a message carries a part that claims to be an answer, parsed or not. */
+export function hasHumanReplyPart(message: Message): boolean {
+  return message.parts.some((part) => {
+    if (part.content?.$case !== "data") return false;
+    const type = (part.content.value as { type?: unknown } | null)?.type;
+    return type === HITL_RESPONSE_TYPE || type === HITL_TIMEOUT_TYPE;
+  });
+}
+
 export function readHumanReply(message: Message): HumanReply | null {
   for (const part of message.parts) {
     if (part.content?.$case !== "data") continue;

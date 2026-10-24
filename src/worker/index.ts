@@ -38,7 +38,11 @@ import {
   type GatekeeperIdentity
 } from "../a2a/verify.js";
 import { A2AExecutor } from "../a2a/executor.js";
-import { readHumanReply, type HumanReply } from "../a2a/hitl.js";
+import {
+  hasHumanReplyPart,
+  readHumanReply,
+  type HumanReply
+} from "../a2a/hitl.js";
 import { inboundTextError, textOf } from "../a2a/parts.js";
 import { DurableTaskStore } from "../a2a/task-store.js";
 import type { AgentResolver } from "../a2a/agent-stub.js";
@@ -393,6 +397,13 @@ function readContinuation(rpcBody: {
   };
   const reply = readHumanReply(message);
   if (reply) return { ...at, kind: "reply", reply };
+  if (hasHumanReplyPart(message)) {
+    // An answer that does not parse is refused, not joined: as a turn, its
+    // text would reach the model as conversation and the question stay open.
+    return {
+      refused: `a ${HITL_RESPONSE_TYPE} or ${HITL_TIMEOUT_TYPE} data part that does not parse`
+    };
+  }
   const text = textOf(message).trim();
   if (!text) {
     return {
@@ -473,11 +484,7 @@ async function recordReply(
     });
     if (typeof verdict === "object") {
       return {
-        error: toJsonRpcError(
-          new RequestMalformedError(
-            `the answer does not fit the question: ${verdict.refused}`
-          )
-        )
+        error: toJsonRpcError(new RequestMalformedError(verdict.refused))
       };
     }
     return { taken: verdict };

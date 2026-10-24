@@ -944,7 +944,10 @@ describe("a message on an existing task", () => {
         }
         answered.push(input);
         if (options.answer === "refused") {
-          return { refused: 'question "q1" offers no option "q1.o9"' };
+          return {
+            refused:
+              'the answer does not fit the question: question "q1" offers no option "q1.o9"'
+          };
         }
         if (options.answer === "beaten") {
           stored = {

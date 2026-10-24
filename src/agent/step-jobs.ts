@@ -171,6 +171,12 @@ export class StepJobs {
     )`;
     this.sql`CREATE INDEX IF NOT EXISTS da_step_job_requests_job
       ON da_step_job_requests (step_job_id, state)`;
+    this.sql`CREATE TABLE IF NOT EXISTS da_step_job_joins (
+      step_job_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      ran INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (step_job_id, message_id)
+    )`;
     this.sql`CREATE TABLE IF NOT EXISTS da_step_task_hooks (
       task_id TEXT PRIMARY KEY,
       state INTEGER NOT NULL,
@@ -385,6 +391,31 @@ export class StepJobs {
           state: row.state as RequestState
         }
       : null;
+  }
+
+  /** A joined message the workflow handed the job, whether or not it runs. */
+  handedJoin(stepJobId: string, messageId: string): void {
+    this.#ensure();
+    this.sql`INSERT OR IGNORE INTO da_step_job_joins (step_job_id, message_id)
+      VALUES (${stepJobId}, ${messageId})`;
+  }
+
+  /** A joined message's turn ran: its message is in the session. */
+  ranJoin(stepJobId: string, messageId: string): void {
+    this.#ensure();
+    this.sql`UPDATE da_step_job_joins SET ran = 1
+      WHERE step_job_id = ${stepJobId} AND message_id = ${messageId}`;
+  }
+
+  /**
+   * The joined messages handed to a job whose turns never ran: dropped on a
+   * job already ended, or still queued behind the turn that ended it.
+   */
+  unrunJoins(stepJobId: string): string[] {
+    this.#ensure();
+    return this.sql<{ message_id: string }>`
+      SELECT message_id FROM da_step_job_joins
+      WHERE step_job_id = ${stepJobId} AND ran = 0`.map((r) => r.message_id);
   }
 
   /** The ids of the requests a job still waits on, oldest first. */
@@ -756,6 +787,8 @@ export class StepJobs {
     this.sql`DELETE FROM da_step_job_reports
       WHERE step_job_id NOT IN (SELECT step_job_id FROM da_step_jobs)`;
     this.sql`DELETE FROM da_step_job_requests
+      WHERE step_job_id NOT IN (SELECT step_job_id FROM da_step_jobs)`;
+    this.sql`DELETE FROM da_step_job_joins
       WHERE step_job_id NOT IN (SELECT step_job_id FROM da_step_jobs)`;
     this.sql`DELETE FROM da_step_work
       WHERE created_at < ${before}

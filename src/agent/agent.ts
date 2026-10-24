@@ -97,6 +97,9 @@ export interface CheckBackWake {
 }
 
 /** How a queued job that must land is retried. */
+/** A joined message's turn is keyed `join:<stepJobId>:<messageId>`. */
+const JOIN_KEY = "join:";
+
 const DELIVERY_RETRY = {
   maxAttempts: 8,
   baseDelayMs: 2_000,
@@ -561,18 +564,26 @@ export abstract class StepAgent<
 
   /**
    * A message that joined the job's task, relayed by the workflow: a turn of
-   * its own, in Think's order. Keyed on the message, so a relay run again
-   * submits nothing twice.
+   * its own, in Think's order. Keyed on the job and the message, so a relay
+   * run again submits nothing twice, and a retry the message is handed to
+   * submits it afresh. Recorded first, so a job that has ended, or ends
+   * before the turn runs, can say it never ran (`stepJobUnrunJoins`).
    */
   async joinStepJob(
     stepJobId: string,
     message: { messageId: string; text: string }
   ): Promise<void> {
+    this.ledger.handedJoin(stepJobId, message.messageId);
     await this.#submitInput(
       stepJobId,
-      `join:${message.messageId}`,
+      `${JOIN_KEY}${stepJobId}:${message.messageId}`,
       message.text
     );
+  }
+
+  /** The joined messages handed to a job that never ran: what a retry takes. */
+  async stepJobUnrunJoins(stepJobId: string): Promise<string[]> {
+    return this.ledger.unrunJoins(stepJobId);
   }
 
   /**
@@ -745,6 +756,16 @@ export abstract class StepAgent<
   ): Promise<void> {
     const stepJobId = submission.metadata?.stepJobId;
     if (typeof stepJobId !== "string") return;
+    // A joined message's turn that ran, to the end or to the error that ends
+    // the job: its message is in the session, so a retry is not handed it.
+    const key = submission.idempotencyKey;
+    const joined = `${JOIN_KEY}${stepJobId}:`;
+    if (
+      key?.startsWith(joined) &&
+      (submission.status === "completed" || submission.status === "error")
+    ) {
+      this.ledger.ranJoin(stepJobId, key.slice(joined.length));
+    }
     // A follow-up's turn has ended, so its work no longer holds the job open.
     const workId = submission.metadata?.workId;
     if (
