@@ -542,10 +542,17 @@ export abstract class StepAgent<
         // Filed before the turn is submitted, so an answer the workflow relays
         // again finds its note by the key and reads as filed, and a throw here
         // leaves the answer to be relayed again.
+        //
+        // The owner goes with the write rather than being taken as settled by
+        // the parked question: the artifact id in that question is what the
+        // model named, and {@link mayAskApproval} admitting it once is not
+        // authority for a write landing turns later. See
+        // {@link file://../artifacts/approval.ts fileApproval}.
         const filed = await fileApproval(this.env, question.artifact.id, {
           key: `${request.requestId}:${question.id}`,
           text,
-          approved: given.optionIds?.[0] === HITL_APPROVE_OPTION_ID
+          approved: given.optionIds?.[0] === HITL_APPROVE_OPTION_ID,
+          owner: this.callerKey()
         });
         if (!filed) text = unrecordedApprovalText(text);
       }
@@ -882,16 +889,34 @@ export abstract class StepAgent<
    * Whether the model may ask the person to approve the artifact `id`. It is
    * asked when the model calls `ask_user`, and a `false` fails that call.
    *
-   * By default, any artifact this deployment holds that is still open: the id is
-   * the only authority an artifact has, and a model holding one was handed it.
+   * By default, an artifact **this caller opened** that is still open.
+   *
+   * The id alone is not enough, and that is the whole of this check. An
+   * artifact's token is authority to *read* it: somebody was handed the link,
+   * which is what the link is for. Approving is a write and a lock, so a token
+   * that reached a second party cannot also carry the authority to append to
+   * that page, to close it, or to decide what status it ends in. Every
+   * artifact of a deployment lives in one object (see
+   * {@link file://../artifacts/binding.ts ARTIFACTS_OBJECT_NAME}), so without
+   * the owner there is nothing between one caller's page and another's.
+   *
+   * An artifact with no recorded owner is approvable by nobody, which is the
+   * safe direction for one opened by a writer that names no owner.
+   *
    * Open rather than unlocked, because a settled artifact's link has stopped
    * streaming — an answer filed on it would not reach a page already showing it
-   * — and a lock settles. An agent that should ask only about what it made
-   * narrows this.
+   * — and a lock settles. An agent that should ask about less narrows this, as
+   * one that genuinely needs to ask about more widens it; the write is checked
+   * again on its own terms either way, in
+   * {@link file://../artifacts/approval.ts fileApproval}.
    */
   protected async mayAskApproval(id: string): Promise<boolean> {
     const artifact = await requireArtifactsStub(this.env).artifactState(id);
-    return artifact !== null && artifact.status === null;
+    return (
+      artifact !== null &&
+      artifact.status === null &&
+      artifact.owner === this.callerKey()
+    );
   }
 
   /**
@@ -1401,6 +1426,7 @@ export abstract class StepAgent<
         {
           transcript,
           origin: this.#origin.peek(),
+          owner: this.callerKey(),
           source,
           text: note.text,
           key: note.key,

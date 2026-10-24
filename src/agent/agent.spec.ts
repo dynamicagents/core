@@ -78,6 +78,12 @@ function harnessFor(label: string, binding: AgentBinding = "TEST_AGENT") {
   const release = (key: string): Promise<void> => stub().releaseHold(key);
   return {
     harness,
+    /**
+     * The verified caller this harness speaks as, and so the name the agent's
+     * object is keyed by: what an artifact of its own is owned by. See
+     * `StepAgent.callerKey`.
+     */
+    key,
     agent,
     stub,
     host,
@@ -608,18 +614,23 @@ describe("asking the caller", () => {
 });
 
 describe("asking the caller to approve an artifact", () => {
-  /** An open artifact holding one note, as a plan is before anyone approves it. */
-  async function plan(): Promise<string> {
+  /**
+   * An open artifact holding one note, as a plan is before anyone approves it,
+   * owned by `owner`: the caller key of whoever may ask about it. Passing none
+   * leaves it owned by nobody, which is both a row written before the owner
+   * column existed and anything a writer opened without saying.
+   */
+  async function plan(owner?: string): Promise<string> {
     const artifacts = requireArtifactsStub(testEnv);
-    const token = await artifacts.createArtifact("plan");
+    const token = await artifacts.createArtifact("plan", undefined, owner);
     await artifacts.addEntry(token, { label: "plan", text: "the plan" });
     return token;
   }
 
   it("parks on an approval carrying the artifact's link", async () => {
-    const { harness } = harnessFor("approve-park");
+    const { harness, key } = harnessFor("approve-park");
     using _ = harness.interceptGatekeeper();
-    const token = await plan();
+    const token = await plan(key);
 
     const accepted = await harness.send(`approve-artifact:${token}`);
     const [parked] = await asked(harness, accepted.id);
@@ -637,9 +648,9 @@ describe("asking the caller to approve an artifact", () => {
   });
 
   it("locks an approved artifact, and tells the model", async () => {
-    const { harness } = harnessFor("approve-yes");
+    const { harness, key } = harnessFor("approve-yes");
     using _ = harness.interceptGatekeeper();
-    const token = await plan();
+    const token = await plan(key);
 
     const accepted = await harness.send(`approve-artifact:${token}`);
     const [parked] = await asked(harness, accepted.id);
@@ -666,9 +677,9 @@ describe("asking the caller to approve an artifact", () => {
    * prose, and a model shown enough of them stops calling the tool.
    */
   it("leaves the question in the history as the call it was, artifact and all", async () => {
-    const { harness, agent } = harnessFor("approve-history");
+    const { harness, agent, key } = harnessFor("approve-history");
     using _ = harness.interceptGatekeeper();
-    const token = await plan();
+    const token = await plan(key);
 
     const accepted = await harness.send(`approve-artifact:${token}`);
     const [parked] = await asked(harness, accepted.id);
@@ -696,9 +707,9 @@ describe("asking the caller to approve an artifact", () => {
   });
 
   it("records a rejection and a comment without locking", async () => {
-    const { harness } = harnessFor("approve-no");
+    const { harness, key } = harnessFor("approve-no");
     using _ = harness.interceptGatekeeper();
-    const token = await plan();
+    const token = await plan(key);
 
     const rejected = await harness.send(`approve-artifact:${token}`);
     const [first] = await asked(harness, rejected.id);
@@ -735,9 +746,9 @@ describe("asking the caller to approve an artifact", () => {
    * than read "Approved." for an approval that did not take.
    */
   it("tells the model an answer that another answer overtook", async () => {
-    const { harness } = harnessFor("approve-race");
+    const { harness, key } = harnessFor("approve-race");
     using _ = harness.interceptGatekeeper();
-    const token = await plan();
+    const token = await plan(key);
 
     const first = await harness.send(`approve-artifact:${token}`);
     const [a] = await asked(harness, first.id);
@@ -763,9 +774,9 @@ describe("asking the caller to approve an artifact", () => {
   });
 
   it("files only the approval of a form that also asks a choice", async () => {
-    const { harness } = harnessFor("approve-form");
+    const { harness, key } = harnessFor("approve-form");
     using _ = harness.interceptGatekeeper();
-    const token = await plan();
+    const token = await plan(key);
 
     const accepted = await harness.send(`approve-form:${token}`);
     const [parked] = await asked(harness, accepted.id);
@@ -796,29 +807,39 @@ describe("asking the caller to approve an artifact", () => {
   /**
    * Nothing is parked, and the turn does not end on the call: the call fails,
    * and the model reads why and carries on in the same turn.
+   *
+   * Each case is handed the caller key of the agent that will ask, so a case
+   * about *whose* artifact it is can open one owned by somebody else.
    */
   it.each([
     ["one it does not know", async () => "Q".repeat(40)],
     [
       "one already locked",
-      async () => {
-        const token = await plan();
+      async (owner: string) => {
+        const token = await plan(owner);
         await requireArtifactsStub(testEnv).lock(token, "approved");
         return token;
       }
     ],
     [
       "one already settled",
-      async () => {
-        const token = await plan();
+      async (owner: string) => {
+        const token = await plan(owner);
         await requireArtifactsStub(testEnv).settle(token, "completed");
         return token;
       }
-    ]
+    ],
+    // The advisory's own sequence, from the asking end: a caller holding a link
+    // somebody shared with it names that artifact in an approval of its own.
+    ["one another caller opened", async () => plan("custom:9:someone-else")],
+    // Every artifact opened before the owner column existed, and any a writer
+    // opens without naming itself: approvable by nobody, which is the direction
+    // that cannot be wrong.
+    ["one with no owner at all", async () => plan()]
   ])("tells the model it cannot ask about %s", async (_label, make) => {
-    const { harness } = harnessFor("approve-refused");
+    const { harness, key } = harnessFor("approve-refused");
     using _ = harness.interceptGatekeeper();
-    const artifact = await make();
+    const artifact = await make(key);
 
     const accepted = await harness.send(`approve-artifact:${artifact}`);
     const done = await harness.waitForTerminal(accepted.id);
@@ -831,6 +852,63 @@ describe("asking the caller to approve an artifact", () => {
           c.taskId === accepted.id && c.state === "TASK_STATE_INPUT_REQUIRED"
       )
     ).toBe(false);
+  });
+
+  /**
+   * The whole advisory, driven end to end: the stranger's artifact is left
+   * exactly as its owner had it. The refusal above says the model was told no;
+   * this says nothing reached the page — no approval entry, no lock, and the
+   * status still the owner's.
+   */
+  it("leaves another caller's artifact untouched when a caller tries to approve it", async () => {
+    const owner = harnessFor("approve-owner");
+    const stranger = harnessFor("approve-stranger");
+    using _ = stranger.harness.interceptGatekeeper();
+    const token = await plan(owner.key);
+
+    const accepted = await stranger.harness.send(`approve-artifact:${token}`);
+    await stranger.harness.waitForTerminal(accepted.id);
+
+    expect(
+      await requireArtifactsStub(testEnv).readArtifact(token)
+    ).toMatchObject({
+      owner: owner.key,
+      status: null,
+      locked: false,
+      entries: [{ label: "plan", text: "the plan" }]
+    });
+  });
+
+  /**
+   * The gate ran at ask time; the artifact settled while the question was out
+   * with the person. The answer is not filed and the page keeps the status its
+   * own run gave it, so an approval never re-stamps a page that had already
+   * finished. The model is told its answer changed nothing.
+   */
+  it("records nothing when the artifact settled while the question was out", async () => {
+    const { harness, key } = harnessFor("approve-settled-late");
+    using _ = harness.interceptGatekeeper();
+    const token = await plan(key);
+
+    const accepted = await harness.send(`approve-artifact:${token}`);
+    const [parked] = await harness.waitForState(
+      accepted.id,
+      "TASK_STATE_INPUT_REQUIRED"
+    );
+    await requireArtifactsStub(testEnv).settle(token, "failed");
+    await harness.answer(accepted.id, questionOf(parked).requestId, {
+      q1: { optionIds: ["approve"] }
+    });
+
+    const done = await harness.waitForTerminal(accepted.id);
+    expect(done.text).toContain(unrecordedApprovalText("Approved."));
+    expect(
+      await requireArtifactsStub(testEnv).readArtifact(token)
+    ).toMatchObject({
+      status: "failed",
+      locked: false,
+      entries: [{ label: "plan", text: "the plan" }]
+    });
   });
 });
 

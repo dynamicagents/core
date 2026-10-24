@@ -286,9 +286,12 @@ a typed answer too, and an answer that does not fit the questions is refused to 
 gatekeeper with why. A question naming an `artifact` is an approval of it: it carries
 the artifact's id and link, the caller answers Approve, Reject or with a typed
 comment, the answer is filed on the artifact, and approving it locks it. Which artifacts a
-model may ask about is `mayAskApproval`'s to say — by default, any still open —
-and it is checked when the model calls `ask_user`, so a refusal is an
-error the model reads in the same turn.
+model may ask about is `mayAskApproval`'s to say — by default, one this caller opened
+that is still open, since a link is shared by design and holding one is authority to
+read rather than to write — and it is checked when the model calls `ask_user`, so a
+refusal is an error the model reads in the same turn. The answer's own write asks
+again, so an agent widening the gate widens what may be asked and not what may be
+filed.
 `check_back` is opt-in: `check_back: this.checkBackTool()` in `getTools()` lets the
 model put a job down and pick it up later, as a scheduled wake rather than a wait
 inside the turn. A turn runs inside the object's alarm, which the runtime stops after
@@ -416,11 +419,15 @@ artifact records that: a link whose only POST was dropped is offered again on th
 next note, rather than suppressed by a rule that knew nothing but which note came
 first.
 
-An artifact is a **kind**, a long random **token**, an append-only list of labelled
+An artifact is a **kind**, a long random **token**, an **owner**, an append-only list
+of labelled
 notes, a settle status, whether its link has been delivered, and whether it is
-**locked** — refusing every note after the one somebody acted on. The token is id and authorization in one — derived from
+**locked** — refusing every note after the one somebody acted on. The token is id and authorization to **read** in one — derived from
 nothing, so a link is the whole of what a reader needs and anyone holding one can
-read it. `session-transcript` is the first kind and the object holds no code for
+read it. Writing is the owner's: a link reaches second parties by design, so a
+writer that asks whether the artifact is its own is refused when it is not, which is
+what keeps an approval from being something a forwarded link can do.
+`session-transcript` is the first kind and the object holds no code for
 it; ingest is RPC over the binding and never a route, so a write is authenticated
 by being inside the Worker. Artifacts age out on the same 30-day clock as the rest
 of a Task's state, swept lazily on the next write rather than by an alarm apiece.

@@ -39,8 +39,15 @@ import {
  *
  * **Reads are the token**, over {@link fetch}. The token is unguessable and
  * derived from nothing (see {@link file://./store.ts mintArtifactToken}), so it
- * is id and authorization in one, and a link is the whole of what a reader
- * needs. Nothing else here checks anything: hand out the link or do not.
+ * is id and authorization **to read** in one, and a link is the whole of what a
+ * reader needs. Nothing else here checks a read: hand out the link or do not.
+ *
+ * **A write is not a read.** A link is shared by design, so holding one cannot
+ * also be the authority to add to the page or to close it. An artifact
+ * therefore records whose it is when it is opened, and a writer that asks
+ * whether the artifact is its own is refused when it is not — see
+ * {@link createArtifact} and {@link addEntry}. Ingest is still unguarded for a
+ * writer that asserts nothing: inside the Worker, the token is an argument.
  *
  * ## One object, addressed by a well-known name
  *
@@ -69,6 +76,13 @@ import {
 /** What {@link Artifacts.artifactState} answers. */
 export interface ArtifactState {
   kind: string;
+  /**
+   * Whoever opened it, as they named themselves, or `null` for an artifact
+   * opened without saying — see {@link file://./store.ts ArtifactStore.open}.
+   * A reader of the page is never told this; it is for a writer asking whether
+   * the artifact is its own.
+   */
+  owner: string | null;
   /** The status it settled or locked in, or `null` while it is still open. */
   status: string | null;
   /** Whether it refuses new notes. */
@@ -129,9 +143,18 @@ export class Artifacts extends DurableObject {
    * its own — a replay, a fresh isolate, a retry — find the artifact it
    * opened earlier instead of starting a second one. Without a key every call
    * opens a new artifact.
+   *
+   * `owner` is whose artifact it is, and the only thing that will later let a
+   * writer assert its own — see {@link file://./store.ts ArtifactStore.open}.
+   * An artifact opened without one can be read by whoever holds its link and
+   * written by nobody who asks whether it is theirs.
    */
-  async createArtifact(kind: string, sourceKey?: string): Promise<string> {
-    return this.store.open(kind, sourceKey);
+  async createArtifact(
+    kind: string,
+    sourceKey?: string,
+    owner?: string
+  ): Promise<string> {
+    return this.store.open(kind, sourceKey, owner);
   }
 
   /** The token a `kind`/`sourceKey` pair already has, or `null`. Opens nothing. */
@@ -144,26 +167,20 @@ export class Artifacts extends DurableObject {
    * nothing, which is what a caller sees when retention swept the artifact out
    * from under it, or when the artifact is locked.
    *
-   * `lock` locks it in that status once the note is in, in the same call: no
-   * other write lands between the two, so a note that decides an artifact is
-   * never one another writer has already overtaken. A replay its key catches
-   * locks nothing new.
-   *
-   * The token is required for the reason a read needs one, not because ingest
-   * is guarded: it names the artifact, and a writer that cannot name it has no
-   * business appending to it.
+   * `lock` and `owner` are the store's, and
+   * {@link file://./store.ts ArtifactStore.append} is where both are decided:
+   * the lock rides with the note in one call, a note that cannot lock is
+   * refused rather than written, and a write asserting an owner the artifact
+   * does not have is refused having learned nothing. The token names the
+   * artifact; the owner is what says a writer may write there.
    */
   async addEntry(
     token: string,
     entry: ArtifactEntryInput,
-    options: { lock?: string } = {}
+    options: { lock?: string; owner?: string } = {}
   ): Promise<RecordedNote | null> {
-    const recorded = this.store.append(token, entry);
+    const recorded = this.store.append(token, entry, options);
     if (recorded === null) return null;
-    const locked =
-      options.lock !== undefined &&
-      recorded.appended &&
-      this.store.lock(token, options.lock);
     // Only a note that was actually written is sent on. A replay the entry key
     // caught has already reached everyone watching, under this same event id,
     // and sending it again would render it twice.
@@ -173,7 +190,7 @@ export class Artifacts extends DurableObject {
         sseFrame(ARTIFACT_EVENTS.entry, recorded.entry, recorded.entry.sequence)
       );
     }
-    if (locked) {
+    if (recorded.locked) {
       const event: SettledEvent = { status: options.lock! };
       this.broadcast(token, sseFrame(ARTIFACT_EVENTS.settled, event), "close");
     }
@@ -242,6 +259,7 @@ export class Artifacts extends DurableObject {
     if (artifact === null) return null;
     return {
       kind: artifact.kind,
+      owner: artifact.owner,
       status: artifact.status,
       locked: artifact.locked
     };
@@ -259,6 +277,7 @@ export class Artifacts extends DurableObject {
     if (artifact === null) return null;
     return {
       kind: artifact.kind,
+      owner: artifact.owner,
       status: artifact.status,
       locked: artifact.locked,
       entries: this.store.entries(token)

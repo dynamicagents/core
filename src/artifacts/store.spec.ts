@@ -253,4 +253,85 @@ describe("the artifacts schema version", () => {
     // A replay its key catches returns the card it wrote the first time.
     expect(found.replayed?.detail).toEqual(found.entries[1]?.detail);
   });
+
+  /**
+   * The real step, against a store the way version 3 left it: an artifact
+   * opened before owners existed has none, and nothing asserting one may write
+   * on it — which is the fail-closed half of the owner check, measured here
+   * rather than argued.
+   */
+  it("brings a version 3 store up to owners, leaving its artifacts owned by nobody", async () => {
+    const found = await withSql("v3", (sql) => {
+      ensureArtifactSchema(sql, {
+        steps: (db, from) => {
+          if (from < 2)
+            db.exec("ALTER TABLE artifacts ADD COLUMN locked_at INTEGER");
+          if (from < 3)
+            db.exec("ALTER TABLE artifact_entries ADD COLUMN detail TEXT");
+        },
+        target: 3
+      });
+      sql.exec(
+        `INSERT INTO artifacts (token, kind, source_key, created_at)
+         VALUES ('old', 'kind', NULL, 1000)`
+      );
+      const store = makeArtifactStore(sql, () => 1_000);
+      return {
+        version: recorded(sql),
+        old: store.get("old"),
+        asserted: store.append(
+          "old",
+          { label: "a 0", text: "mine now" },
+          { owner: "custom:1:someone" }
+        ),
+        unasserted: store.append("old", { label: "a 0", text: "no claim" })
+      };
+    });
+    expect(found.version).toBe(CURRENT_SCHEMA_VERSION);
+    expect(found.old?.owner).toBe(null);
+    expect(found.asserted).toBe(null);
+    // A writer that claims nothing writes as it always did: the column is what
+    // a claim is checked against, not a permission every writer now needs.
+    expect(found.unasserted?.appended).toBe(true);
+  });
+});
+
+describe("an artifact's owner", () => {
+  it("is recorded as the opener named it, and read back on the artifact", async () => {
+    const found = await withSql("owner", (sql) => {
+      const store = makeArtifactStore(sql, () => 1_000);
+      const mine = store.open("plan", undefined, "custom:1:mine");
+      const nobodys = store.open("plan");
+      return { mine: store.get(mine), nobodys: store.get(nobodys) };
+    });
+    expect(found.mine?.owner).toBe("custom:1:mine");
+    expect(found.nobodys?.owner).toBe(null);
+  });
+
+  /**
+   * The key is what makes `open` idempotent, so a second caller naming the same
+   * one is handed the artifact that exists. It does not inherit it: the owner
+   * stays whoever opened it, and the second caller holds a token it cannot
+   * write on.
+   */
+  it("stays the first opener's when a second open finds the same source key", async () => {
+    const found = await withSql("owner-key", (sql) => {
+      const store = makeArtifactStore(sql, () => 1_000);
+      const first = store.open("plan", "task:run", "custom:1:first");
+      const second = store.open("plan", "task:run", "custom:2:second");
+      return {
+        first,
+        second,
+        artifact: store.get(first),
+        write: store.append(
+          second,
+          { label: "plan", text: "theirs" },
+          { owner: "custom:2:second" }
+        )
+      };
+    });
+    expect(found.second).toBe(found.first);
+    expect(found.artifact?.owner).toBe("custom:1:first");
+    expect(found.write).toBe(null);
+  });
 });
