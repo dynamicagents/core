@@ -8,7 +8,8 @@ import {
   type HitlRequestData
 } from "@dynamicagents/g2a-protocol";
 import {
-  buildInputRequiredTask,
+  buildAskingTask,
+  buildWaitingTask,
   formRequestText,
   readHumanReply
 } from "./hitl.js";
@@ -109,10 +110,11 @@ function message(...parts: Part[]): Message {
 }
 
 describe("the question an agent posts", () => {
-  it("parks the Task with the question as text and as data", () => {
-    const task = buildInputRequiredTask("t1", "ctx-1", question);
+  it("asks on a working Task, with the question as text and as data", () => {
+    const task = buildAskingTask("t1", "ctx-1", question);
 
-    expect(task.status?.state).toBe(TaskState.TASK_STATE_INPUT_REQUIRED);
+    // Working: asking stops nothing else the task is doing.
+    expect(task.status?.state).toBe(TaskState.TASK_STATE_WORKING);
     const parts = task.status?.message?.parts ?? [];
     // The text is what a client that knows none of this still reads; the data
     // is what the gatekeeper renders as something to pick from.
@@ -127,11 +129,18 @@ describe("the question an agent posts", () => {
   it("posts a retry under the same message id", () => {
     // The delivery queue retries on a non-2xx, and a fresh id per attempt
     // would reach the gatekeeper as a second question.
-    const first = buildInputRequiredTask("t1", "ctx-1", question);
-    const again = buildInputRequiredTask("t1", "ctx-1", question);
+    const first = buildAskingTask("t1", "ctx-1", question);
+    const again = buildAskingTask("t1", "ctx-1", question);
     expect(first.status?.message?.messageId).toBe(
       again.status?.message?.messageId
     );
+  });
+
+  it("waits on its open questions as input-required, asking nothing new", () => {
+    const task = buildWaitingTask("t1", "ctx-1", "t1:wait-1");
+    expect(task.status?.state).toBe(TaskState.TASK_STATE_INPUT_REQUIRED);
+    expect(task.status?.message?.messageId).toBe("t1:wait-1");
+    expect(task.status?.message?.parts).toEqual([]);
   });
 });
 
