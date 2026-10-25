@@ -132,6 +132,9 @@ pre.plain { white-space: pre-wrap; overflow-wrap: anywhere; }
 .md-table table { border-collapse: collapse; font-size: .85rem; }
 .md-table th, .md-table td {
   border: 1px solid var(--line); padding: .25rem .55rem; text-align: left;
+  /* .md's anywhere lowers a column's minimum width to one letter, so a short
+     column is squeezed for a long one. A wide table scrolls in .md-table. */
+  overflow-wrap: normal;
 }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
 .card[data-status="error"] { border-color: var(--bad); }
