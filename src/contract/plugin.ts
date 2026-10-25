@@ -1,4 +1,4 @@
-import type { Action, WorkspaceLike } from "@cloudflare/think";
+import type { Action, ThinkWorkspace } from "@cloudflare/think";
 import type { ToolSet } from "ai";
 import type { ContextConfig } from "agents/context";
 
@@ -17,7 +17,7 @@ import type { ContextConfig } from "agents/context";
  * assembles its plugins, so a skew fails with a sentence naming the plugin and
  * both versions rather than a structural-type error several frames away.
  */
-export const PLUGIN_CONTRACT_VERSION = 3;
+export const PLUGIN_CONTRACT_VERSION = 4;
 
 /** What a plugin knows when it builds its tools and actions. */
 export interface PluginContext<Env = Cloudflare.Env> {
@@ -37,8 +37,20 @@ export interface PluginContext<Env = Cloudflare.Env> {
    * of it couples a plugin to a routing decision that is not the plugin's.
    */
   callerKey(): string;
-  /** The installing agent's Think workspace. */
-  workspace(): WorkspaceLike;
+  /**
+   * The installing agent's Think workspace.
+   *
+   * Files are reached through `.fs`, whose methods Think picks from
+   * `@cloudflare/computer`'s `Workspace`, so a plugin that builds a workspace
+   * of its own satisfies that package's signatures rather than a shape of
+   * Think's. That is the coupling to know about: the type is Think's, the
+   * methods are Computer's, and a plugin is held to both.
+   *
+   * `runtime` is optional on it, and withholding one is how an agent keeps the
+   * built-in `exec` tool from appearing: Computer's tool set offers `exec` only
+   * for a workspace that carries backends.
+   */
+  workspace(): ThinkWorkspace;
   /**
    * In a sub-agent: what its spec's `prepare` returned for the running
    * dispatch. `undefined` in a parent. Read it inside `execute`, not while

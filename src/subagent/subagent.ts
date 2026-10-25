@@ -73,6 +73,7 @@ export abstract class SubAgent<
   static spec: SubAgentSpec<never, never>;
 
   override maxSteps = Infinity;
+  /** Why only the work budget is lifted: see `../agent/agent.ts`. */
   override chatRecovery = { maxRecoveryWork: Infinity };
   override contextOverflow = { reactive: true };
   /** A turn's reasoning is not stored — see `../agent/history.ts`. */
