@@ -69,11 +69,18 @@ const NO_VENDOR_KEY = "unused";
  * An `openai/*` slug is instead built as OpenAI's own Responses model and handed
  * to `createAI` as a model object, which sends it down AI Gateway's
  * provider-native path: OpenAI's own request body, parser and error shapes, with
- * only the transport Cloudflare's. That path carries no run id, so **a dropped
- * stream on an OpenAI turn is not resumed here**; it is an interrupted turn, and
- * Think's chat recovery continues it on the next wake. The trade buys the
- * Responses API as OpenAI itself writes it, which is what its reasoning models
- * need in order to accept function tools at any effort above `"none"`.
+ * only the transport Cloudflare's. The trade buys the Responses API as OpenAI
+ * itself writes it, which is what its reasoning models need in order to accept
+ * function tools at any effort above `"none"`.
+ *
+ * **What it costs is a dropped stream, and the cost is the turn.** That path
+ * carries no run id, so nothing replays the events the connection lost; and a
+ * stream error is not an interruption Think recovers from on its own, but one it
+ * hands to `classifyChatError`, whose answer here covers context overflow alone.
+ * So the turn ends, its step job fails, and the work carries on through the
+ * workflow's retry of that step rather than through a continuation that keeps
+ * the partial answer. {@link file://../agent/agent.ts StepAgent.classifyChatError}
+ * is where that is stated and where a consumer widens it.
  *
  * So a bare `"openai/..."` string returned from `getModel()` is not the model
  * this builds: Think resolves a model id through its own bundled provider, which

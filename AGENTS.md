@@ -211,9 +211,14 @@ recovery.
 that is not OpenAI's goes down the run path, whose streams carry a run id and resume
 where a dropped connection left off. An `openai/*` slug is built as OpenAI's own
 Responses model and routed provider-native, which is what its reasoning models need in
-order to take function tools, and which carries no run id: a stream that dies there is
-an interrupted turn rather than a resumed one. `src/model/catalog.ts` is the home of
-that trade, and of why no provider credential leaves the Worker on either path.
+order to take function tools, and which carries no run id: a stream that dies there
+ends its turn and fails its step job, and the work carries on through the workflow's
+retry rather than through a continuation. `src/model/catalog.ts` is the home of that
+trade, and of why no provider credential leaves the Worker on either path.
+
+Nothing here classifies a disconnect into Think's bounded recovery, and that is the
+line below rather than an omission: `classifyChatError` covers context overflow, and
+`src/agent/agent.ts` says what every other error costs and how a consumer widens it.
 
 Everything deployment-specific stays out: which AI Gateway, which credential, how to
 classify an error beyond the context-overflow classifier. Those are the agent's.

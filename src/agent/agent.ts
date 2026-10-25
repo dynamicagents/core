@@ -265,6 +265,37 @@ export abstract class StepAgent<
     }
   }
 
+  /**
+   * **Context overflow and nothing else, and what that means for every other
+   * error is terminal.**
+   *
+   * Think routes a turn's stream error through this hook and reacts to what
+   * comes back: `"context_overflow"` runs the compact-and-retry backstop
+   * {@link StepAgent.contextOverflow} enables, `"transient"` and `"rate_limit"`
+   * route the turn into bounded chat recovery with a continuation, and anything
+   * else — including the `undefined` this returns for an error the bundled
+   * classifier does not match — ends the turn.
+   *
+   * So a provider that drops a stream mid-answer is **not** continued here. The
+   * turn ends, the step job fails with it, and what carries the work on is the
+   * workflow's retry of that step rather than a continuation of the turn, which
+   * costs the partial answer the turn had produced.
+   *
+   * Widening that is the consumer's, and deliberately: the error strings belong
+   * to the provider a deployment chose, and a classifier here would be core
+   * matching provider text on every tenant's behalf. A subclass that wants a
+   * disconnect to continue rather than fail returns `"transient"` for it and
+   * delegates the rest:
+   *
+   * ```ts
+   * override classifyChatError(error: unknown) {
+   *   return isDisconnect(error) ? "transient" : super.classifyChatError(error);
+   * }
+   * ```
+   *
+   * {@link file://../subagent/subagent.ts SubAgent} answers this the same way,
+   * for the same reason.
+   */
   override classifyChatError(error: unknown) {
     return defaultContextOverflowClassifier(error);
   }
