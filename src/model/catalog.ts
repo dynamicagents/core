@@ -60,7 +60,11 @@ const NO_VENDOR_KEY = "unused";
  * A slug that is not OpenAI's is passed to `createAI` as an id, which dispatches
  * it through `env.AI.run`. That transport names each streamed run and resumes it
  * from the last complete event when the connection drops, so a turn whose stream
- * dies mid-flight is picked up rather than restarted.
+ * dies mid-flight is picked up rather than restarted. Every such slug is written
+ * as a Chat Completions body, whatever the provider's own API is, and a reply in
+ * another shape is translated back: that is the one wire format the run path
+ * takes, and it is why any provider in the catalog works here without this
+ * module naming it.
  *
  * An `openai/*` slug is instead built as OpenAI's own Responses model and handed
  * to `createAI` as a model object, which sends it down AI Gateway's

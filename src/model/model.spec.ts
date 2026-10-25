@@ -178,6 +178,54 @@ describe("a Workers AI model", () => {
     );
   });
 
+  /**
+   * The configured effort is a default, and the provider resolves a model-level
+   * one *above* the call's `reasoning` — so passing it on the model would make
+   * compaction's `reasoning: "none"` a no-op and put the 120-second cost that
+   * switch exists to avoid back on every compaction.
+   */
+  it("lets a call's own reasoning switch win over the configured effort", async () => {
+    const { ai, run } = recordingBinding(chatCompletionsReply);
+    await generateText({
+      model: workersAIModel(
+        { AI: ai },
+        { modelId: "@cf/test/model", reasoningEffort: "high" }
+      ),
+      prompt: "summarize",
+      reasoning: "none"
+    }).catch(() => undefined);
+
+    const input = (run[0]?.input ?? {}) as {
+      reasoning_effort?: unknown;
+      chat_template_kwargs?: { enable_thinking?: boolean };
+    };
+    // The configured effort does not reach the request...
+    expect(JSON.stringify(input)).not.toContain("high");
+    // ...and the switch the call asked for does, in whichever spelling the
+    // provider's compat layer uses for the model: `reasoning_effort: null`, or
+    // a chat-template flag for a model that reads one instead.
+    expect(
+      input.reasoning_effort === null ||
+        input.chat_template_kwargs?.enable_thinking === false
+    ).toBe(true);
+  });
+
+  it("keeps the configured effort when the call names the provider's default", async () => {
+    const { ai, run } = recordingBinding(chatCompletionsReply);
+    await generateText({
+      model: workersAIModel(
+        { AI: ai },
+        { modelId: "@cf/test/model", reasoningEffort: "high" }
+      ),
+      prompt: "hi",
+      reasoning: "provider-default"
+    }).catch(() => undefined);
+
+    expect(run[0]?.input).toEqual(
+      expect.objectContaining({ reasoning_effort: "high" })
+    );
+  });
+
   it("re-sends an earlier turn's tool-call ids in a form the provider accepts", async () => {
     const { ai, run } = recordingBinding(chatCompletionsReply);
     await generateText({
