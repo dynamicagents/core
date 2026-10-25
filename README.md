@@ -689,7 +689,7 @@ The harness both predecessor agents grew, shipped so you don't grow it a third t
 - **Bindings:** `AI`, per tenant a task host, its workflow and its step agents,
   `ARTIFACTS`
 - **Secrets:** `A2A_SIGNING_KEY`, `GATEKEEPER_ORIGINS`
-- **Peers, never bundled:** `@cloudflare/think`, `agents`, `ai`, `workers-ai-provider`, `@modelcontextprotocol/client`
+- **Peers, never bundled:** `@cloudflare/think`, `@cloudflare/computer`, `agents`, `ai`, `@modelcontextprotocol/client`
 
 That last point is not stylistic: two copies of `agents` in one Worker breaks the
 `Session` / `SessionMessage` types and every `instanceof`. For local development

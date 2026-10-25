@@ -200,9 +200,25 @@ Think names things, so the day Think grows the same feature the port is a deleti
 A provider is a function returning one `LanguageModel` for `getModel()`. `src/model/`
 ships two, both over the `AI` binding and both through AI Gateway: `workersAIModel`
 for a `@cf/...` Workers AI id, and `catalogModel` for a `"<provider>/<model>"` slug
-from the gateway's provider catalog. There is no fallback model on either: a transient
-failure is retried by the AI SDK (`maxRetries`, which `beforeTurn` can tune) and an
-interrupted turn is continued by Think's chat recovery.
+from the gateway's provider catalog. Both are built with agents' own `createAI`, so
+the gateway options, the log fields and the error shapes are one implementation rather
+than two. There is no fallback model on either, and `createAI`'s `fallback` list is
+deliberately left empty: a transient failure is retried by the AI SDK (`maxRetries`,
+which `beforeTurn` can tune) and an interrupted turn is continued by Think's chat
+recovery.
+
+**A catalog slug takes one of two transports, and which one costs something.** A slug
+that is not OpenAI's goes down the run path, whose streams carry a run id and resume
+where a dropped connection left off. An `openai/*` slug is built as OpenAI's own
+Responses model and routed provider-native, which is what its reasoning models need in
+order to take function tools, and which carries no run id: a stream that dies there
+ends its turn and fails its step job, and the work carries on through the workflow's
+retry rather than through a continuation. `src/model/catalog.ts` is the home of that
+trade, and of why no provider credential leaves the Worker on either path.
+
+Nothing here classifies a disconnect into Think's bounded recovery, and that is the
+line below rather than an omission: `classifyChatError` covers context overflow, and
+`src/agent/agent.ts` says what every other error costs and how a consumer widens it.
 
 Everything deployment-specific stays out: which AI Gateway, which credential, how to
 classify an error beyond the context-overflow classifier. Those are the agent's.

@@ -1,14 +1,13 @@
 import { createOpenAI } from "@ai-sdk/openai";
+import { createAI, type CloudflareLanguageModelId } from "agents/models/ai-sdk";
 import {
   wrapLanguageModel,
   type LanguageModel,
   type LanguageModelMiddleware
 } from "ai";
-import { createWorkersAI, type ProviderPlugin } from "workers-ai-provider";
-import { anthropic } from "workers-ai-provider/anthropic";
-import { openai } from "workers-ai-provider/openai";
 import type { AiEnv } from "../env.js";
 import type { GatewayLogFields } from "./gateway-log.js";
+import { workersAIToolCallIds } from "./tool-call-ids.js";
 
 /** One AI Gateway catalog model, as an agent's `getModel()` returns it. */
 export interface CatalogModelOptions extends GatewayLogFields {
@@ -31,6 +30,17 @@ export interface CatalogModelOptions extends GatewayLogFields {
 }
 
 /**
+ * The key `@ai-sdk/openai` is built with, and a placeholder because no key is
+ * wanted here.
+ *
+ * The provider refuses to build a request without one, and this one never
+ * leaves the Worker: `vendorKey: "gateway"` below drops the `authorization`
+ * header the provider wrote before the request goes out, so the gateway
+ * authenticates with what it holds for the provider.
+ */
+const NO_VENDOR_KEY = "unused";
+
+/**
  * A model from AI Gateway's provider catalog, over the `AI` binding Workers AI
  * uses and carrying the same log fields.
  *
@@ -42,25 +52,44 @@ export interface CatalogModelOptions extends GatewayLogFields {
  * over the provider's own endpoint, where the key would have to live in the
  * Worker.
  *
- * The provider plugins are what make a slug routable at all: without them
- * `workers-ai-provider` builds Workers AI models only. An `openai/*` slug gets
- * {@link responses} rather than the package's own `openai` plugin, so a bare
- * `"openai/..."` string returned from `getModel()`, which Think resolves with
- * the package's pair, is not the same model as one built here.
+ * `slug` stays a `string` for the reason `modelId` does next door, and the
+ * gateway options go on the model for the reason given there too.
  *
- * The gateway goes on the **model's** settings, as it does for Workers AI — but
- * for a catalog slug the model's is the one that wins (`modelGateway ??
- * providerGateway`), which is the opposite order to the Workers AI path next
- * door. Nothing here sets a provider-level gateway, so the two cannot disagree;
- * the order matters to whoever adds one. Built per call for the reason given in
- * {@link file://./workers-ai.ts workersAIModel}.
+ * **Two transports, and a slug's provider decides which.**
  *
- * A slug dispatches through `env.AI.run`, the transport that carries resumable
- * streaming. Gateway-side response caching and server-side fallback are the two
- * things that would move the call to the gateway's other transport, which does
- * not surface a resume handle — so buying either means giving up the recovery of
- * a turn whose stream dies mid-flight. That is the trade neither is plumbed for
- * here, and it is why this module ships no fallback model.
+ * A slug that is not OpenAI's is passed to `createAI` as an id, which dispatches
+ * it through `env.AI.run`. That transport names each streamed run and resumes it
+ * from the last complete event when the connection drops, so a turn whose stream
+ * dies mid-flight is picked up rather than restarted. Every such slug is written
+ * as a Chat Completions body, whatever the provider's own API is, and a reply in
+ * another shape is translated back: that is the one wire format the run path
+ * takes, and it is why any provider in the catalog works here without this
+ * module naming it.
+ *
+ * An `openai/*` slug is instead built as OpenAI's own Responses model and handed
+ * to `createAI` as a model object, which sends it down AI Gateway's
+ * provider-native path: OpenAI's own request body, parser and error shapes, with
+ * only the transport Cloudflare's. The trade buys the Responses API as OpenAI
+ * itself writes it, which is what its reasoning models need in order to accept
+ * function tools at any effort above `"none"`.
+ *
+ * **What it costs is a dropped stream, and the cost is the turn.** That path
+ * carries no run id, so nothing replays the events the connection lost; and a
+ * stream error is not an interruption Think recovers from on its own, but one it
+ * hands to `classifyChatError`, whose answer here covers context overflow alone.
+ * So the turn ends, its step job fails, and the work carries on through the
+ * workflow's retry of that step rather than through a continuation that keeps
+ * the partial answer. {@link file://../agent/agent.ts StepAgent.classifyChatError}
+ * is where that is stated and where a consumer widens it.
+ *
+ * So a bare `"openai/..."` string returned from `getModel()` is not the model
+ * this builds: Think resolves a model id through its own bundled provider, which
+ * writes Chat Completions and sends none of the defaults below.
+ *
+ * Nothing stands one model in for another when a call fails. `createAI` takes a
+ * `fallback` list and this passes none: a second model answering a history the
+ * first wrote is a different conversation, and the retry that is wanted here is
+ * the AI SDK's own.
  *
  * There is no reasoning budget here: where one of these models takes a
  * reasoning effort it is an AI SDK `providerOptions` value, set on the call
@@ -77,40 +106,45 @@ export function catalogModel(
     eventId,
     sessionAffinity
   } = options;
-  const isOpenAI = slug.startsWith("openai/");
+  const gateway = {
+    id: gatewayId,
+    ...(metadata ? { metadata } : {}),
+    ...(eventId ? { eventId } : {})
+  };
+  const ai = createAI({ binding: env.AI });
+  const openAIModelId = openAIModelOf(slug);
   return wrapLanguageModel({
-    model: createWorkersAI({
-      binding: env.AI,
-      providers: [isOpenAI ? responses : openai, anthropic]
-    })(slug, {
-      gateway: {
-        id: gatewayId,
-        ...(metadata ? { metadata } : {}),
-        ...(eventId ? { eventId } : {})
-      }
-    }),
-    middleware: isOpenAI
-      ? [workersAIToolCallIds, openAIDefaults(sessionAffinity)]
-      : workersAIToolCallIds
+    // `wrapLanguageModel` outside `ai()`, never inside it: a routed model is
+    // asked for the provider settings a middleware wrapper does not have, and
+    // `createAI` rejects one that cannot answer.
+    model:
+      openAIModelId === undefined
+        ? ai(slug as CloudflareLanguageModelId, gateway)
+        : ai(createOpenAI({ apiKey: NO_VENDOR_KEY }).responses(openAIModelId), {
+            ...gateway,
+            // The default, written out because what it decides is whether a
+            // credential leaves this Worker. See {@link NO_VENDOR_KEY}.
+            vendorKey: "gateway"
+          }),
+    middleware:
+      openAIModelId === undefined
+        ? workersAIToolCallIds
+        : [workersAIToolCallIds, openAIDefaults(sessionAffinity)]
   });
 }
 
 /**
- * OpenAI's own models, on the Responses API rather than Chat Completions, where
- * OpenAI's reasoning models refuse function tools at any reasoning effort but
- * `"none"`. The run catalog takes a Responses body at the same
- * `env.AI.run(slug)` and streams it with a resume handle, so the transport is
- * unchanged: only the wire format the body is written in and parsed from. The
- * `apiKey` is never sent, since the run transport forwards the body alone.
+ * The model id OpenAI knows itself by, for an `openai/*` slug, and `undefined`
+ * for every other provider.
  *
- * Every other OpenAI-wire slug keeps the package's Chat Completions plugin: the
- * catalog's Responses support is verified for OpenAI only.
+ * A catalog slug names the provider and then that provider's own id, and the
+ * provider-native path needs the second half alone: the provider is read from
+ * the host the vendor's own model would have called.
  */
-const responses: ProviderPlugin = {
-  wireFormat: "openai",
-  create: ({ modelId, fetch }) =>
-    createOpenAI({ apiKey: "unused", fetch }).responses(modelId)
-};
+function openAIModelOf(slug: string): string | undefined {
+  const prefix = "openai/";
+  return slug.startsWith(prefix) ? slug.slice(prefix.length) : undefined;
+}
 
 /**
  * Defaults for every `openai/*` call, under any the caller sets.
@@ -136,50 +170,4 @@ function openAIDefaults(sessionAffinity?: string): LanguageModelMiddleware {
         }
       })
   };
-}
-
-/**
- * What `workers-ai-provider` joins onto every tool-call id a Workers AI model
- * emits, and takes off again only when it sends that history back to Workers AI.
- */
-const WORKERS_AI_TOOL_CALL_MARKER = "::cf-wai-tool-call::";
-
-/**
- * A history outlives the model that wrote it, so a conversation moved onto a
- * slug re-sends the ids its Workers AI turns recorded, marker and all, and the
- * provider plugins pass them on verbatim. OpenAI refuses an id over 64
- * characters, and GLM's `call_<24 hex>` is 65 once marked; Anthropic refuses
- * the colons in any marked id. The marker becomes `_` rather than going with
- * its suffix: the suffix is random per call, so it keeps two calls apart where
- * the model's own ids collide.
- *
- * Only the request is rewritten. The stored history keeps the marker, so the
- * same conversation moved back onto Workers AI is stripped by its own provider.
- */
-const workersAIToolCallIds: LanguageModelMiddleware = {
-  transformParams: ({ params }) =>
-    Promise.resolve({
-      ...params,
-      // A case per role: mapped as one union, the assistant's content array
-      // and the tool's type as neither.
-      prompt: params.prompt.map((message) => {
-        switch (message.role) {
-          case "assistant":
-            return { ...message, content: message.content.map(resendable) };
-          case "tool":
-            return { ...message, content: message.content.map(resendable) };
-          default:
-            return message;
-        }
-      })
-    })
-};
-
-function resendable<P extends object>(part: P): P {
-  return "toolCallId" in part && typeof part.toolCallId === "string"
-    ? {
-        ...part,
-        toolCallId: part.toolCallId.replace(WORKERS_AI_TOOL_CALL_MARKER, "_")
-      }
-    : part;
 }

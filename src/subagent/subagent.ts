@@ -108,6 +108,7 @@ export abstract class SubAgent<
     await super.onStart();
   }
 
+  /** Context overflow and nothing else: {@link file://../agent/agent.ts StepAgent} says why, and what it costs. */
   override classifyChatError(error: unknown) {
     return defaultContextOverflowClassifier(error);
   }

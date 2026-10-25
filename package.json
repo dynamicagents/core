@@ -1,6 +1,6 @@
 {
   "name": "@dynamicagents/core",
-  "version": "0.17.0",
+  "version": "0.17.1",
   "description": "Shared, mandatory foundation for Dynamic Agents on Cloudflare Workers: zero-trust A2A, a durable task host, task workflows, and step agents on @cloudflare/think.",
   "keywords": [
     "a2a",
@@ -135,8 +135,7 @@
     "@typescript-eslint/utils": ">=8",
     "agents": ">=0.30.0 <0.31.0",
     "ai": "^7.0.88",
-    "vitest": ">=4 <5",
-    "workers-ai-provider": "^4.0.0"
+    "vitest": ">=4 <5"
   },
   "peerDependenciesMeta": {
     "@ai-sdk/openai": {
@@ -169,7 +168,6 @@
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.70.0",
     "vitest": "^4.1.11",
-    "workers-ai-provider": "^4.0.0",
     "wrangler": "^4.151.1"
   },
   "engines": {
