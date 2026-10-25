@@ -525,8 +525,6 @@ export interface JobDebug {
 export class TestAgent extends StepAgent<TestEnv> {
   protected readonly compactAfterTokens = 100_000;
   protected readonly keepRecentTokens = 20_000;
-  /** just-bash in an agent that never shells out is dead weight. */
-  override workspaceBash = false as const;
 
   /** A parked `test_hold`, by key, with the resolve that frees it. */
   readonly #holding = new Map<string, () => void>();

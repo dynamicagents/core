@@ -176,6 +176,18 @@ export abstract class StepAgent<
   protected static override submissionRecoveryStaleMs = Infinity;
 
   override maxSteps = Infinity;
+  /**
+   * Only the **work** budget is lifted, and the attempt budgets are Think's.
+   *
+   * Work is flushed stream segments, so a long healthy turn and a runaway loop
+   * differ in it only by degree, and a step job's turn is as long as its work
+   * takes. The attempt budgets measure something this class cannot see from the
+   * ledger: `maxAttempts` bounds recovery per incident, and
+   * `maxInterruptedAttempts` bounds attempts that died before finishing, which
+   * is an isolate condemned on every run rather than a turn making progress.
+   * {@link StepAgent.onChatRecovery} answers whether a cut turn is continued at
+   * all; how many times recovery may try before giving up is not that question.
+   */
   override chatRecovery = { maxRecoveryWork: Infinity };
   override contextOverflow = { reactive: true };
   /** A turn's reasoning is not stored — see `./history.ts`. */
