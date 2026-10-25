@@ -26,8 +26,8 @@ export const SEND_REASONING = false;
  *
  * A summary is a paraphrase, and the turn waits for it: a glm-5.3 compaction
  * spent 34,552 characters reasoning to write a 13,650-character summary, over
- * 120 s. `reasoning: "none"` is the AI SDK's provider-neutral switch, which
- * workers-ai-provider sends as `reasoning_effort: null`.
+ * 120 s. `reasoning: "none"` is the AI SDK's provider-neutral switch, which a
+ * Workers AI model sends as `reasoning_effort: null`.
  *
  * `model` is read per compaction, as `compactionModel()` is resolved per call.
  */

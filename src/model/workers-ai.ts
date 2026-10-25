@@ -1,7 +1,8 @@
-import type { LanguageModel } from "ai";
-import { createWorkersAI } from "workers-ai-provider";
+import { createAI, type CloudflareLanguageModelId } from "agents/models/ai-sdk";
+import { wrapLanguageModel, type LanguageModel } from "ai";
 import type { AiEnv } from "../env.js";
 import type { GatewayLogFields } from "./gateway-log.js";
+import { workersAIToolCallIds } from "./tool-call-ids.js";
 
 /** One Workers AI chat model, as an agent's `getModel()` returns it. */
 export interface WorkersAIModelOptions extends GatewayLogFields {
@@ -25,13 +26,19 @@ export interface WorkersAIModelOptions extends GatewayLogFields {
  * binding, see {@link file://./catalog.ts catalogModel} — the `modelId` here is
  * a `@cf/...` id and nothing else.
  *
- * The gateway goes on the **model's** settings and never on the provider's:
- * `workers-ai-provider` resolves `providerGateway ?? modelGateway`, so a
- * gateway on both silently discards the model's `metadata` and `eventId`.
+ * `modelId` stays a `string` rather than the union `createAI` accepts. The
+ * catalogue of ids belongs to the deployment, which reads them from its own
+ * config, and a union here would make every id a consumer configures a compile
+ * error it has to cast away. An id no provider knows is rejected by the gateway
+ * on the first call, which is where an id typed from config has to be checked
+ * anyway.
+ *
+ * Every gateway option goes on the **model** rather than on the provider.
+ * `createAI` merges the two levels with the model's winning, so either would
+ * reach the request, and one level is one place to read.
  *
  * Built per call, never at module scope: bindings are not populated while
- * `wrangler deploy` evaluates the module, and `createWorkersAI` throws without
- * one.
+ * `wrangler deploy` evaluates the module.
  */
 export function workersAIModel(
   env: AiEnv,
@@ -45,15 +52,14 @@ export function workersAIModel(
     eventId,
     sessionAffinity
   } = options;
-  return createWorkersAI({ binding: env.AI })(modelId, {
-    gateway: {
+  return wrapLanguageModel({
+    model: createAI({ binding: env.AI })(modelId as CloudflareLanguageModelId, {
       id: gatewayId,
       ...(metadata ? { metadata } : {}),
-      ...(eventId ? { eventId } : {})
-    },
-    ...(sessionAffinity ? { sessionAffinity } : {}),
-    ...(reasoningEffort !== undefined
-      ? { reasoning_effort: reasoningEffort }
-      : {})
+      ...(eventId ? { eventId } : {}),
+      ...(sessionAffinity ? { sessionAffinity } : {}),
+      ...(reasoningEffort !== undefined ? { reasoningEffort } : {})
+    }),
+    middleware: workersAIToolCallIds
   });
 }
