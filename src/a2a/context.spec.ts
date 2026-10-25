@@ -16,10 +16,15 @@ import {
   type RequestContext,
   type RequestHeaders
 } from "@a2a-js/sdk/server";
+import { verifiedCaller } from "./caller-scope.js";
 import { buildCallContext, extensionHeaders } from "./context.js";
 import { buildBaseCard, type AgentManifest } from "./card.js";
 import type { GatekeeperIdentity } from "./verify.js";
-import { AGENT_ORIGIN, testTask } from "../testing/fixtures.js";
+import {
+  AGENT_ORIGIN,
+  GATEKEEPER_ORIGIN,
+  testTask
+} from "../testing/fixtures.js";
 
 /**
  * The `fetch`-side call-context seam.
@@ -44,6 +49,9 @@ const identity: GatekeeperIdentity = {
   workspaceId: 1
 };
 
+/** The caller the Worker would have built by the time it builds a context. */
+const caller = verifiedCaller(GATEKEEPER_ORIGIN, identity);
+
 /** The tenant these specs address. Named on `params`, never on the context. */
 const TENANT = "context-spec-agent";
 
@@ -59,17 +67,19 @@ describe("buildCallContext", () => {
     // The SDK's own JSON-RPC binding builds its context this way. A tenant set
     // here throws "Tenant is already set." inside the transport, which reaches
     // the caller as an internal error on every single call.
-    expect(buildCallContext(post(), identity).tenant).toBeUndefined();
+    expect(buildCallContext(post(), caller).tenant).toBeUndefined();
   });
 
   it("carries the verified caller as the SDK's authenticated user", () => {
-    // `userName` is the canonical instance key the agent Durable Object is
-    // keyed by, so the SDK's owner-scoped bookkeeping and this Worker's routing
-    // isolate on the same value.
-    const { user } = buildCallContext(post(), identity);
+    // `userName` is the scope the agent Durable Object is named by, so the SDK's
+    // owner-scoped bookkeeping and this Worker's routing isolate on the same
+    // value. The claimed key alone is not that value: two listed gatekeepers may
+    // claim one, and they are served different objects.
+    const { user } = buildCallContext(post(), caller);
 
     expect(user?.isAuthenticated).toBe(true);
-    expect(user?.userName).toBe(identity.key);
+    expect(user?.userName).toBe(caller.scope);
+    expect(user?.userName).not.toBe(identity.key);
   });
 
   it("stashes the request headers where the Express binding stashes them", () => {
@@ -77,7 +87,7 @@ describe("buildCallContext", () => {
     // bindings, or it reaches them under one and not the other.
     const context = buildCallContext(
       post({ "x-correlation-id": "abc123" }),
-      identity
+      caller
     );
     const headers = context.state.get(STATE_HEADERS_KEY) as RequestHeaders;
 
@@ -168,7 +178,7 @@ const send = async (requested?: string) => {
       [A2A_VERSION_HEADER]: A2A_PROTOCOL_VERSION,
       ...(requested ? { [HTTP_EXTENSION_HEADER]: requested } : {})
     }),
-    identity
+    caller
   );
   const result = await rpc.handle(
     {

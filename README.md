@@ -71,8 +71,10 @@ const manifest = {
   skills: []
 };
 
-// One task host per verified caller, keyed by the gatekeeper identity — which
-// is what makes a task unreachable from any other caller by construction.
+// One task host per verified caller, named by the caller's scope: the origin
+// that signed the call and the instance key it claimed, which together are what
+// make a task unreachable from any other caller by construction. See "Callers
+// are scopes" below.
 const myAgent = defineAgent({
   tenant: "my-agent",
   manifest,
@@ -144,6 +146,51 @@ wildcard.
 > [#62](https://github.com/dynamicagents/slack-gatekeeper/pull/62). The two sides do not
 > interoperate across this change in either direction, so they deploy together and
 > registered agents are re-registered.
+
+#### Callers are scopes
+
+`GATEKEEPER_ORIGINS` may list several gatekeepers, and each caller of each of them gets
+its own Durable Object. The name those objects are served under composes two things: the
+origin that **signed** the call, which verification established, and the instance key
+that origin **claimed** in its identity token.
+
+Both halves are needed, and only one of them is the issuer's to write. The allowlist
+answers who may call, and every origin on it answers that identically, so it cannot also
+say whom a caller may act as. Composing the name is what says it: a listed gatekeeper
+naming another gatekeeper's caller key is served its own instance under that key and
+never the other caller's tasks, questions or callbacks.
+
+The same applies to tenants, and the decision is explicit: **a listed origin may address
+every tenant the deployment mounts, and reaches only its own instances of each.**
+Registration is one-directional (a gatekeeper pins the agent's card key, not the
+reverse), so an agent holds no record of which gatekeeper was registered for which
+tenant. A deployment needing that boundary has to carry a per-origin tenant
+authorization of its own; nothing here reads one.
+
+> **A deployment taking this re-keys its callers once.** Objects written before it are
+> named by the bare claimed key, and the name a caller composes now is a different string
+> (save for the collision the next note is about): tasks in flight finish and still call
+> back, but a task parked on a person's answer at that moment can no longer be answered, an
+> unsettled task can no longer be canceled and runs to its own end, and anything a plugin
+> keyed by `callerKey` (a sandbox, a checkout) is created fresh on the next task. Deploy it
+> when little is in flight. There is no fallback to the old name on purpose: where more
+> than one origin is listed, nothing in such an object says which gatekeeper's caller wrote
+> it, so no caller can be handed its contents.
+
+> **The new names are not disjoint from the old ones, and that is the case to check before
+> deploying.** The old name was the claimed key verbatim, and the protocol leaves that an
+> arbitrary string, so a caller minted as `https://gatekeeper.example#remote:7:analytics`
+> already named the object that caller `remote:7:analytics` of
+> `https://gatekeeper.example` composes to afterwards. No naming scheme avoids it, since
+> the old names were every string. What decides whether it matters is who wrote such an
+> object. **Under a single listed origin it stays inside one gatekeeper's own callers:**
+> both the historical caller that wrote the name and the one composing it now are callers
+> that gatekeeper minted keys for, and telling two of its callers apart has always rested
+> on it minting them distinct keys, which nothing on this side can check. A second listed
+> origin is what lets such an object cross between gatekeepers, which is the boundary the
+> composition draws. A deployment that has listed a second origin, and needs the isolation
+> to hold over state already written, moves the affected objects to a Durable Object class
+> the old names were never written to: a new class name and a migration of its own.
 
 ### 3. Write your host, your pipeline and your agent
 

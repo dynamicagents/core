@@ -11,8 +11,10 @@ import { makeGatekeeperToken } from "../testing/auth.js";
 import {
   AGENT_ORIGIN,
   GATEKEEPER_ORIGIN,
+  SECOND_GATEKEEPER_ORIGIN,
   TEST_GATEKEEPER_PRIVATE_JWK,
-  gatekeeperPublicJwks
+  TEST_SECOND_GATEKEEPER,
+  gatekeeperJwksResponse
 } from "../testing/fixtures.js";
 
 /**
@@ -49,11 +51,10 @@ beforeAll(() => {
   vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
     jwksFetches.push(url);
-    if (url === JWKS_URL) {
-      return new Response(gatekeeperPublicJwks(), {
-        headers: { "content-type": "application/json" }
-      });
-    }
+    // Both fixture gatekeepers, so a token honest about being the *other*
+    // listed origin's verifies here as it would in a deployment listing both.
+    const jwks = gatekeeperJwksResponse(url);
+    if (jwks) return jwks;
     return new Response("not found", { status: 404 });
   });
 });
@@ -76,6 +77,43 @@ describe("verifyGatekeeperToken", () => {
     // `key` is the only field anything downstream depends on.
     expect(identity.key).toBe("custom:1:test-agent");
     expect(identity.workspaceId).toBe(1);
+  });
+
+  it("returns the origin it verified against, which no claim can move", async () => {
+    // The issuer is the one half of a caller's identity the issuer does not
+    // write, and routing binds a scope to it, so it has to come from the checks
+    // above rather than from the payload. The identity claim is whatever the
+    // gatekeeper minted, so it can carry a field of that name; nothing reads it,
+    // and this is what holds that open.
+    const token = await makeGatekeeperToken({
+      identity: {
+        key: "custom:1:test-agent",
+        issuer: SECOND_GATEKEEPER_ORIGIN
+      }
+    });
+
+    const { issuer, payload } = await verifyGatekeeperToken(token, {
+      allowedOrigins: [GATEKEEPER_ORIGIN, SECOND_GATEKEEPER_ORIGIN],
+      audience: AGENT_AUDIENCE
+    });
+
+    expect(issuer).toBe(GATEKEEPER_ORIGIN);
+    expect(payload.iss).toBe(GATEKEEPER_ORIGIN);
+  });
+
+  it("returns the second listed origin for a token that origin signed", async () => {
+    // The other direction: the returned issuer tracks who signed, not which
+    // origin happens to be first on the allowlist.
+    const token = await makeGatekeeperToken({
+      gatekeeper: TEST_SECOND_GATEKEEPER
+    });
+
+    const { issuer } = await verifyGatekeeperToken(token, {
+      allowedOrigins: [GATEKEEPER_ORIGIN, SECOND_GATEKEEPER_ORIGIN],
+      audience: AGENT_AUDIENCE
+    });
+
+    expect(issuer).toBe(SECOND_GATEKEEPER_ORIGIN);
   });
 
   it("rejects a token with no jku header (RFC 7515 §4.1.2)", async () => {

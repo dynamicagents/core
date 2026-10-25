@@ -30,6 +30,7 @@ import {
   signCardInPlace,
   type AgentManifest
 } from "../a2a/card.js";
+import { verifiedCaller, type VerifiedCaller } from "../a2a/caller-scope.js";
 import { buildCallContext, extensionHeaders } from "../a2a/context.js";
 import {
   GatekeeperAuthError,
@@ -162,9 +163,10 @@ export interface A2AWorkerOptions<TEnv = A2ASecretsEnv> {
    * behind a single A2A endpoint". A caller names one on every request and this
    * Worker refuses a request that does not.
    *
-   * The tenant chooses *which agent*; the verified `identity.key` chooses
+   * The tenant chooses *which agent*; the verified caller's scope chooses
    * *which instance of it*, so two callers of one tenant stay in separate
-   * Durable Objects.
+   * Durable Objects, and so do two gatekeepers naming one caller key. See
+   * {@link file://../a2a/caller-scope.ts VerifiedCaller}.
    *
    * The escape hatch: use it for an agent whose routing or turn-start is
    * genuinely its own. {@link A2AWorkerOptions.agents} is the shorter form for
@@ -440,10 +442,10 @@ function readContinuation(rpcBody: {
  */
 async function recordReply(
   agent: TenantAgent,
-  identity: GatekeeperIdentity,
+  caller: VerifiedCaller,
   continuation: Continuation
 ): Promise<{ error: { code: number; message: string } } | { taken: boolean }> {
-  const stub = agent.resolveAgent(identity);
+  const stub = agent.resolveAgent(caller);
   const { taskId, messageId, contextId } = continuation;
   try {
     // The one refusal the handler makes after this that recording could get
@@ -520,12 +522,12 @@ const TERMINAL_STATES: ReadonlySet<TaskState | undefined> = new Set([
  */
 async function answerEnded(
   agent: TenantAgent,
-  identity: GatekeeperIdentity,
+  caller: VerifiedCaller,
   taskId: string,
   taken: boolean
 ): Promise<Task | null> {
   if (!taken) return null;
-  const task = await agent.resolveAgent(identity).getTask(taskId);
+  const task = await agent.resolveAgent(caller).getTask(taskId);
   return task && TERMINAL_STATES.has(task.status?.state) ? task : null;
 }
 
@@ -638,7 +640,7 @@ export function createA2AWorker<TEnv extends object>(
     if (!agent) return undefined;
     return {
       manifest: agent.manifest,
-      resolveAgent: (identity) => agent.resolveAgent(env, identity)
+      resolveAgent: (caller) => agent.resolveAgent(env, caller)
     };
   };
   // Only reachable through the first overload, which has already established
@@ -699,16 +701,18 @@ export function createA2AWorker<TEnv extends object>(
 
       let identity: GatekeeperIdentity;
       let authorizedTenant: string;
+      let issuer: string;
       try {
-        ({ identity, tenant: authorizedTenant } = await verifyGatekeeperToken(
-          token,
-          {
-            allowedOrigins: parseGatekeeperOrigins(secrets.gatekeeperOrigins),
-            audience,
-            identityClaim: options.identityClaim,
-            tenantClaim: options.tenantClaim
-          }
-        ));
+        ({
+          identity,
+          tenant: authorizedTenant,
+          issuer
+        } = await verifyGatekeeperToken(token, {
+          allowedOrigins: parseGatekeeperOrigins(secrets.gatekeeperOrigins),
+          audience,
+          identityClaim: options.identityClaim,
+          tenantClaim: options.tenantClaim
+        }));
       } catch (err) {
         const message =
           err instanceof GatekeeperAuthError
@@ -717,14 +721,22 @@ export function createA2AWorker<TEnv extends object>(
         return unauthorized(message);
       }
 
-      // The DO instance is keyed by the verified `identity.key`; without it the
-      // executor cannot route the call — refuse rather than fall back to a
-      // shared instance. Guaranteed non-null past this point.
+      // The DO instance is named by the caller's scope, and the claimed key is
+      // half of it; without a key there is no scope, so the executor cannot
+      // route the call. Refuse rather than fall back to an instance two callers
+      // would share. Guaranteed non-null past this point.
       if (!identity.key) {
         return new Response("bad request: gatekeeper identity missing key", {
           status: 400
         });
       }
+
+      // The verified half and the claimed half, bound into the one name
+      // everything durable about this caller hangs off. Built here, once: a
+      // resolver downstream is handed this and never the bare claim, which is
+      // what stops one listed gatekeeper being served another's objects. See
+      // {@link file://../a2a/caller-scope.ts verifiedCaller}.
+      const caller = verifiedCaller(issuer, identity);
 
       const body = await request.json<string | Record<string, unknown>>();
       // `typeof null === "object"`, so the null check is load-bearing: a body of
@@ -786,7 +798,7 @@ export function createA2AWorker<TEnv extends object>(
       // Built without a tenant: the SDK's transport lifts `params.tenant` onto
       // it, and throws if it arrives carrying one. See
       // {@link file://../a2a/context.ts buildCallContext}.
-      const context = buildCallContext(request, identity);
+      const context = buildCallContext(request, caller);
 
       // v1.0 negotiates the protocol version per request via the `A2A-Version`
       // header, and the SDK leaves enforcement to the transport binding (its
@@ -831,7 +843,7 @@ export function createA2AWorker<TEnv extends object>(
         );
       }
       const recorded = continuation
-        ? await recordReply(agent, identity, continuation)
+        ? await recordReply(agent, caller, continuation)
         : null;
       if (recorded && "error" in recorded) {
         return jsonRpcErrorResponse(body, recorded.error);
@@ -839,9 +851,9 @@ export function createA2AWorker<TEnv extends object>(
 
       const handler = new DefaultRequestHandler(
         card,
-        new DurableTaskStore(identity, agent.resolveAgent),
+        new DurableTaskStore(caller, agent.resolveAgent),
         new A2AExecutor({
-          identity,
+          caller,
           jku: `${origin}${jwksPath}`,
           resolveAgent: agent.resolveAgent
         }),
@@ -876,7 +888,7 @@ export function createA2AWorker<TEnv extends object>(
       if (continuation && recorded && "error" in result) {
         const ended = await answerEnded(
           agent,
-          identity,
+          caller,
           continuation.taskId,
           recorded.taken
         );

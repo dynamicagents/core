@@ -54,6 +54,25 @@ export interface AiEnv {
  * No shared secret ever crosses the boundary in either direction: the agent
  * verifies the gatekeeper with the gatekeeper's public JWKS, and the gatekeeper verifies
  * the agent with the agent's.
+ *
+ * ## What the allowlist decides, and what it does not
+ *
+ * It answers **who may call**, and nothing more: every origin on it satisfies it
+ * equally, so it cannot also answer whom a caller may act as. That second
+ * question is answered by construction rather than by configuration, in
+ * {@link file://./a2a/caller-scope.ts verifiedCaller}: a caller's durable scope
+ * is named by the verified issuing origin together with the instance key the
+ * issuer claimed, so a listed gatekeeper naming another's caller key reaches its
+ * own instance and never that caller's.
+ *
+ * The tenant claim is decided the same way, and the decision is that **a listed
+ * origin may address every tenant this deployment mounts, and reaches only its
+ * own instances of each.** Registration is one-directional (the gatekeeper pins
+ * the agent's card key on first registration, not the reverse), so an agent
+ * holds no record of which gatekeeper was registered for which tenant and
+ * "on the allowlist" is the only caller-side authorization there is. A
+ * deployment that needs a narrower boundary needs a per-origin tenant
+ * authorization carried alongside this value, which nothing here reads yet.
  */
 export interface A2ASecretsEnv {
   A2A_SIGNING_KEY: string;

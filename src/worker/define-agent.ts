@@ -1,5 +1,5 @@
 import type { AgentManifest } from "../a2a/card.js";
-import type { GatekeeperIdentity } from "../a2a/verify.js";
+import type { VerifiedCaller } from "../a2a/caller-scope.js";
 import type { TaskAgent } from "../a2a/agent-stub.js";
 
 /**
@@ -32,7 +32,7 @@ export interface MountedAgent<TEnv> {
   tenant: string;
   /** The transport-independent half of this agent's card. */
   manifest: AgentManifest;
-  resolveAgent(env: TEnv, identity: GatekeeperIdentity): TaskAgent;
+  resolveAgent(env: TEnv, caller: VerifiedCaller): TaskAgent;
 }
 
 export interface DefineAgentOptions<
@@ -47,8 +47,8 @@ export interface DefineAgentOptions<
   /** The transport-independent half of this agent's card. */
   manifest: AgentManifest;
   /**
-   * This agent's Durable Object namespace. One instance per verified caller —
-   * the tenant picks the agent, `identity.key` picks which instance of it.
+   * This agent's Durable Object namespace. One instance per verified caller: the
+   * tenant picks the agent, and the caller's scope picks which instance of it.
    */
   agent: (env: TEnv) => DurableObjectNamespace<TAgent>;
 }
@@ -62,9 +62,14 @@ export interface DefineAgentOptions<
  * every member a Think agent inherits — exceeds TypeScript's instantiation
  * depth. The class comparison is cheap and catches the same mistakes.
  *
- * `resolveAgent` refuses a caller with no key rather than falling back to a
- * shared instance: the key is what makes one caller's tasks unreachable from
- * another's, so a missing one is a routing failure, not a default.
+ * `resolveAgent` names the instance by the caller's **scope**, which binds the
+ * key the gatekeeper claimed to the origin that signed for it. That composition
+ * is what makes one caller's tasks unreachable from another's, including from
+ * another gatekeeper naming the same key, and
+ * {@link file://../a2a/caller-scope.ts verifiedCaller} is where it is explained
+ * and where a caller with no key is refused. The guard below is the floor under
+ * a hand-built caller: a scope is a routing name, so an empty one is a failure
+ * rather than a fallback to an instance two callers would share.
  */
 export function defineAgent<
   TEnv,
@@ -73,12 +78,12 @@ export function defineAgent<
   return {
     tenant: options.tenant,
     manifest: options.manifest,
-    resolveAgent(env, identity) {
-      if (!identity.key) {
-        throw new Error("identity.key is required to route to the agent DO");
+    resolveAgent(env, caller) {
+      if (!caller.scope) {
+        throw new Error("caller.scope is required to route to the agent DO");
       }
       const ns = options.agent(env);
-      return ns.get(ns.idFromName(identity.key)) as unknown as TaskAgent;
+      return ns.get(ns.idFromName(caller.scope)) as unknown as TaskAgent;
     }
   };
 }

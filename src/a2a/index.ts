@@ -64,6 +64,8 @@ export {
   type VerifyOptions
 } from "./verify.js";
 
+export { verifiedCaller, type VerifiedCaller } from "./caller-scope.js";
+
 export {
   A2A_RPC_PATH,
   buildBaseCard,

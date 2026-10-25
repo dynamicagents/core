@@ -6,7 +6,7 @@ import {
   type ListTasksResponse,
   type Task
 } from "@a2a-js/sdk";
-import type { GatekeeperIdentity } from "./verify.js";
+import type { VerifiedCaller } from "./caller-scope.js";
 import type { AgentResolver } from "./agent-stub.js";
 
 /**
@@ -16,30 +16,29 @@ import type { AgentResolver } from "./agent-stub.js";
  *
  * Task state must survive the accept → async callback gap (and answer
  * `GetTask`/`CancelTask`/`ListTasks` across requests), so it lives in the same
- * per-caller DO that runs the task's turns — keyed by the verified
- * `identity.key`, exactly like {@link file://./executor.ts A2AExecutor}. The
- * agent settles the same rows, so this store and the turns share one source of
- * truth.
+ * per-caller DO that runs the task's turns, named by the caller's scope exactly
+ * like {@link file://./executor.ts A2AExecutor}. The agent settles the same
+ * rows, so this store and the turns share one source of truth.
  *
  * v1.0 passes a `ServerCallContext` to every method so a shared store can scope
  * rows by tenant/owner. This store needs none of that: the DO instance it routes
- * to *is* the scope, resolved from the caller identity the Worker verified, so a
- * task is unreachable from any other caller by construction.
+ * to *is* the scope, and that scope binds the key the gatekeeper claimed to the
+ * origin that signed for it ({@link file://./caller-scope.ts VerifiedCaller}),
+ * so a task is unreachable from any other caller by construction, including
+ * from another listed gatekeeper naming this caller's key.
  */
 export class DurableTaskStore implements TaskStore {
   constructor(
-    private readonly identity: GatekeeperIdentity,
+    private readonly caller: VerifiedCaller,
     private readonly resolveAgent: AgentResolver
   ) {}
 
   async load(taskId: string): Promise<Task | undefined> {
-    return (
-      (await this.resolveAgent(this.identity).getTask(taskId)) ?? undefined
-    );
+    return (await this.resolveAgent(this.caller).getTask(taskId)) ?? undefined;
   }
 
   async save(task: Task): Promise<void> {
-    await this.resolveAgent(this.identity).saveTask(task);
+    await this.resolveAgent(this.caller).saveTask(task);
   }
 
   /**
@@ -57,7 +56,7 @@ export class DurableTaskStore implements TaskStore {
    * capability is genuinely optional.
    */
   async list(params: ListTasksRequest): Promise<ListTasksResponse> {
-    const agent = this.resolveAgent(this.identity);
+    const agent = this.resolveAgent(this.caller);
     if (!agent.listTasks) {
       throw new UnsupportedOperationError({
         message: "this agent does not support ListTasks"
