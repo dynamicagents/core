@@ -145,12 +145,16 @@ export function approvalAnswerText(answer: HitlAnswer): string {
 }
 
 /**
- * An approval's answer that did not reach its artifact: it was locked first —
- * by another answer, or by whatever else locks it — or it is gone. The person's
- * answer stands, but it changed nothing, and the model is not told otherwise.
+ * An approval's answer that did not reach its artifact: it had settled or been
+ * locked first — by another answer, or by whatever else ends it — it is not
+ * this caller's to write on, or it is gone. The person's answer stands, but it
+ * changed nothing, and the model is not told otherwise.
+ *
+ * Which of those it was goes unsaid, for the reason {@link UNAPPROVABLE_ARTIFACT}
+ * says nothing either.
  */
 export function unrecordedApprovalText(text: string): string {
-  return `${text}\n\nThis answer was not recorded, so it changed nothing: the artifact is locked, or gone.`;
+  return `${text}\n\nThis answer was not recorded, so it changed nothing: the artifact is closed, not yours to write on, or gone.`;
 }
 
 /**

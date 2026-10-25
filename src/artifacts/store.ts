@@ -68,11 +68,16 @@ export interface ArtifactEntry {
   detail?: ArtifactEntryDetail;
 }
 
-/** An artifact's own row: what it is, and whether it has finished. */
+/** An artifact's own row: what it is, whose it is, and whether it has finished. */
 export interface Artifact {
   token: string;
   kind: string;
   createdAt: number;
+  /**
+   * Whoever opened it, as they named themselves, or `null` for an artifact
+   * opened without saying — see {@link ArtifactStore.open}.
+   */
+  owner: string | null;
   /** The status it settled in, or `null` while it is still running. */
   status: string | null;
   /** Whether its link has been delivered — see {@link ArtifactStore.announce}. */
@@ -93,6 +98,12 @@ export interface AppendResult {
   entry: ArtifactEntry;
   appended: boolean;
   announced: boolean;
+  /**
+   * Whether **this call** locked the artifact, which only a call that asked to
+   * can and only on a note it actually wrote. A replay locks nothing new: the
+   * lock that went with the note is already on the artifact.
+   */
+  locked: boolean;
 }
 
 /** What {@link ArtifactStore.append} is given. */
@@ -120,6 +131,21 @@ export interface ArtifactEntryInput {
    * append's own.
    */
   at?: number;
+}
+
+/** What {@link ArtifactStore.append} is told about the write itself. */
+export interface AppendOptions {
+  /**
+   * Whose artifact the caller believes this is, refusing the write when the
+   * artifact says otherwise — see {@link ArtifactStore.append}.
+   */
+  owner?: string;
+  /**
+   * Lock the artifact in this status, with the note and in the same call — see
+   * {@link ArtifactStore.lock}. A note that is asked to lock and cannot is
+   * refused rather than written, so the two never come apart.
+   */
+  lock?: string;
 }
 
 /**
@@ -170,7 +196,7 @@ const DDL = [
  * {@link ARTIFACT_RETENTION_MS}, so a deployment changing shape meets months of
  * rows it cannot drop and has to know which shape they are in.
  */
-export const CURRENT_SCHEMA_VERSION = 3;
+export const CURRENT_SCHEMA_VERSION = 4;
 
 /** Move a store recorded at `from` up to the shape this build expects. */
 export type SchemaUpgrade = (sql: SqlStorage, from: number) => void;
@@ -188,6 +214,8 @@ const upgrade: SchemaUpgrade = (sql, from) => {
   if (from < 2) sql.exec("ALTER TABLE artifacts ADD COLUMN locked_at INTEGER");
   // 3: an entry's card, as JSON.
   if (from < 3) sql.exec("ALTER TABLE artifact_entries ADD COLUMN detail TEXT");
+  // 4: whose artifact it is, so a token is not authority to write on one.
+  if (from < 4) sql.exec("ALTER TABLE artifacts ADD COLUMN owner TEXT");
 };
 
 /** Runs `fn` as one transaction: the object's `ctx.storage.transactionSync`. */
@@ -262,6 +290,7 @@ type ArtifactRow = {
   token: string;
   kind: string;
   created_at: number;
+  owner: string | null;
   status: string | null;
   announced_at: number | null;
   locked_at: number | null;
@@ -283,8 +312,16 @@ export interface ArtifactStore {
    * note arriving on a task that already has a transcript must find it rather
    * than start a second one, and no caller holds the token between turns.
    * Omitting the key opens a fresh artifact every call.
+   *
+   * `owner` is **whose it is**, as the opener names itself, and it is what
+   * {@link append} asserts against later. An artifact already opened under this
+   * `kind` and `sourceKey` keeps the owner it was opened with: a second caller
+   * arriving on the same key is given that artifact's token and can no more
+   * write on it than any other stranger, which is the fail-closed direction.
+   * Opening without one leaves it `null`, and nothing asserting an owner can
+   * ever write there.
    */
-  open(kind: string, sourceKey?: string): string;
+  open(kind: string, sourceKey?: string, owner?: string): string;
   /** The token `sourceKey` names under `kind`, or `null`. Opens nothing. */
   tokenFor(kind: string, sourceKey: string): string | null;
   /** One artifact by token, or `null` when the token names nothing. */
@@ -300,8 +337,23 @@ export interface ArtifactStore {
    * better than dropping it, though no live reader will see it. A **locked**
    * artifact is the exception, and answers `null` too — except to a replay its
    * key catches, which returns the note as before.
+   *
+   * `options.owner` asserts whose artifact this is meant to be, and a mismatch
+   * answers `null` having written nothing — a replay its key would have caught
+   * included. A caller that passes one is saying it may write here only if the
+   * artifact was opened by it; see {@link open}. Omitting it writes as before,
+   * which is what a writer holding a token nobody else could have named does.
+   *
+   * `options.lock` locks the artifact with the note, in this call. One that
+   * cannot lock answers `null` and writes nothing: a note deciding an artifact
+   * and the lock recording that decision are one act. A replay answers the note
+   * it wrote the first time, locking nothing again.
    */
-  append(token: string, entry: ArtifactEntryInput): AppendResult | null;
+  append(
+    token: string,
+    entry: ArtifactEntryInput,
+    options?: AppendOptions
+  ): AppendResult | null;
   /**
    * Record that this artifact's link has been delivered. Returns whether it
    * applied — `false` for an unknown token and for one already announced, the
@@ -330,12 +382,17 @@ export interface ArtifactStore {
   reopen(token: string): boolean;
   /**
    * Settle this artifact in `status` and refuse every note after it. Returns
-   * whether it applied — `false` for an unknown token and for one already
-   * locked.
+   * whether it applied — `false` for an unknown token, for one already locked,
+   * and for one that has **already settled**, whose status this must not move.
    *
    * For an artifact somebody has acted on: what was approved must be what
    * stays behind the link. Settling alone cannot say that, because a settled
    * artifact still records a late note — see {@link append}.
+   *
+   * That it will not re-stamp a settled artifact is what keeps a status
+   * something somebody agreed to. A page that ended `failed` while an approval
+   * of it was out with a person stays `failed`, and the answer is reported as
+   * unrecorded rather than filed on a page that had already finished.
    */
   lock(token: string, status: string): boolean;
   /** Notes after `afterSequence`, oldest first. Zero reads the whole log. */
@@ -362,6 +419,7 @@ export function makeArtifactStore(
     token: row.token,
     kind: row.kind,
     createdAt: row.created_at,
+    owner: row.owner,
     status: row.status,
     announced: row.announced_at !== null,
     locked: row.locked_at !== null
@@ -390,12 +448,38 @@ export function makeArtifactStore(
   const get = (token: string): Artifact | null => {
     const row = sql
       .exec<ArtifactRow>(
-        `SELECT token, kind, created_at, status, announced_at, locked_at
+        `SELECT token, kind, created_at, owner, status, announced_at, locked_at
            FROM artifacts WHERE token = ?`,
         token
       )
       .toArray()[0];
     return row ? rowTo(row) : null;
+  };
+
+  /**
+   * {@link ArtifactStore.lock}, as a `const` so {@link ArtifactStore.append}
+   * can hold to one rule about what a lock may do rather than restating it.
+   */
+  const lockArtifact = (token: string, status: string): boolean => {
+    const artifact = get(token);
+    if (artifact === null || artifact.locked) return false;
+    // A lock may settle an artifact; it may not move a status it did not
+    // settle. The status a run ended in is that run's answer, and a lock
+    // arriving afterwards is about a page that had already finished.
+    if (artifact.status !== null) return false;
+    // `settled_at` is written outright rather than coalesced: a `status` of
+    // `null` is what the refusal above has just established, and `settle` and
+    // `reopen` write the two columns together, so there is none to keep.
+    const at = now();
+    sql.exec(
+      `UPDATE artifacts SET status = ?, settled_at = ?, locked_at = ?
+         WHERE token = ?`,
+      status,
+      at,
+      at,
+      token
+    );
+    return true;
   };
 
   // A `const`, not a method read off `this`: the store is handed around as a
@@ -415,7 +499,7 @@ export function makeArtifactStore(
     get,
     sweep,
 
-    open(kind, sourceKey) {
+    open(kind, sourceKey, owner) {
       // Before the write, never after: a sweep that ran last would be free to
       // delete the artifact this call just opened.
       sweep();
@@ -425,13 +509,14 @@ export function makeArtifactStore(
       }
       const token = mintArtifactToken();
       sql.exec(
-        `INSERT INTO artifacts (token, kind, source_key, created_at)
-         VALUES (?, ?, ?, ?)
+        `INSERT INTO artifacts (token, kind, source_key, created_at, owner)
+         VALUES (?, ?, ?, ?, ?)
          ON CONFLICT (kind, source_key) DO NOTHING`,
         token,
         kind,
         sourceKey ?? null,
-        now()
+        now(),
+        owner ?? null
       );
       // The insert can have lost to a concurrent open on the same key, in which
       // case the token that won is the one every caller must be given.
@@ -440,10 +525,16 @@ export function makeArtifactStore(
         : (tokenFor(kind, sourceKey) ?? token);
     },
 
-    append(token, entry) {
+    append(token, entry, options = {}) {
       sweep();
       const artifact = get(token);
       if (artifact === null) return null;
+      // Before the replay branch below, not after: a caller that does not own
+      // the artifact learns nothing from it either, not even that a note with
+      // this key is already there.
+      if (options.owner !== undefined && artifact.owner !== options.owner) {
+        return null;
+      }
       const announced = artifact.announced;
       if (entry.key !== undefined) {
         const prior = sql
@@ -454,10 +545,25 @@ export function makeArtifactStore(
             entry.key
           )
           .toArray()[0];
-        if (prior)
-          return { entry: rowToEntry(prior), appended: false, announced };
+        // A replay is the write that already happened, so it answers before the
+        // refusals below rather than through them: the note is there, this call
+        // locks nothing new, and an answer redelivered after its own lock reads
+        // as filed rather than as lost.
+        if (prior) {
+          return {
+            entry: rowToEntry(prior),
+            appended: false,
+            announced,
+            locked: false
+          };
+        }
       }
       if (artifact.locked) return null;
+      // A note that is asked to lock and cannot is refused whole: the note and
+      // the lock are one decision, and recording the note while leaving the
+      // status as whoever settled it left it would report a decision as taken
+      // on a page it never reached.
+      if (options.lock !== undefined && artifact.status !== null) return null;
       const sequence =
         sql
           .exec<{ next: number }>(
@@ -492,7 +598,10 @@ export function makeArtifactStore(
           ...(detail ? { detail } : {})
         },
         appended: true,
-        announced
+        announced,
+        // In this call, with no await and no other write between the two: the
+        // note that decides an artifact is never one another writer overtook.
+        locked: options.lock !== undefined && lockArtifact(token, options.lock)
       };
     },
 
@@ -530,20 +639,7 @@ export function makeArtifactStore(
       return true;
     },
 
-    lock(token, status) {
-      const artifact = get(token);
-      if (artifact === null || artifact.locked) return false;
-      const at = now();
-      sql.exec(
-        `UPDATE artifacts SET status = ?, settled_at = COALESCE(settled_at, ?),
-           locked_at = ? WHERE token = ?`,
-        status,
-        at,
-        at,
-        token
-      );
-      return true;
-    },
+    lock: lockArtifact,
 
     entries(token, afterSequence = 0) {
       return sql

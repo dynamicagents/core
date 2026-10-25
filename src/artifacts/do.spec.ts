@@ -347,16 +347,57 @@ describe("Artifacts — locking", () => {
     ).toEqual(first);
   });
 
-  it("locks a settled artifact too, in the status it is given", async () => {
+  /**
+   * A lock settles an artifact; it does not re-settle one. The status a run
+   * ended in is that run's answer, and a lock arriving afterwards would make a
+   * page that ended `failed` read as approved by somebody who approved what the
+   * page said before it failed.
+   */
+  it("leaves a settled artifact's status where it is, and locks nothing", async () => {
     const artifacts = fresh("lock-settled");
     const token = await artifacts.createArtifact("plan");
     await artifacts.settle(token, "completed");
 
-    expect(await artifacts.lock(token, "failed")).toBe(true);
+    expect(await artifacts.lock(token, "failed")).toBe(false);
+    expect(await artifacts.readArtifact(token)).toMatchObject({
+      status: "completed",
+      locked: false
+    });
+  });
+
+  /**
+   * The note and its lock are one decision, so a lock that cannot apply takes
+   * the note with it: filing the answer while leaving the status as somebody
+   * else settled it would report a decision as taken on a page it never
+   * reached. A settled artifact still takes an ordinary note, which is what
+   * `append` has always done.
+   */
+  it("refuses the whole call when the lock it asks for would re-stamp a settled artifact", async () => {
+    const artifacts = fresh("lock-settled-note");
+    const token = await artifacts.createArtifact("plan");
+    await artifacts.addEntry(token, { label: "plan", text: "the plan" });
+    await artifacts.settle(token, "failed");
+
+    expect(
+      await artifacts.addEntry(
+        token,
+        { label: "approval", text: "Approved.", key: "answer" },
+        { lock: "approved" }
+      )
+    ).toBeNull();
     expect(await artifacts.readArtifact(token)).toMatchObject({
       status: "failed",
-      locked: true
+      locked: false,
+      entries: [{ sequence: 1, text: "the plan" }]
     });
+    // Without the lock it is an ordinary late note, and those are recorded.
+    expect(
+      await artifacts.addEntry(token, {
+        label: "approval",
+        text: "Rejected.",
+        key: "answer"
+      })
+    ).toMatchObject({ sequence: 2 });
   });
 
   it("ends a live stream, as a settle does", async () => {
@@ -450,10 +491,101 @@ describe("Artifacts — reading one back", () => {
 
     expect(await artifacts.artifactState(token)).toEqual({
       kind: "plan",
+      owner: null,
       status: "approved",
       locked: true
     });
     expect(await artifacts.artifactState("Q".repeat(40))).toBeNull();
+  });
+
+  it("answers the owner it was opened with, which is what a writer asks about", async () => {
+    const artifacts = fresh("state-owner");
+    const token = await artifacts.createArtifact(
+      "plan",
+      undefined,
+      "custom:1:mine"
+    );
+
+    expect(await artifacts.artifactState(token)).toMatchObject({
+      owner: "custom:1:mine"
+    });
+    expect(await artifacts.readArtifact(token)).toMatchObject({
+      owner: "custom:1:mine"
+    });
+  });
+});
+
+describe("Artifacts — a write that asserts whose artifact it is", () => {
+  it("records the note for the caller that opened it", async () => {
+    const artifacts = fresh("owner-match");
+    const token = await artifacts.createArtifact(
+      "plan",
+      undefined,
+      "custom:1:mine"
+    );
+
+    expect(
+      await artifacts.addEntry(
+        token,
+        { label: "plan", text: "the plan" },
+        { owner: "custom:1:mine" }
+      )
+    ).toMatchObject({ sequence: 1 });
+  });
+
+  /**
+   * The sequence the advisory this guards against turns on: holding the token
+   * is holding the link, and a link is shared by design, so a second caller
+   * naming it must not be able to write on the page or close it.
+   */
+  it("refuses another caller's note, its lock, and everything it would otherwise learn", async () => {
+    const artifacts = fresh("owner-mismatch");
+    const token = await artifacts.createArtifact(
+      "plan",
+      undefined,
+      "custom:1:mine"
+    );
+    const mine = await artifacts.addEntry(
+      token,
+      { label: "plan", text: "the plan", key: "v1" },
+      { owner: "custom:1:mine" }
+    );
+    expect(mine).toMatchObject({ sequence: 1 });
+
+    expect(
+      await artifacts.addEntry(
+        token,
+        { label: "approval", text: "Approved.", key: "theirs" },
+        { owner: "custom:2:theirs", lock: "approved" }
+      )
+    ).toBeNull();
+    // The replay path answers a stranger no differently: a note it did not
+    // write is not news it is owed, and the key it guessed is not a way in.
+    expect(
+      await artifacts.addEntry(
+        token,
+        { label: "plan", text: "the plan", key: "v1" },
+        { owner: "custom:2:theirs" }
+      )
+    ).toBeNull();
+    expect(await artifacts.readArtifact(token)).toMatchObject({
+      status: null,
+      locked: false,
+      entries: [{ sequence: 1, text: "the plan" }]
+    });
+  });
+
+  it("refuses every write on an artifact opened without an owner", async () => {
+    const artifacts = fresh("owner-none");
+    const token = await artifacts.createArtifact("plan");
+
+    expect(
+      await artifacts.addEntry(
+        token,
+        { label: "approval", text: "Approved." },
+        { owner: "custom:1:mine" }
+      )
+    ).toBeNull();
   });
 });
 
@@ -532,6 +664,26 @@ describe("Artifacts — the event stream", () => {
     });
     // Ends, rather than idling on a run that will never say anything again.
     expect(await stream.next()).toBeNull();
+  });
+
+  /**
+   * The read door is the token, and a reader holding one is not told whose page
+   * it is: the owner is a caller key, and the stream goes to anybody the link
+   * reached.
+   */
+  it("tells a reader nothing about the owner", async () => {
+    const artifacts = fresh("stream-owner");
+    const token = await artifacts.createArtifact(
+      KIND,
+      undefined,
+      "custom:7:analytics"
+    );
+
+    const stream = frames(await artifacts.fetch(eventsRequest(token)));
+    expect(await stream.next()).toEqual({
+      event: "ready",
+      data: { kind: KIND, status: null, now: expect.any(Number) }
+    });
   });
 
   it("serves a settled artifact whole and ends immediately", async () => {
