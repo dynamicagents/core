@@ -132,7 +132,7 @@
     "@cloudflare/vitest-plugin": ">=1",
     "@modelcontextprotocol/client": ">=2.0.0",
     "@typescript-eslint/utils": ">=8",
-    "agents": ">=0.28.0 <0.29.0",
+    "agents": ">=0.30.0 <0.31.0",
     "ai": "^7.0.88",
     "vitest": ">=4 <5",
     "workers-ai-provider": "^4.0.0"
@@ -157,7 +157,7 @@
     "@cloudflare/vitest-plugin": "^1.4.4",
     "@modelcontextprotocol/client": "^2.0.0",
     "@types/node": "^26.5.1",
-    "agents": "^0.28.0",
+    "agents": "^0.30.1",
     "ai": "^7.0.101",
     "eslint": "^10.10.0",
     "happy-dom": "^21.0.3",
