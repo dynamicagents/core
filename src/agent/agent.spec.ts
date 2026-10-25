@@ -84,11 +84,10 @@ function harnessFor(label: string, binding: AgentBinding = "TEST_AGENT") {
   return {
     harness,
     /**
-     * The verified caller this harness speaks as, and so the name the agent's
-     * object is keyed by: what an artifact of its own is owned by. See
-     * `StepAgent.callerKey`.
+     * The name the agent's object is keyed by, and so what an artifact of its
+     * own is owned by. See `StepAgent.callerKey`.
      */
-    key,
+    scope,
     agent,
     stub,
     host,
@@ -621,7 +620,7 @@ describe("asking the caller", () => {
 describe("asking the caller to approve an artifact", () => {
   /**
    * An open artifact holding one note, as a plan is before anyone approves it,
-   * owned by `owner`: the caller key of whoever may ask about it. Passing none
+   * owned by `owner`: the scope of whoever may ask about it. Passing none
    * leaves it owned by nobody, which is both a row written before the owner
    * column existed and anything a writer opened without saying.
    */
@@ -633,9 +632,9 @@ describe("asking the caller to approve an artifact", () => {
   }
 
   it("parks on an approval carrying the artifact's link", async () => {
-    const { harness, key } = harnessFor("approve-park");
+    const { harness, scope } = harnessFor("approve-park");
     using _ = harness.interceptGatekeeper();
-    const token = await plan(key);
+    const token = await plan(scope);
 
     const accepted = await harness.send(`approve-artifact:${token}`);
     const [parked] = await asked(harness, accepted.id);
@@ -653,9 +652,9 @@ describe("asking the caller to approve an artifact", () => {
   });
 
   it("locks an approved artifact, and tells the model", async () => {
-    const { harness, key } = harnessFor("approve-yes");
+    const { harness, scope } = harnessFor("approve-yes");
     using _ = harness.interceptGatekeeper();
-    const token = await plan(key);
+    const token = await plan(scope);
 
     const accepted = await harness.send(`approve-artifact:${token}`);
     const [parked] = await asked(harness, accepted.id);
@@ -682,9 +681,9 @@ describe("asking the caller to approve an artifact", () => {
    * prose, and a model shown enough of them stops calling the tool.
    */
   it("leaves the question in the history as the call it was, artifact and all", async () => {
-    const { harness, agent, key } = harnessFor("approve-history");
+    const { harness, agent, scope } = harnessFor("approve-history");
     using _ = harness.interceptGatekeeper();
-    const token = await plan(key);
+    const token = await plan(scope);
 
     const accepted = await harness.send(`approve-artifact:${token}`);
     const [parked] = await asked(harness, accepted.id);
@@ -712,9 +711,9 @@ describe("asking the caller to approve an artifact", () => {
   });
 
   it("records a rejection and a comment without locking", async () => {
-    const { harness, key } = harnessFor("approve-no");
+    const { harness, scope } = harnessFor("approve-no");
     using _ = harness.interceptGatekeeper();
-    const token = await plan(key);
+    const token = await plan(scope);
 
     const rejected = await harness.send(`approve-artifact:${token}`);
     const [first] = await asked(harness, rejected.id);
@@ -751,9 +750,9 @@ describe("asking the caller to approve an artifact", () => {
    * than read "Approved." for an approval that did not take.
    */
   it("tells the model an answer that another answer overtook", async () => {
-    const { harness, key } = harnessFor("approve-race");
+    const { harness, scope } = harnessFor("approve-race");
     using _ = harness.interceptGatekeeper();
-    const token = await plan(key);
+    const token = await plan(scope);
 
     const first = await harness.send(`approve-artifact:${token}`);
     const [a] = await asked(harness, first.id);
@@ -779,9 +778,9 @@ describe("asking the caller to approve an artifact", () => {
   });
 
   it("files only the approval of a form that also asks a choice", async () => {
-    const { harness, key } = harnessFor("approve-form");
+    const { harness, scope } = harnessFor("approve-form");
     using _ = harness.interceptGatekeeper();
-    const token = await plan(key);
+    const token = await plan(scope);
 
     const accepted = await harness.send(`approve-form:${token}`);
     const [parked] = await asked(harness, accepted.id);
@@ -813,7 +812,7 @@ describe("asking the caller to approve an artifact", () => {
    * Nothing is parked, and the turn does not end on the call: the call fails,
    * and the model reads why and carries on in the same turn.
    *
-   * Each case is handed the caller key of the agent that will ask, so a case
+   * Each case is handed the scope of the agent that will ask, so a case
    * about *whose* artifact it is can open one owned by somebody else.
    */
   it.each([
@@ -842,9 +841,9 @@ describe("asking the caller to approve an artifact", () => {
     // that cannot be wrong.
     ["one with no owner at all", async () => plan()]
   ])("tells the model it cannot ask about %s", async (_label, make) => {
-    const { harness, key } = harnessFor("approve-refused");
+    const { harness, scope } = harnessFor("approve-refused");
     using _ = harness.interceptGatekeeper();
-    const artifact = await make(key);
+    const artifact = await make(scope);
 
     const accepted = await harness.send(`approve-artifact:${artifact}`);
     const done = await harness.waitForTerminal(accepted.id);
@@ -869,7 +868,7 @@ describe("asking the caller to approve an artifact", () => {
     const owner = harnessFor("approve-owner");
     const stranger = harnessFor("approve-stranger");
     using _ = stranger.harness.interceptGatekeeper();
-    const token = await plan(owner.key);
+    const token = await plan(owner.scope);
 
     const accepted = await stranger.harness.send(`approve-artifact:${token}`);
     await stranger.harness.waitForTerminal(accepted.id);
@@ -877,7 +876,7 @@ describe("asking the caller to approve an artifact", () => {
     expect(
       await requireArtifactsStub(testEnv).readArtifact(token)
     ).toMatchObject({
-      owner: owner.key,
+      owner: owner.scope,
       status: null,
       locked: false,
       entries: [{ label: "plan", text: "the plan" }]
@@ -891,15 +890,12 @@ describe("asking the caller to approve an artifact", () => {
    * finished. The model is told its answer changed nothing.
    */
   it("records nothing when the artifact settled while the question was out", async () => {
-    const { harness, key } = harnessFor("approve-settled-late");
+    const { harness, scope } = harnessFor("approve-settled-late");
     using _ = harness.interceptGatekeeper();
-    const token = await plan(key);
+    const token = await plan(scope);
 
     const accepted = await harness.send(`approve-artifact:${token}`);
-    const [parked] = await harness.waitForState(
-      accepted.id,
-      "TASK_STATE_INPUT_REQUIRED"
-    );
+    const [parked] = await asked(harness, accepted.id);
     await requireArtifactsStub(testEnv).settle(token, "failed");
     await harness.answer(accepted.id, questionOf(parked).requestId, {
       q1: { optionIds: ["approve"] }
