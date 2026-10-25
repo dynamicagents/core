@@ -13,7 +13,9 @@ import type { LanguageModelMiddleware } from "ai";
  * reached Workers AI through `createAI`.
  *
  * It is not written any more, and nothing strips it on the way out either: the
- * provider that both appended and removed it is gone from the dependency tree.
+ * provider that both appended and removed it is no longer what this package
+ * reaches Workers AI through. It is still in the installed tree, as Think's own
+ * dependency, which is why a stored id can carry a marker no code here writes.
  * So a conversation older than that change still holds marked ids, and they go
  * to whichever provider the conversation is on now.
  */
