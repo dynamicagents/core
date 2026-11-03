@@ -92,7 +92,10 @@ export default defineConfig({
       {
         test: {
           name: "node",
-          include: ["src/**/*.node.spec.ts"]
+          // The build scripts are covered here too: they are Node, and
+          // `scripts/references.mjs` ships in this package's `bin`, so it is the
+          // one script a consumer runs rather than reads.
+          include: ["src/**/*.node.spec.ts", "scripts/**/*.node.spec.mjs"]
         }
       }
     ]

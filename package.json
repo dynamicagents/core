@@ -27,12 +27,15 @@
   "type": "module",
   "sideEffects": false,
   "bin": {
-    "da-keys": "scripts/generate-keys.mjs"
+    "da-keys": "scripts/generate-keys.mjs",
+    "da-verify-references": "scripts/verify-references.mjs"
   },
   "files": [
     "dist",
     "eslint-rules",
     "scripts/generate-keys.mjs",
+    "scripts/references.mjs",
+    "scripts/verify-references.mjs",
     "README.md",
     "LICENSE"
   ],
@@ -111,11 +114,12 @@
     "types:check": "wrangler types --include-env=false --check && node scripts/verify-runtime-types.mjs",
     "format": "prettier --write .",
     "lint": "eslint .",
-    "check": "npm run verify:peer-ranges && npm run types:check && prettier --check . && eslint . && tsc && tsc -p test/tsconfig.json && npm run build",
+    "check": "npm run verify:peer-ranges && npm run verify:references && npm run types:check && prettier --check . && eslint . && tsc && tsc -p test/tsconfig.json && npm run build",
     "test": "vitest run",
     "test:watch": "vitest",
     "verify:exports": "node scripts/verify-exports.mjs",
     "verify:peer-ranges": "node scripts/verify-peer-ranges.mjs",
+    "verify:references": "node scripts/verify-references.mjs",
     "prepack": "npm run build && npm run verify:exports",
     "prepublishOnly": "npm run check && npm test && npm run verify:exports",
     "prepare": "husky || true && npm run build"
