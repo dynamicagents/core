@@ -39,10 +39,9 @@ export const ARTIFACTS_OBJECT_NAME = "artifacts";
 /**
  * Thrown when `ARTIFACTS` is not bound — the wiring fault, named.
  *
- * Carries the fix rather than the symptom, on the same principle as
- * {@link file://../runtime/index.ts RuntimeSetupError}: what reaches a person
- * is a Durable Object that would not start, and the only useful thing to say
- * at that moment is which lines are missing and which files they go in.
+ * Carries the fix rather than the symptom: what reaches a person is a Durable
+ * Object that would not start, and the only useful thing to say at that moment
+ * is which lines are missing and which files they go in.
  */
 export class ArtifactsNotBoundError extends Error {
   constructor() {

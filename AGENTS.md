@@ -289,10 +289,11 @@ passing on 5 today is a margin nobody has measured.
 ## Working here
 
 ```bash
-npm run check     # peer ranges + types:check + prettier + eslint + tsc x2 + build
+npm run check     # peer ranges + comment paths + types:check + prettier + eslint + tsc x2 + build
 npm test          # vitest, inside real workerd
 npm run keys      # generate an Ed25519 A2A_SIGNING_KEY
 npm run types     # regenerate worker-configuration.d.ts, then commit it
+npm run verify:references   # every path a comment names is there
 ```
 
 `worker-configuration.d.ts` is generated but **committed**: it is an input to
@@ -340,8 +341,13 @@ changes a decision. Not what changed, not when, not what a previous version said
   counts. Every one of these was wrong within a release. Name the thing, not how
   many there are.
 - **Cross-file references name a real path**, and a path in a comment is
-  checkable — so check it before you write it. Nothing in `check` verifies these
-  for you here.
+  checkable — so `check` checks it, through `npm run verify:references`. Both
+  classes: a relative one and one from the repository root. The checker is
+  `scripts/references.mjs`, whose header is the home of what it reads and why
+  only comments count; what this package scans, and the paths that are
+  deliberately somebody else's, are in `references.config.mjs`. This package
+  publishes it as the `da-verify-references` bin, so the consumers run this
+  checker rather than a copy of it.
 
 If a comment is longer than the code it explains, ask what decision it is
 protecting. Usually one paragraph of that is doing the work.
