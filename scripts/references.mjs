@@ -119,22 +119,51 @@ function hashSpans(text) {
  * are tracked too, by brace depth, so a nested template literal cannot end the
  * outer one early and shift every span after it.
  *
- * **Regex literals are not lexed, and two rules stand in for lexing them.** A `/`
- * escaped by a backslash opens nothing, which is sound rather than a guess: outside
- * a string, a `\` before a `/` can only be inside a regex. And a `//` opens a line
- * comment only at the start of a line or after whitespace, which is where every one
- * prettier formats lives. Between them they cover both shapes this train actually
- * writes, `/\/*$/` and `[//]`, each of which had been read as opening a comment.
+ * **Regex literals are read, because every delimiter can appear inside one.** A
+ * `` /[`]/ `` is the worst of them: taken for a template literal it opens a frame
+ * that no newline closes, and the scan then goes blind to the next backtick in the
+ * file, which is a comment disappearing rather than a failure anybody sees. `[/*]`
+ * and `/\/*$/` are the other direction, a comment opening inside a regex and
+ * swallowing the code after it. So a `/` in a regex position is consumed with its
+ * escapes and its character classes, and `regexEnd` holds what bounds a wrong guess.
  *
- * What is left outside those rules is a `/*` or `//` inside a character class, as
- * `[/*]` would be. Nothing here writes one, and the cost if something does is a span
- * running to the next `*​/`: the comments inside it are still read, so the failure is
- * a reference found in code rather than a comment going unseen.
+ * Comments win over a regex, which is the language's own order: `//` and `/*` are
+ * always comments, and an empty regex has to be written `/(?:)/`. The guards below
+ * stay as a second rule each, for the case where the `/` was read as division.
  */
+/** Characters that can end a value, after which a `/` divides. */
+const VALUE_END = /[\w$)\]]/;
+
+/** Names that take an expression after them, so a `/` there opens a regex. */
+const KEYWORD_BEFORE_REGEX =
+  /(?:^|[^\w$])(return|typeof|instanceof|in|of|new|delete|void|case|do|else|yield|await)$/;
+
+/**
+ * Where the regex literal opening at `from` closes, or -1 if it does not.
+ *
+ * A regex literal cannot carry a raw newline, so running into one means that `/`
+ * divided after all. That is what bounds a wrong guess about which it was to the
+ * line the guess was made on, the same way an unterminated quote is bounded.
+ */
+function regexEnd(text, from) {
+  let inClass = false;
+  for (let i = from + 1; i < text.length; i += 1) {
+    const c = text[i];
+    if (c === "\\") i += 1;
+    else if (c === "\n") return -1;
+    else if (inClass) inClass = c !== "]";
+    else if (c === "[") inClass = true;
+    else if (c === "/") return i;
+  }
+  return -1;
+}
+
 function codeSpans(text) {
   const spans = [];
   /** Open quotes and interpolations, innermost last. */
   const stack = [];
+  /** Whether the last token read could end a value. See `VALUE_END`. */
+  let valueBefore = false;
   for (let i = 0; i < text.length; i += 1) {
     const c = text[i];
     const frame = stack.at(-1);
@@ -142,16 +171,19 @@ function codeSpans(text) {
     if (frame?.quote) {
       if (c === "\\") i += 1;
       // A `'` or `"` string cannot carry a raw newline, so one still open at the
-      // end of a line was never a string: the quote was a character inside a
-      // regex literal, which this does not lex. Closing it here is the language's
-      // own rule, and it is what bounds that to the line it happened on. Without
-      // it, the `"` inside a regex went on swallowing text until the next quote
-      // in the file, which cost a doc comment and the reference in it.
+      // end of a line was never a string: the quote was a character inside
+      // something this read as code. Closing it here is the language's own rule,
+      // and it bounds that to the line it happened on. Without it, a `"` inside a
+      // regex went on swallowing text to the next quote in the file, which cost a
+      // doc comment and the reference in it.
       else if (frame.quote !== "`" && c === "\n") stack.pop();
       else if (frame.quote === "`" && c === "$" && text[i + 1] === "{") {
         stack.push({ braces: 0 });
         i += 1;
-      } else if (c === frame.quote) stack.pop();
+      } else if (c === frame.quote) {
+        stack.pop();
+        valueBefore = true;
+      }
       continue;
     }
 
@@ -172,8 +204,8 @@ function codeSpans(text) {
       continue;
     }
 
-    // An escaped slash is inside a regex literal, so it opens nothing. The header
-    // says why that is sound and what it leaves out.
+    // The second rule, for a `/` this read as division when it was a regex: an
+    // escaped slash is only ever inside one, so it opens nothing.
     if (c === "/" && text[i - 1] === "\\") continue;
 
     if (c === "/" && text[i + 1] === "*") {
@@ -184,6 +216,8 @@ function codeSpans(text) {
       continue;
     }
 
+    // The same second rule for a line comment: a `//` opens one at the start of a
+    // line or after whitespace, which is where every one prettier formats lives.
     if (
       c === "/" &&
       text[i + 1] === "/" &&
@@ -193,7 +227,25 @@ function codeSpans(text) {
       const stop = end === -1 ? text.length : end;
       spans.push({ start: i, text: text.slice(i, stop) });
       i = stop - 1;
+      continue;
     }
+
+    // Not a comment, so a `/` here is a regex literal or a division. Reading the
+    // regex is what keeps its delimiters out of everything above.
+    if (c === "/") {
+      const regexHere =
+        !valueBefore ||
+        // `trimEnd`, because the keyword has whitespace after it: `return /x/`.
+        KEYWORD_BEFORE_REGEX.test(text.slice(Math.max(0, i - 24), i).trimEnd());
+      const end = regexHere ? regexEnd(text, i) : -1;
+      if (end !== -1) {
+        i = end;
+        valueBefore = true;
+        continue;
+      }
+    }
+
+    if (!/\s/.test(c)) valueBefore = VALUE_END.test(c);
   }
   return spans;
 }

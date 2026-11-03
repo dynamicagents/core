@@ -139,6 +139,57 @@ describe("the comment lexer", () => {
     expect(found).toEqual([]);
   });
 
+  it("does not read a backtick inside a regex as opening a template literal", async () => {
+    // The worst of the delimiters: a template frame closes on no newline, so this
+    // one blinded the scan to the next backtick in the file, and a comment going
+    // unseen is the failure nobody notices.
+    const found = await failures({
+      "src/a.ts": [
+        "const tick = /[`]/;",
+        "// see ./gone.ts",
+        "/** and ./also-gone.ts */",
+        ""
+      ].join("\n")
+    });
+
+    expect(refs(found)).toEqual(["./gone.ts", "./also-gone.ts"]);
+  });
+
+  it("does not read a `/*` inside a regex character class as opening a comment", async () => {
+    const found = await failures({
+      "src/a.ts": 'const chars = /[/*]/; const hint = "./gone.ts";\n'
+    });
+
+    expect(found).toEqual([]);
+  });
+
+  it("reads a division as a division, so the comment after it still counts", async () => {
+    const found = await failures({
+      "src/a.ts": [
+        "const half = total / 2; // see ./gone.ts",
+        "const ratio = (a + b) / c; // and ./also-gone.ts",
+        ""
+      ].join("\n")
+    });
+
+    expect(refs(found)).toEqual(["./gone.ts", "./also-gone.ts"]);
+  });
+
+  it("reads a regex where a keyword puts one, not a division", async () => {
+    const found = await failures({
+      "src/a.ts": [
+        "export const match = (s) => {",
+        '  if (typeof s !== `string`) return /[`"]/.test(String(s));',
+        "  return s;",
+        "};",
+        "// see ./gone.ts",
+        ""
+      ].join("\n")
+    });
+
+    expect(refs(found)).toEqual(["./gone.ts"]);
+  });
+
   it("does not read an escaped slash in a regex as opening a block comment", async () => {
     // The measurement: `/\/*$/` is in starter, and its `\/*` was read as opening
     // a comment that ran to the next `*​/`, which put the code in between into a
