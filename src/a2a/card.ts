@@ -26,6 +26,11 @@ export { A2A_RPC_PATH } from "@dynamicagents/g2a-protocol";
  * Derived from the SDK `AgentCard` rather than hand-declared so a protocol field
  * that gains a requirement fails the build here instead of silently going
  * unadvertised.
+ *
+ * `capabilities.extensions` is such a field: required and repeated in A2A v1.0,
+ * so every manifest declares it, and `[]` is the declaration that the agent has
+ * no protocol extensions. `extendedAgentCard` goes the other way:
+ * {@link buildBaseCard} forces it on, so a manifest never sets it.
  */
 export type AgentManifest = Pick<
   AgentCard,
@@ -123,9 +128,10 @@ export function buildBaseCard(
   return {
     ...manifest,
     capabilities: {
-      // `extensions` is required on the proto type but absent from most
-      // hand-written manifests, so it is defaulted before the spread rather
-      // than after — a manifest that declares extensions keeps them.
+      // Defaulted here because a manifest may set `capabilities: undefined`, and
+      // before the spread rather than after, so a manifest that declares
+      // extensions keeps them. {@link AgentManifest} says why a manifest
+      // carries the field at all.
       extensions: [],
       ...manifest.capabilities,
       // Forced on, not inherited from the manifest: an agent here is *only*
