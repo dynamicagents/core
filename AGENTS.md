@@ -266,13 +266,38 @@ and every subpath core reaches past the root. That ceiling is not a number anyon
 `--latest` reports when a release lands outside it, so widening it becomes a
 deliberate act after a green suite rather than a guess made in advance.
 
+**`just-bash` is a peer this package never imports**, and it is declared for the
+reason `@cloudflare/computer` is: a consumer should be told what it is
+installing rather than receive it as a peer of a peer. Think imports
+`agents/skills/runner`, which imports `just-bash`, so it is in the module graph
+of anything that bundles this package, and `agents` declares it only as an
+_optional_ peer. It used to arrive free as a real dependency of
+`@cloudflare/computer`, which moved it to an optional peer of its own, and the
+day that happened every consumer's build began failing on an unresolved import
+with nothing in any manifest naming the cause. The range is the intersection of
+what `agents` and `@cloudflare/computer` ask for. Nothing here calls it, so no
+import will ever tell you it is missing: `verify:peer-ranges` is the only thing
+holding it.
+
 **`vitest` has a ceiling for a failure that is not core's**, and it is the one to
 re-read on a dependency round. On vitest 5 the Workers pool crashes workerd
 mid-suite: spec files die before reporting a test, and workerd's log names the
 reason — `WebSocket protocol error; statusCode = 1009; description = Message is
 too large`. A file that dies that way leaves the run red but its tests absent
 from the count rather than failed, so what is lost shows up in the totals and
-nowhere else. **Which suites it takes, and why, is not established.**
+nowhere else.
+
+**It takes this suite, measured.** On vitest 5.1.0, against the same tree that
+passes 41 files and 685 tests on 4.1.12, the run reports 32 files passed of 41
+and 504 tests passed of 505: eight files lose their worker and take 180 tests
+with them, uncounted, and workerd logs the 1009 reason above. The eight are
+`src/a2a/cross-gatekeeper.spec.ts`, `src/agent/step-jobs.spec.ts`,
+`src/alarm/index.spec.ts`, `src/artifacts/boot.spec.ts`,
+`src/artifacts/do.spec.ts`, `src/artifacts/store.spec.ts`,
+`src/task/tasks.spec.ts` and `src/workflow/workflow.spec.ts`. **Why those, and
+not others, is still not established**, though every one of them drives a
+Durable Object through many round trips, which is the shape the reason suggests.
+
 cloudflare/workers-sdk#16331 is the upstream bug and reports the same crash
 reason, but its trigger is a `setupFiles` entry importing `cloudflare:test` with
 one worker running several files — this suite has no setup file — and its
