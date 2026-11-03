@@ -67,7 +67,7 @@ export const RELATIVE = new RegExp(
   "g"
 );
 
-const escape = (literal) => literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const escapeMeta = (literal) => literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
  * A path from the repository root, resolved against it.
@@ -79,7 +79,7 @@ const escape = (literal) => literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
  */
 export const rootedPattern = (scan) =>
   new RegExp(
-    `(?<![\\w/.-])(?:${scan.map(escape).join("|")})/` +
+    `(?<![\\w/.-])(?:${scan.map(escapeMeta).join("|")})/` +
       `[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\\.${TARGET}`,
     "g"
   );
@@ -119,10 +119,17 @@ function hashSpans(text) {
  * are tracked too, by brace depth, so a nested template literal cannot end the
  * outer one early and shift every span after it.
  *
- * A `//` opens a line comment only at the start of a line or after whitespace.
- * That is what makes it unnecessary to lex regex literals: `/\/\//` carries a
- * `//` preceded by a backslash, and prettier puts a space before every trailing
- * comment it formats.
+ * **Regex literals are not lexed, and two rules stand in for lexing them.** A `/`
+ * escaped by a backslash opens nothing, which is sound rather than a guess: outside
+ * a string, a `\` before a `/` can only be inside a regex. And a `//` opens a line
+ * comment only at the start of a line or after whitespace, which is where every one
+ * prettier formats lives. Between them they cover both shapes this train actually
+ * writes, `/\/*$/` and `[//]`, each of which had been read as opening a comment.
+ *
+ * What is left outside those rules is a `/*` or `//` inside a character class, as
+ * `[/*]` would be. Nothing here writes one, and the cost if something does is a span
+ * running to the next `*​/`: the comments inside it are still read, so the failure is
+ * a reference found in code rather than a comment going unseen.
  */
 function codeSpans(text) {
   const spans = [];
@@ -164,6 +171,10 @@ function codeSpans(text) {
       else frame.braces -= 1;
       continue;
     }
+
+    // An escaped slash is inside a regex literal, so it opens nothing. The header
+    // says why that is sound and what it leaves out.
+    if (c === "/" && text[i - 1] === "\\") continue;
 
     if (c === "/" && text[i + 1] === "*") {
       const end = text.indexOf("*/", i + 2);
@@ -213,14 +224,26 @@ export function references(file, text, rooted) {
   return found.sort((one, other) => one.index - other.index);
 }
 
-const list = (value, key) => {
-  if (value === undefined) return DEFAULT_CONFIG[key];
-  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string"))
-    throw new Error(`${CONFIG_FILE}: \`${key}\` must be an array of strings.`);
+/**
+ * A list of strings, or the default for that key.
+ *
+ * `scan` may not be empty, and that is not pedantry: it also names the prefixes a
+ * rooted reference may start with, so an empty one builds a pattern whose
+ * alternation matches nothing and therefore matches *anything* beginning with a
+ * slash.
+ */
+const asList = (value, key) => {
+  if (value === undefined) return [...DEFAULT_CONFIG[key]];
+  const bad =
+    !Array.isArray(value) || value.some((entry) => typeof entry !== "string");
+  if (bad || (key === "scan" && value.length === 0))
+    throw new Error(
+      `${CONFIG_FILE}: \`${key}\` must be a${key === "scan" ? " non-empty" : "n"} array of strings.`
+    );
   return value;
 };
 
-const external = (value) => {
+const asExternal = (value) => {
   if (value === undefined) return new Map();
   if (value instanceof Map) return value;
   if (value && typeof value === "object") return new Map(Object.entries(value));
@@ -240,14 +263,22 @@ const external = (value) => {
  */
 export async function loadConfig(root) {
   const file = path.join(root, CONFIG_FILE);
-  if (!existsSync(file)) return { ...DEFAULT_CONFIG, configured: false };
+  // Fresh lists and a fresh Map either way, so a caller cannot reach in and edit
+  // the defaults every later call would read.
+  if (!existsSync(file))
+    return {
+      scan: [...DEFAULT_CONFIG.scan],
+      loose: [...DEFAULT_CONFIG.loose],
+      external: new Map(DEFAULT_CONFIG.external),
+      configured: false
+    };
   const loaded = (await import(pathToFileURL(file).href)).default;
   if (!loaded || typeof loaded !== "object")
     throw new Error(`${CONFIG_FILE}: must export a config object as default.`);
   return {
-    scan: list(loaded.scan, "scan"),
-    loose: list(loaded.loose, "loose"),
-    external: external(loaded.external),
+    scan: asList(loaded.scan, "scan"),
+    loose: asList(loaded.loose, "loose"),
+    external: asExternal(loaded.external),
     configured: true
   };
 }
@@ -298,8 +329,11 @@ export async function verifyReferences(root) {
   const files = collect(root, config);
   if (files.length === 0)
     throw new Error(
-      `nothing to check under ${root}. Either this is not a repository root, or ` +
-        `\`scan\` and \`loose\` in ${CONFIG_FILE} name no file that is there.`
+      `nothing to check under ${root}. ` +
+        (config.configured
+          ? `\`scan\` and \`loose\` in ${CONFIG_FILE} name no file that is there.`
+          : `There is no ${CONFIG_FILE} here, and the directories defaulted to are ` +
+            "not here either, so this is probably not the repository root.")
     );
 
   const rooted = rootedPattern(config.scan);

@@ -11,10 +11,15 @@
  * seeing a comment. Each one that names a measurement is a defect this had.
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { readFileSync } from "node:fs";
 import { verifyReferences } from "./references.mjs";
 
 const built = [];
@@ -134,6 +139,22 @@ describe("the comment lexer", () => {
     expect(found).toEqual([]);
   });
 
+  it("does not read an escaped slash in a regex as opening a block comment", async () => {
+    // The measurement: `/\/*$/` is in starter, and its `\/*` was read as opening
+    // a comment that ran to the next `*​/`, which put the code in between into a
+    // comment span. The reference below is in a string and must stay unread.
+    const found = await failures({
+      "src/a.ts": [
+        'const trailing = url.replace(/\\/*$/, "/");',
+        'const hint = "./gone.ts";',
+        "/** A real comment, and ./also-gone.ts in it. */",
+        ""
+      ].join("\n")
+    });
+
+    expect(refs(found)).toEqual(["./also-gone.ts"]);
+  });
+
   it("keeps `image/*` a value rather than the start of a block comment", async () => {
     const found = await failures({
       "src/a.ts": ['const kind = "image/*";', "// see ./gone.ts", ""].join("\n")
@@ -249,7 +270,26 @@ describe("the config", () => {
           "src/a.ts": "export const a = 1;\n"
         })
       )
-    ).rejects.toThrow(/`scan` must be an array of strings/);
+    ).rejects.toThrow(/`scan` must be a non-empty array of strings/);
+  });
+
+  it("refuses an empty `scan`, which would make the rooted class match anything", async () => {
+    // `scan` also names the prefixes a rooted reference may start with, so an
+    // empty one leaves an alternation that matches the empty string.
+    await expect(
+      verifyReferences(
+        repo({
+          "references.config.mjs": `export default { scan: [], loose: ["README.md"] };\n`,
+          "README.md": "see /gone.ts\n"
+        })
+      )
+    ).rejects.toThrow(/`scan` must be a non-empty array of strings/);
+  });
+
+  it("says which way it was configured when it has read nothing", async () => {
+    await expect(
+      verifyReferences(repo({ "docs/a.md": "nothing scanned here\n" }))
+    ).rejects.toThrow(/There is no references\.config\.mjs here/);
   });
 });
 
