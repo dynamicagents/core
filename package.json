@@ -1,6 +1,6 @@
 {
   "name": "@dynamicagents/core",
-  "version": "0.18.0",
+  "version": "0.19.0",
   "description": "Shared, mandatory foundation for Dynamic Agents on Cloudflare Workers: zero-trust A2A, a durable task host, task workflows, and step agents on @cloudflare/think.",
   "keywords": [
     "a2a",
@@ -75,10 +75,6 @@
     "./alarm": {
       "types": "./dist/alarm/index.d.ts",
       "import": "./dist/alarm/index.js"
-    },
-    "./job": {
-      "types": "./dist/job/index.d.ts",
-      "import": "./dist/job/index.js"
     },
     "./artifacts": {
       "types": "./dist/artifacts/index.d.ts",

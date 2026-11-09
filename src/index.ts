@@ -5,7 +5,7 @@
  * contract, the env slices, and the dependency-free helpers a plugin's tools
  * reach for. Everything else lives behind a subpath
  * (`/task`, `/workflow`, `/agent`, `/subagent`, `/model`, `/a2a`, `/worker`,
- * `/alarm`, `/job`, `/artifacts`, `/mcp`, `/testing`), so importing the contract does not pull in Think, and importing
+ * `/alarm`, `/artifacts`, `/mcp`, `/testing`), so importing the contract does not pull in Think, and importing
  * the test harness never reaches a production bundle.
  */
 

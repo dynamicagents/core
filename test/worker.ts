@@ -7,7 +7,10 @@ import {
   HITL_APPROVE_OPTION_ID,
   HITL_REJECT_OPTION_ID
 } from "@dynamicagents/g2a-protocol";
-import { installScheduler } from "../src/alarm/index.js";
+import {
+  installScheduler,
+  type LifecycleJobContext
+} from "../src/alarm/index.js";
 import type { TaskState } from "@a2a-js/sdk";
 import { Think, type ThinkModel } from "@cloudflare/think";
 import { tool, type ToolSet } from "ai";
@@ -1122,6 +1125,9 @@ const a2a = createA2AWorker<TestEnv>({
  * host does not" are two different installations of the same code, and only one
  * of them can be checked by reading it. {@link PlainScheduled} is the first,
  * {@link DelegatingScheduled} the second.
+ *
+ * Both take host jobs as well as schedules, through the same `marks`: a job
+ * carries its mark as the payload.
  */
 export class PlainScheduled extends DurableObject<Cloudflare.Env> {
   /** In-memory, so a spec can see *that* a callback ran, not only its effect. */
@@ -1134,6 +1140,10 @@ export class PlainScheduled extends DurableObject<Cloudflare.Env> {
       }
     }
   });
+
+  onJob({ job }: LifecycleJobContext): void {
+    this.marks.push((job.payload as { at: string }).at);
+  }
 }
 
 /** The shape the workspace object has: its own `alarm()`, delegating. */
@@ -1150,6 +1160,10 @@ export class DelegatingScheduled extends DurableObject<Cloudflare.Env> {
     },
     hostOwns: ["alarm"]
   });
+
+  onJob({ job }: LifecycleJobContext): void {
+    this.marks.push((job.payload as { at: string }).at);
+  }
 
   override async alarm(): Promise<void> {
     this.ownAlarms += 1;
