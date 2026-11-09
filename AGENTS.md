@@ -54,10 +54,11 @@ batch on `main` until someone decides to release them, and a bump is a deliberat
 rather than something that rides every merge.
 
 A version bump reaching `main` is what ships it: on the first green Test run for
-a commit carrying that version, `.github/workflows/release.yml` publishes it to
-npm over OIDC and only then cuts the tag. The bump is the decision to ship, and `prepack` and
-`prepublishOnly` are the last gate a tarball passes before it is immutable on the
-registry. The workflow comments hold the rest.
+a commit carrying that version, `.github/workflows/release.yml` calls the train's
+release protocol, which publishes it to npm over OIDC and only then cuts the tag.
+The bump is the decision to ship, and `prepack` and `prepublishOnly` are the last
+gate a tarball passes before it is immutable on the registry. The protocol is
+dev-agents' `.github/workflows/npm-release.yml`, and its comments hold the rest.
 
 The release gate reads the **registry**, not the commit log — it asks whether
 `name@version` is already published — so a merge of many commits and one bump
