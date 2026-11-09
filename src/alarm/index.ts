@@ -16,8 +16,11 @@
  * ({@link installLifecycle}) is a deadline under an id the host chooses, which
  * moves by pushing that id again. A **schedule** ({@link installScheduler}) adds
  * cron and interval wakes and callbacks typed by name, and cannot move. Both
- * bring retries and a hung-callback timeout, and keep a row per wake rather than
- * one shared blob. What they cost is named under "The sharp edges" below.
+ * bring retries, and keep a row per wake rather than one shared blob. Neither
+ * times a handler out: one that runs past its hung threshold is reported and
+ * left running, and every later job in that alarm waits behind it, so a handler
+ * bounds long work itself. What they cost is named under "The sharp edges"
+ * below.
  *
  * **Its own subpath, deliberately.** This is for a plain `DurableObject` — the
  * sandbox object in `@dynamicagents/plugins/sandbox` keeps its idle stop and
