@@ -117,10 +117,9 @@ function server(
         params: (body as { params?: unknown } | undefined)?.params,
         seen
       });
-      // The runtime follows a redirect unless it was told not to, and carries
-      // every header it was given — the credential among them — to wherever it
-      // points. Modelled here so the client's refusal to follow one is asserted
-      // on what reaches the other host rather than on the flag that asks for it.
+      // Follows a redirect carrying every header, credential included. That is
+      // harsher than workerd at this repo's compatibility date, deliberately: it is
+      // the runtime a consumer gets with the strip off, and core cannot tell which.
       const location = answered.headers.get("location");
       if (
         answered.status >= 300 &&
@@ -542,15 +541,6 @@ describe("mcpClient", () => {
     );
   });
 
-  /**
-   * One token, one host — and a redirect is the other way out of it.
-   *
-   * A Worker's `fetch` follows a redirect by default and carries every header it
-   * was given to the target, so a `307` would hand the credential to whatever
-   * host the server named, without passing back through `policyFetch`. The fake
-   * above follows one exactly as the runtime does, so this fails on the
-   * behaviour rather than on the option that buys it.
-   */
   it("never follows a redirect to another host", async () => {
     const seen = server({
       "tools/call": ({ id, seen: soFar }) =>

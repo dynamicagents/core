@@ -2,11 +2,10 @@
  * `@dynamicagents/core/testing/fixtures` — the **realm-neutral** slice of the
  * harness: fixed keys, origins, and task/message builders.
  *
- * Its own subpath because it is the one part a consumer's `vitest.config.ts`
- * needs, and that file runs in **Node**. The `/testing` barrel pulls in
- * `cloudflare:test` (DO helpers) and `vitest` (the VCR spec hooks), so importing
- * it from a config fails at load with `ERR_UNSUPPORTED_ESM_URL_SCHEME` before a
- * single test runs. Nothing here imports either, so it is safe from a config, a
+ * Its own subpath because a consumer's `vitest.config.ts` needs it and runs in
+ * **Node**. The `/testing` barrel is the workerd half, which the realm rule in
+ * `AGENTS.md` lets reach `cloudflare:test`, so a config cannot count on loading
+ * it. Nothing here imports anything realm-bound, so it is safe from a config, a
  * spec, or a plain Node script.
  *
  * Seeding the required secrets from these values is the intended use:

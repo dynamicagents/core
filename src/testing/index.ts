@@ -1,25 +1,12 @@
 /**
- * `@dynamicagents/core/testing` — the harness both predecessor agents grew, shipped so
- * a consumer does not grow it a third time.
- *
- * Never import this from runtime code. It is a separate subpath precisely so it
- * cannot reach a production bundle, and it pulls in `cloudflare:test`, which
- * does not exist in a deployed Worker.
+ * `@dynamicagents/core/testing`: the harness a consumer's specs share, so none
+ * grows its own. Never import it from runtime code; it imports `vitest`.
  *
  * **This barrel is the workerd half** — safe to import from a spec. The VCR
  * recorder needs `node:fs`, so it lives behind `@dynamicagents/core/testing/node`
  * and must not be re-exported here: pulling it into this graph would drag Node
  * builtins into every spec that wanted a fixture. `vcr-shared.ts` is the seam
  * both realms may load.
- *
- * Three things live here:
- *
- * - **VCR (spec side)** — `setupRecording()`, which names a cassette per test and
- *   talks to the Node-side recorder over the in-band control channel.
- * - **Fakes** — scripted streaming `LanguageModel`s, so a Think turn runs with no
- *   model call at all.
- * - **Fixtures** — Ed25519 keypairs and a gatekeeper-JWT signer, so the zero-trust
- *   path can be exercised end to end without a real gatekeeper.
  */
 
 export {
