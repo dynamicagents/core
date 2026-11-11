@@ -315,7 +315,7 @@ passing on 5 today is a margin nobody has measured.
 ## Working here
 
 ```bash
-npm run check     # peer ranges + comment paths + types:check + prettier + eslint + tsc x2 + build
+npm run check     # devkit copy + peer ranges + comment paths + types:check + prettier + eslint + tsc x2 + build
 npm test          # vitest, inside real workerd
 npm run keys      # generate an Ed25519 A2A_SIGNING_KEY
 npm run types     # regenerate worker-configuration.d.ts, then commit it
@@ -326,8 +326,9 @@ npm run verify:references   # every path a comment names is there
 `tsc` and to eslint's type-aware pass, so a fresh clone must be able to
 typecheck without running a script first. `npm run types:check` — part of
 `check` — fails when the committed copy drifts from `wrangler.jsonc` or the
-installed workerd, and `scripts/verify-runtime-types.mjs` fails when it was
-regenerated without `--include-env=false` and so carries a global `Env`.
+installed workerd, and the devkit's runtime-types checker beside it fails when
+the file was regenerated without `--include-env=false` and so carries a global
+`Env`.
 
 Specs live next to the code they test (`src/**/*.spec.ts`) and run inside
 workerd, because a Think agent drives `ctx.storage.sql`, alarms and facets, none
@@ -368,12 +369,13 @@ changes a decision. Not what changed, not when, not what a previous version said
   many there are.
 - **Cross-file references name a real path**, and a path in a comment is
   checkable — so `check` checks it, through `npm run verify:references`. Both
-  classes: a relative one and one from the repository root. The checker is
-  `scripts/references.mjs`, whose header is the home of what it reads and why
-  only comments count; what this package scans, and the paths that are
-  deliberately somebody else's, are in `references.config.mjs`. This package
-  publishes it as the `da-verify-references` bin, so the consumers run this
-  checker rather than a copy of it.
+  classes: a relative one and one from the repository root. The checker is the
+  devkit's, vendored into `.devkit/` from dev-agents' `packages/devkit`, whose
+  reference engine is the home of what it reads and why only comments count;
+  what this package scans, and the paths that are deliberately somebody else's,
+  are in the `references` section of `devkit.config.mjs`. Every repository of
+  the train runs that one copy, so a fix to it is typed once; `npm run
+devkit:verify`, in `check`, is what stops a fix being typed into this copy.
 
 If a comment is longer than the code it explains, ask what decision it is
 protecting. Usually one paragraph of that is doing the work.
