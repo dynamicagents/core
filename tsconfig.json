@@ -24,8 +24,9 @@
     // their build, where the mistake is invisible. Without it there is no global
     // `Env` to reach for and the mistake fails here — the property the old
     // `@cloudflare/workers-types` entry got by leaving this file out entirely.
-    // `npm run types:check` is what keeps the flag honest; see
-    // `scripts/verify-runtime-types.mjs`.
+    // `npm run types:check` is what keeps the flag honest: it runs the devkit's
+    // runtime-types checker after `wrangler types --check`, which is indifferent
+    // to the flag.
     //
     // The one permitted exception is the *namespaced* `Cloudflare.Env`, which is
     // not the same thing: the runtime types declare it as an empty

@@ -92,9 +92,10 @@ export default defineConfig({
       {
         test: {
           name: "node",
-          // The build scripts are covered here too: they are Node, and
-          // `scripts/references.mjs` ships in this package's `bin`, so it is the
-          // one script a consumer runs rather than reads.
+          // The Node-realm specs under `scripts/` are covered here too, which
+          // is where what the published tarball carries is asserted. The
+          // checkers themselves are `.devkit/`, and their specs belong to the
+          // source of that copy rather than to this package.
           include: ["src/**/*.node.spec.ts", "scripts/**/*.node.spec.mjs"]
         }
       }

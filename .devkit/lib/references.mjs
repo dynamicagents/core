@@ -6,10 +6,11 @@
  * the next reader spends a minute proving the note is stale rather than reading
  * it. A path in a comment is checkable, so this checks it.
  *
- * This module is the engine. `scripts/verify-references.mjs` is the bin that
- * prints its findings, published as `da-verify-references` so a consumer runs
- * the same checker rather than keeping a copy of it. What varies by repository
- * is the config, not the rule: see `loadConfig` for the file and its defaults.
+ * This module is the engine, and `../verify-references.mjs` is the script that
+ * prints its findings. Both are vendored from dev-agents' `packages/devkit`, so
+ * every repository of the train runs this code rather than a copy of it that
+ * has drifted. What varies by repository is the config, not the rule: see
+ * `loadConfig` for the file and its defaults.
  *
  * **Two classes of reference, because each is blind where the other sees.** A
  * relative one, spelled the way an import is, is what a rename inside a
@@ -30,10 +31,12 @@
  */
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { CONFIG_FILE, loadDevkitConfig, section } from "./config.mjs";
 
-/** The file a repository configures this in, read from the directory it runs in. */
-export const CONFIG_FILE = "references.config.mjs";
+export { CONFIG_FILE };
+
+/** The section of that file this checker reads. */
+const SECTION = "references";
 
 /**
  * What a repository gets when it writes no config.
@@ -290,7 +293,7 @@ const asList = (value, key) => {
     !Array.isArray(value) || value.some((entry) => typeof entry !== "string");
   if (bad || (key === "scan" && value.length === 0))
     throw new Error(
-      `${CONFIG_FILE}: \`${key}\` must be a${key === "scan" ? " non-empty" : "n"} array of strings.`
+      `${CONFIG_FILE}: \`${SECTION}.${key}\` must be a${key === "scan" ? " non-empty" : "n"} array of strings.`
     );
   return value;
 };
@@ -300,37 +303,34 @@ const asExternal = (value) => {
   if (value instanceof Map) return value;
   if (value && typeof value === "object") return new Map(Object.entries(value));
   throw new Error(
-    `${CONFIG_FILE}: \`external\` must be a Map, or an object of path to reason.`
+    `${CONFIG_FILE}: \`${SECTION}.external\` must be a Map, or an object of ` +
+      `path to reason.`
   );
 };
 
 /**
- * The config of the repository rooted at `root`, or the defaults.
+ * This checker's section of the repository's config, or the defaults.
  *
- * It is a module rather than JSON because every entry in it carries prose: why a
- * root file is scanned, and for each allowed path, why it is not this
- * repository's. An allowlist without reasons becomes a silencer, and JSON has
- * nowhere to write one. It sits at the root, which is also the one place this
- * checker does not read, so a config can neither report itself nor excuse itself.
+ * `configured` is read by the caller rather than by anything here, and it is
+ * the difference between a repository that said nothing about references and a
+ * directory that is not a repository root at all.
  */
 export async function loadConfig(root) {
-  const file = path.join(root, CONFIG_FILE);
+  const config = await loadDevkitConfig(root);
+  const mine = section(config, SECTION);
   // Fresh lists and a fresh Map either way, so a caller cannot reach in and edit
   // the defaults every later call would read.
-  if (!existsSync(file))
+  if (mine === undefined)
     return {
       scan: [...DEFAULT_CONFIG.scan],
       loose: [...DEFAULT_CONFIG.loose],
       external: new Map(DEFAULT_CONFIG.external),
-      configured: false
+      configured: config.configured
     };
-  const loaded = (await import(pathToFileURL(file).href)).default;
-  if (!loaded || typeof loaded !== "object")
-    throw new Error(`${CONFIG_FILE}: must export a config object as default.`);
   return {
-    scan: asList(loaded.scan, "scan"),
-    loose: asList(loaded.loose, "loose"),
-    external: asExternal(loaded.external),
+    scan: asList(mine.scan, "scan"),
+    loose: asList(mine.loose, "loose"),
+    external: asExternal(mine.external),
     configured: true
   };
 }
@@ -383,7 +383,8 @@ export async function verifyReferences(root) {
     throw new Error(
       `nothing to check under ${root}. ` +
         (config.configured
-          ? `\`scan\` and \`loose\` in ${CONFIG_FILE} name no file that is there.`
+          ? `\`${SECTION}.scan\` and \`${SECTION}.loose\` in ${CONFIG_FILE} ` +
+            "name no file that is there."
           : `There is no ${CONFIG_FILE} here, and the directories defaulted to are ` +
             "not here either, so this is probably not the repository root.")
     );

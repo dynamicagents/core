@@ -27,15 +27,12 @@
   "type": "module",
   "sideEffects": false,
   "bin": {
-    "da-keys": "scripts/generate-keys.mjs",
-    "da-verify-references": "scripts/verify-references.mjs"
+    "da-keys": "scripts/generate-keys.mjs"
   },
   "files": [
     "dist",
     "eslint-rules",
     "scripts/generate-keys.mjs",
-    "scripts/references.mjs",
-    "scripts/verify-references.mjs",
     "README.md",
     "LICENSE"
   ],
@@ -107,15 +104,16 @@
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "keys": "node scripts/generate-keys.mjs",
     "types": "wrangler types --include-env=false",
-    "types:check": "wrangler types --include-env=false --check && node scripts/verify-runtime-types.mjs",
+    "types:check": "wrangler types --include-env=false --check && node .devkit/verify-runtime-types.mjs",
     "format": "prettier --write .",
     "lint": "eslint .",
-    "check": "npm run verify:peer-ranges && npm run verify:references && npm run types:check && prettier --check . && eslint . && tsc && tsc -p test/tsconfig.json && npm run build",
+    "check": "npm run devkit:verify && npm run verify:peer-ranges && npm run verify:references && npm run types:check && prettier --check . && eslint . && tsc && tsc -p test/tsconfig.json && npm run build",
     "test": "vitest run",
     "test:watch": "vitest",
-    "verify:exports": "node scripts/verify-exports.mjs",
-    "verify:peer-ranges": "node scripts/verify-peer-ranges.mjs",
-    "verify:references": "node scripts/verify-references.mjs",
+    "devkit:verify": "node .devkit/verify-devkit.mjs",
+    "verify:exports": "node .devkit/verify-exports.mjs",
+    "verify:peer-ranges": "node .devkit/verify-peer-ranges.mjs",
+    "verify:references": "node .devkit/verify-references.mjs",
     "prepack": "npm run build && npm run verify:exports",
     "prepublishOnly": "npm run check && npm test && npm run verify:exports",
     "prepare": "husky || true && npm run build"
