@@ -94,8 +94,8 @@ export default defineConfig({
           name: "node",
           // The Node-realm specs under `scripts/` are covered here too, which
           // is where what the published tarball carries is asserted. The
-          // checkers themselves are `.devkit/`, and their specs belong to the
-          // source of that copy rather than to this package.
+          // checkers themselves are the `@dynamicagents/devkit` devDependency,
+          // and their specs live in that package.
           include: ["src/**/*.node.spec.ts", "scripts/**/*.node.spec.mjs"]
         }
       }
