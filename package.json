@@ -27,15 +27,12 @@
   "type": "module",
   "sideEffects": false,
   "bin": {
-    "da-keys": "scripts/generate-keys.mjs",
-    "da-verify-references": "scripts/verify-references.mjs"
+    "da-keys": "scripts/generate-keys.mjs"
   },
   "files": [
     "dist",
     "eslint-rules",
     "scripts/generate-keys.mjs",
-    "scripts/references.mjs",
-    "scripts/verify-references.mjs",
     "README.md",
     "LICENSE"
   ],
@@ -107,15 +104,15 @@
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "keys": "node scripts/generate-keys.mjs",
     "types": "wrangler types --include-env=false",
-    "types:check": "wrangler types --include-env=false --check && node scripts/verify-runtime-types.mjs",
+    "types:check": "wrangler types --include-env=false --check && devkit-verify-runtime-types",
     "format": "prettier --write .",
     "lint": "eslint .",
     "check": "npm run verify:peer-ranges && npm run verify:references && npm run types:check && prettier --check . && eslint . && tsc && tsc -p test/tsconfig.json && npm run build",
     "test": "vitest run",
     "test:watch": "vitest",
-    "verify:exports": "node scripts/verify-exports.mjs",
-    "verify:peer-ranges": "node scripts/verify-peer-ranges.mjs",
-    "verify:references": "node scripts/verify-references.mjs",
+    "verify:exports": "devkit-verify-exports",
+    "verify:peer-ranges": "devkit-verify-peer-ranges",
+    "verify:references": "devkit-verify-references",
     "prepack": "npm run build && npm run verify:exports",
     "prepublishOnly": "npm run check && npm test && npm run verify:exports",
     "prepare": "husky || true && npm run build"
@@ -157,6 +154,7 @@
     "@cloudflare/computer": "^0.8.0",
     "@cloudflare/think": "^0.23.0",
     "@cloudflare/vitest-plugin": "^1.4.4",
+    "@dynamicagents/devkit": "^0.1.0",
     "@modelcontextprotocol/client": "^2.0.0",
     "@types/node": "^26.5.1",
     "agents": "^0.33.0",
@@ -166,7 +164,6 @@
     "husky": "^9.1.7",
     "just-bash": "^3.0.1",
     "prettier": "^3.9.6",
-    "semver": "^7.8.5",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.70.0",
     "vitest": "^4.1.11",
