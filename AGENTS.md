@@ -155,7 +155,7 @@ publish train (core → plugins → starter), so one repo is always briefly behi
 ## The line core does not cross
 
 **Core owns the task around Think. The words a tenant speaks in and the numbers it
-runs to are the tenant's, and core defaults neither.**
+runs to are the tenant's, and core ships no default for either.**
 
 Think runs the turn — the loop, recovery, compaction, agent tools, actions. Core
 wraps it in a task, split across these roles, each the only owner of its state:

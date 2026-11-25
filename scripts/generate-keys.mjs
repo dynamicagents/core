@@ -27,9 +27,11 @@ const kid =
 
 // The algorithm is `@dynamicagents/g2a-protocol`'s `A2A_JWS_ALG` rather than a
 // literal, because that package owns the wire's one signature algorithm and a
-// key generated for any other is useless. This is a bin shipped in `files`, and
-// it may import that package for the same reason it may import `jose`: both are
-// plain dependencies of this one, so an installed tarball resolves them.
+// key generated for any other is useless. This bin may import it for the same
+// reason it may import `jose`: both are plain dependencies, so a consumer's
+// install carries them where this file resolves them. Only a plain dependency
+// is safe here, and nothing holds that but this line: `verify:exports` reads
+// the `exports` map and not `bin`.
 //
 // `extractable` is required to export the private half at all. Only the
 // private half is printed: the public one is derived from it at runtime and
