@@ -16,6 +16,7 @@
  * every gatekeeper has re-fetched.
  */
 import { generateKeyPair, exportJWK } from "jose";
+import { A2A_JWS_ALG } from "@dynamicagents/g2a-protocol";
 
 const args = process.argv.slice(2);
 const kidFlag = args.indexOf("--kid");
@@ -24,10 +25,18 @@ const kid =
     ? args[kidFlag + 1]
     : `a2a-${new Date().toISOString().slice(0, 10)}`;
 
+// The algorithm is `@dynamicagents/g2a-protocol`'s `A2A_JWS_ALG` rather than a
+// literal, because that package owns the wire's one signature algorithm and a
+// key generated for any other is useless. This bin may import it for the same
+// reason it may import `jose`: both are plain dependencies, so a consumer's
+// install carries them where this file resolves them. Only a plain dependency
+// is safe here, and nothing holds that but this line: `verify:exports` reads
+// the `exports` map and not `bin`.
+//
 // `extractable` is required to export the private half at all. Only the
 // private half is printed: the public one is derived from it at runtime and
 // served at the JWKS route, so there is nothing to copy anywhere.
-const { privateKey } = await generateKeyPair("EdDSA", {
+const { privateKey } = await generateKeyPair(A2A_JWS_ALG, {
   crv: "Ed25519",
   extractable: true
 });

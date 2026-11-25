@@ -20,7 +20,7 @@
  */
 import { type JWK } from "jose";
 import { Role, type Message, type Task, type TaskState } from "@a2a-js/sdk";
-import { jwksUrl } from "@dynamicagents/g2a-protocol";
+import { A2A_JWS_ALG, jwksUrl } from "@dynamicagents/g2a-protocol";
 
 /** The gatekeeper origin used in all tests. Must match vitest.config.ts and the MockAgent setup. */
 export const GATEKEEPER_ORIGIN = "https://gatekeeper.test";
@@ -123,7 +123,7 @@ export function gatekeeperPublicJwks(
   gatekeeper: TestGatekeeper = TEST_GATEKEEPER
 ): string {
   const { d: _d, ...pub } = gatekeeper.privateJwk;
-  return JSON.stringify({ keys: [{ ...pub, use: "sig", alg: "EdDSA" }] });
+  return JSON.stringify({ keys: [{ ...pub, use: "sig", alg: A2A_JWS_ALG }] });
 }
 
 /**

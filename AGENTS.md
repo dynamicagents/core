@@ -10,6 +10,15 @@ Because this is a **published npm package**, most mistakes are invisible in this
 repo and only fail at a consumer's build. The constraints below exist for that
 reason.
 
+**Read this with the workspace's `AGENTS.md`.** This file is what is specific to
+core. The rules that span the train live one level up, in
+[`dev-agents`](https://github.com/dynamicagents/dev-agents/blob/main/AGENTS.md),
+the workspace these repositories are submodules of: where a change goes, how a
+release reaches npm, how a pull request and an issue are handled, and the house
+rules for prose and comments. Consult it as the general reference rather than
+assuming this file is all of it, because a session started inside this repository
+may never be shown it: each submodule is its own repository root.
+
 ---
 
 ## The zero-trust constraints — non-negotiable
@@ -154,7 +163,8 @@ publish train (core → plugins → starter), so one repo is always briefly behi
 
 ## The line core does not cross
 
-**Core owns the task around Think, and ships no prompt copy and no numbers.**
+**Core owns the task around Think. The words a tenant speaks in and the numbers it
+runs to are the tenant's, and core ships no default for either.**
 
 Think runs the turn — the loop, recovery, compaction, agent tools, actions. Core
 wraps it in a task, split across these roles, each the only owner of its state:
@@ -180,8 +190,17 @@ still calls back `completed`.
 
 What is genuinely per-agent is explicit and mandatory:
 
-- **The words.** `TaskHost.copy` (the failed, empty and expired messages), the soul,
-  every block the model reads. Nothing has a default.
+- **The words.** `TaskHost.copy` (the failed and empty messages), the soul, every
+  block the model reads. Nothing there has a default.
+
+  The text core's own tools carry is core's, not a tenant's. The notice the model
+  reads when nobody answered a request before it expired is `expiredRequestText`
+  in `src/agent/tools.ts`, which no barrel re-exports and no tenant can replace;
+  it sits beside the tool descriptions in that file rather than in
+  `TaskHost.copy` because it reports what a core tool did rather than what the
+  task has to say. Giving it a seam adds a required member to an interface every
+  consumer implements, so it is a decision of its own.
+
 - **The numbers.** The model, compaction thresholds, an output ceiling. Core sets no
   budget: the gatekeeper cancels a task that has not settled within the hour, so a
   ceiling below that is arbitrary, and one above it is never reached.

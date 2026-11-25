@@ -72,7 +72,7 @@ export async function makeGatekeeperToken(
   options: GatekeeperTokenOptions = {}
 ): Promise<string> {
   const gatekeeper = options.gatekeeper ?? TEST_GATEKEEPER;
-  const privateKey = await importJWK(gatekeeper.privateJwk, "EdDSA");
+  const privateKey = await importJWK(gatekeeper.privateJwk, A2A_JWS_ALG);
   const tenant = options.tenant ?? TEST_TENANT;
   return (
     new SignJWT({
