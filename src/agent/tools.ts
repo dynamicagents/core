@@ -17,7 +17,7 @@ const nonBlank = (label: string) =>
   z
     .string()
     .min(1)
-    .regex(/\S/, { message: `${label} must not be blank` });
+    .regex(/\S/, { error: `${label} must not be blank` });
 
 // --- ask_user ----------------------------------------------------------------
 
