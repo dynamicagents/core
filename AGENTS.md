@@ -324,8 +324,9 @@ cached module's path with that file's contents and sending the whole snapshot as
 one WebSocket message with no size cap, so the message grows past workerd's
 32 MiB frame limit as a project's module graph does. That needs no setup file, it
 scales with the size of the graph rather than with the count of modules, and it
-predicts that capping or disabling the inlined snapshot removes the crash, which
-is one flag to try against this suite.
+names what lifts the crash short of staying on 4: capping what the snapshot
+inlines and leaving the rest to vitest's one-at-a-time fetch, which the reporter
+measured against a suite of their own.
 
 cloudflare/workers-sdk#16331 reports the same crash reason under a different
 trigger, a `setupFiles` entry importing `cloudflare:test` with one worker running
