@@ -318,16 +318,29 @@ with them, uncounted, and workerd logs the 1009 reason above. The eight are
 not others, is still not established**, though every one of them drives a
 Durable Object through many round trips, which is the shape the reason suggests.
 
-cloudflare/workers-sdk#16331 is the upstream bug and reports the same crash
-reason, but its trigger is a `setupFiles` entry importing `cloudflare:test` with
-one worker running several files — this suite has no setup file — and its
-reporter rules out module count and load time on their own. So the suite is the
-measurement and the issue is not: **check it when bumping**, and re-run rather
-than take a closed issue as proof this is fixed. When it is, core, plugins,
-starter and the toolchain `create-dynamicagents` writes into a new project move
-to vitest 5 in one round and the ceiling lifts with them — together, because
-nothing here can say which side of it a given suite sits on, and plugins
-passing on 5 today is a margin nobody has measured.
+cloudflare/workers-sdk#16349 is the upstream bug whose mechanism matches this
+measurement: the plugin answers vitest 5's `fetchWarmModules` by replacing every
+cached module's path with that file's contents and sending the whole snapshot as
+one WebSocket message with no size cap, so the message grows past workerd's
+32 MiB frame limit as a project's module graph does. That needs no setup file, it
+scales with the size of the graph rather than with the count of modules, and it
+names what lifts the crash short of staying on 4: capping what the snapshot
+inlines and leaving the rest to vitest's one-at-a-time fetch, which the reporter
+measured against a suite of their own.
+
+cloudflare/workers-sdk#16331 reports the same crash reason under a different
+trigger, a `setupFiles` entry importing `cloudflare:test` with one worker running
+several files, and that trigger is not this suite's: there is no setup file here,
+and its reporter rules out module count and load time on their own.
+cloudflare/workers-sdk#16523 was the proposed fix, chunking the oversized message
+under the limit, and it was closed unmerged, so nothing upstream has landed. The
+suite is still the measurement rather than any of those: **check
+cloudflare/workers-sdk#16349 when bumping**, and re-run rather than take a closed
+issue as proof this is fixed. When it is, core, plugins, starter and the
+toolchain `create-dynamicagents` writes into a new project move to vitest 5 in
+one round and the ceiling lifts with them — together, because nothing here can
+say which side of it a given suite sits on, and plugins passing on 5 today is a
+margin nobody has measured.
 
 ---
 
