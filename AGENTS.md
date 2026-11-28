@@ -322,9 +322,10 @@ Durable Object through many round trips, which is the shape the reason suggests.
 
 **The plugin's peer is not what holds this**, so a widened one is not permission:
 `@cloudflare/vitest-plugin` already admits both majors, and the crash above is
-the whole of the ceiling. Read the totals rather than the exit code when you
-re-run it, because a file that reports nothing is absent from the count instead
-of failing in it, and a run read by status alone looks green.
+the whole of the ceiling. Read the totals and not only the exit code when you
+re-run it. The exit code does go red, and that is the trap rather than the
+safeguard: it says the run failed without saying how much of the suite never
+reported, so the tests lost to this are invisible to anything but the counts.
 
 cloudflare/workers-sdk#16331 is the upstream bug and reports the same crash
 reason, but its trigger is a `setupFiles` entry importing `cloudflare:test` with
