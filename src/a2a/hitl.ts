@@ -176,7 +176,7 @@ const answerSchema = z
         (bytes, a) => bytes + (a.text ? encoder.encode(a.text).byteLength : 0),
         0
       ) <= MAX_MESSAGE_TEXT_BYTES,
-    { message: "answer text exceeds the size limit" }
+    { error: "answer text exceeds the size limit" }
   );
 
 const timeoutSchema = z.object({

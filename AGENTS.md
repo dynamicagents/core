@@ -307,16 +307,25 @@ too large`. A file that dies that way leaves the run red but its tests absent
 from the count rather than failed, so what is lost shows up in the totals and
 nowhere else.
 
-**It takes this suite, measured.** On vitest 5.1.0, against the same tree that
-passes 41 files and 685 tests on 4.1.12, the run reports 32 files passed of 41
-and 504 tests passed of 505: eight files lose their worker and take 180 tests
-with them, uncounted, and workerd logs the 1009 reason above. The eight are
+**It takes this suite, measured.** On vitest 5.1.2 with
+`@cloudflare/vitest-plugin` 1.9.2, against the same tree that passes 40 files and
+612 tests on 4.1.12, the run reports 31 files passed and 1 failed of 40, and 438
+passed and 1 failed of the 439 tests it counts at all: eight files report no
+assertion whatever, taking 173 tests with them uncounted, and workerd logs the
+1009 reason above once for each. The eight are
 `src/a2a/cross-gatekeeper.spec.ts`, `src/agent/step-jobs.spec.ts`,
 `src/alarm/index.spec.ts`, `src/artifacts/boot.spec.ts`,
 `src/artifacts/do.spec.ts`, `src/artifacts/store.spec.ts`,
 `src/task/tasks.spec.ts` and `src/workflow/workflow.spec.ts`. **Why those, and
 not others, is still not established**, though every one of them drives a
 Durable Object through many round trips, which is the shape the reason suggests.
+
+**The plugin's peer is not what holds this**, so a widened one is not permission:
+`@cloudflare/vitest-plugin` already admits both majors, and the crash above is
+the whole of the ceiling. Read the totals and not only the exit code when you
+re-run it. The exit code does go red, and that is the trap rather than the
+safeguard: it says the run failed without saying how much of the suite never
+reported, so the tests lost to this are invisible to anything but the counts.
 
 cloudflare/workers-sdk#16331 is the upstream bug and reports the same crash
 reason, but its trigger is a `setupFiles` entry importing `cloudflare:test` with
